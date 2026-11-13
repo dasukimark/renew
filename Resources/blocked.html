@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blocked · Renew</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --ink: #f2f3f5;
+    --muted: #9aa1ad;
+    --accent: #ff9e59;
+    --line: #262a33;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f5f2; --panel: #ffffff; --ink: #16181d; --muted: #5d6470; --accent: #d9661f; --line: #e4e2dc; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 17px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  main {
+    width: min(560px, 100%);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 40px 40px 32px;
+    text-align: center;
+  }
+  .mark {
+    width: 64px; height: 64px; margin: 0 auto 20px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 30px;
+  }
+  h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; word-break: break-word; }
+  p { margin: 0; color: var(--muted); }
+  .time {
+    margin: 28px 0 8px;
+    font: 600 44px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .label { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .rule {
+    margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-size: 13px; color: var(--muted); word-break: break-all;
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark" aria-hidden="true">✋</div>
+  <h1>{{BLOCKED_HOST}} is blocked</h1>
+  <p id="message">This one can wait. Back to what you were doing.</p>
+  <div class="time" id="time">--:--</div>
+  <div class="label" id="time-label">left in this focus session</div>
+  <div class="rule">Matched rule <code>{{RULE}}</code></div>
+</main>
+<script>
+  const endsAt = {{ENDS_AT_MS}};
+  const messages = [
+    "This one can wait. Back to what you were doing.",
+    "You decided this earlier, for a good reason.",
+    "Close the tab and pick up where you left off.",
+    "The feed will still be there later. This time won't.",
+  ];
+  document.getElementById("message").textContent = messages[Math.floor(Math.random() * messages.length)];
+  const timeEl = document.getElementById("time");
+  const labelEl = document.getElementById("time-label");
+  function pad(n) { return String(n).padStart(2, "0"); }
+  function tick() {
+    if (!endsAt) { timeEl.textContent = ""; labelEl.textContent = ""; return; }
+    const s = Math.max(0, Math.round((endsAt - Date.now()) / 1000));
+    if (s === 0) { timeEl.textContent = "Done"; labelEl.textContent = "focus session finished"; return; }
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    timeEl.textContent = h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+.build/
+build/
+*.mobileconfig
+.DS_Store
+.swiftpm/
