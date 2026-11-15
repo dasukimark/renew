@@ -142,6 +142,37 @@ final class AppModel: ObservableObject {
         send(Request(cmd: .add, rules: rules), completion: completion)
     }
 
+    // MARK: alerts and uninstall request
+
+    var alertURL: String? { status?.alertURL }
+
+    /// The pending uninstall request, if it hasn't expired.
+    var uninstallRequest: UninstallStatus? {
+        guard let u = status?.uninstall, u.expiresAt > now else { return nil }
+        return u
+    }
+
+    var uninstallUnlocked: Bool {
+        guard let u = uninstallRequest else { return false }
+        return u.unlocksAt <= now
+    }
+
+    func setAlerts(_ url: String?, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setAlerts, alertURL: url), completion: completion)
+    }
+
+    func testAlert() {
+        send(Request(cmd: .testAlert))
+    }
+
+    func requestUninstall() {
+        send(Request(cmd: .requestUninstall))
+    }
+
+    func cancelUninstall() {
+        send(Request(cmd: .cancelUninstall))
+    }
+
     /// Sync status right away (used after the window opens).
     var requestSync: (() -> Void)?
 

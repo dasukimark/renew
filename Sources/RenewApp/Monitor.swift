@@ -32,6 +32,11 @@ final class Monitor: NSObject {
     private let localSession: SessionInfo?
     private var server: BlockPageServer!
 
+    /// `CLOCK_MONOTONIC` time the session ends. Activity is judged by this,
+    /// not `session.endsAt`, so changing the date between syncs with renewd
+    /// doesn't pause enforcement.
+    private var deadline: UInt64?
+
     private(set) var session: SessionInfo? {
         didSet {
             guard session != oldValue else { return }
@@ -46,6 +51,24 @@ final class Monitor: NSObject {
     private var lastSweep = Date.distantPast
     private var lastUnsupportedOverlay = Date.distantPast
     private var closeCooldown: [pid_t: Date] = [:]
+    /// Engine check results per process, so each app bundle is inspected once.
+    private var engineCache: [pid_t: BrowserEngine?] = [:]
+    /// Built-in browsers inside other apps (T3 Code, Claude, Codex…).
+    private let embeddedQueue = DispatchQueue(label: "agent.embedded-web", qos: .userInitiated)
+    private var embeddedBusy = false
+    /// Apps already asked to expose their Accessibility tree this session.
+    private var primed: Set<pid_t> = []
+    /// Apps hidden for showing a blocked page, and the grace periods given to
+    /// close it.
+    private struct EmbeddedBlock {
+        var hiddenAt: Date
+        var graceUntil: Date?
+        /// Scans in a row that read the app but didn't find the page.
+        var misses = 0
+    }
+    private var embeddedBlocks: [pid_t: EmbeddedBlock] = [:]
+    private let notice = NoticeController()
+    static let embeddedGrace: TimeInterval = 15
     /// Consecutive failed reads per browser. A browser that can't be read for
     /// this many checks in a row (≈10 s in front, ≈40 s in the background)
     /// counts as unwatchable instead of silently passing.
@@ -64,7 +87,7 @@ final class Monitor: NSObject {
         server.start()
         log("Renew monitor started; block page on 127.0.0.1:\(port)\(localSession != nil ? " (local test session)" : "")")
 
-        session = localSession ?? SessionCache.load()
+        setSession(localSession ?? SessionCache.load())
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appLaunched(_:)),
@@ -72,6 +95,7 @@ final class Monitor: NSObject {
 
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in self?.sync() }
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.check() }
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.checkEmbeddedWeb() }
         sync()
     }
 
@@ -81,7 +105,7 @@ final class Monitor: NSObject {
         // Forget permission problems for browsers that are no longer running, or
         // once the session is over. They're re-detected if the browser comes back.
         let runningIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
-        let inSession = session?.isActive() == true
+        let inSession = sessionLive
         automationProblems = automationProblems.filter { inSession && runningIDs.contains($0.key) }
         if !inSession { readFailures.removeAll() }
 
@@ -91,9 +115,23 @@ final class Monitor: NSObject {
         return AgentReport(permissionsOK: problems.isEmpty, problem: problems.isEmpty ? nil : problems.joined(separator: "; "))
     }
 
+    /// Sets the session; it ends `endsAt - serverTime` from now on the
+    /// monotonic clock.
+    private func setSession(_ s: SessionInfo?, serverTime: Date = Date()) {
+        session = s
+        deadline = s.map {
+            ClockReading.monoNow() + UInt64(max(0, $0.endsAt.timeIntervalSince(serverTime)) * 1e9)
+        }
+    }
+
+    private var sessionLive: Bool {
+        guard session != nil, let d = deadline else { return false }
+        return ClockReading.monoNow() < d
+    }
+
     func sync() {
         guard localSession == nil else {
-            if let s = session, !s.isActive() { session = nil }
+            if session != nil, !sessionLive { setSession(nil) }
             let local = Status(session: session, serverTime: Date(), agents: [])
             onStatus?(local)
             return
@@ -101,11 +139,11 @@ final class Monitor: NSObject {
         link.report(currentReport()) { [weak self] status in
             guard let self else { return }
             if let status {
-                self.session = status.session
+                self.setSession(status.session, serverTime: status.serverTime)
                 SessionCache.save(status.session)
-            } else if let s = self.session, !s.isActive() {
+            } else if self.session != nil, !self.sessionLive {
                 // renewd unreachable: keep enforcing the last known session until it ends.
-                self.session = nil
+                self.setSession(nil)
             }
             self.onStatus?(status)
         }
@@ -114,12 +152,16 @@ final class Monitor: NSObject {
     // MARK: monitoring
 
     private func check() {
-        guard let s = session else { return }
-        guard s.isActive() else { session = nil; return }
+        guard session != nil else { return }
+        guard sessionLive else { setSession(nil); return }
         guard !busy else { return }
 
         let ws = NSWorkspace.shared
         let running = ws.runningApplications
+        if engineCache.count > 64 {
+            let alive = Set(running.map(\.processIdentifier))
+            engineCache = engineCache.filter { alive.contains($0.key) }
+        }
         for app in running where isUnsupportedBrowserApp(app) {
             quitUnsupported(app)
         }
@@ -258,28 +300,169 @@ final class Monitor: NSObject {
 
     private func quitUnsupported(_ app: NSRunningApplication) {
         let name = app.localizedName ?? app.bundleIdentifier ?? "That browser"
-        log("quitting unsupported browser \(app.bundleIdentifier ?? "?")")
+        let engine = engineCache[app.processIdentifier] ?? nil
+        log("quitting unsupported browser \(app.bundleIdentifier ?? "?")\(engine.map { " (built on \($0.rawValue))" } ?? "")")
         app.forceTerminate()
         let now = Date()
         guard now.timeIntervalSince(lastUnsupportedOverlay) > 3 else { return }
         lastUnsupportedOverlay = now
+        let why = engine.map { "\(name) looks like a browser built on \($0.rawValue). " } ?? ""
         overlay.show(title: "\(name) isn't allowed during a focus session",
-                     detail: "Renew can only watch Safari, Chrome, Edge, Brave, Arc, Vivaldi and Firefox, so other browsers are closed until the session ends.",
+                     detail: why + "Renew can only watch Safari, Chrome, Edge, Brave, Arc, Vivaldi and Firefox, so other browsers are closed until the session ends.",
+                     endsAt: session?.endsAt)
+    }
+
+    // MARK: built-in browsers in other apps
+
+    /// Apps whose built-in browser Renew checks: everything with a Dock icon
+    /// except browsers it already handles (and itself).
+    private func hasEmbeddedWeb(_ app: NSRunningApplication) -> Bool {
+        !app.isTerminated && app.processIdentifier != getpid() && app.activationPolicy == .regular
+            && BrowserCatalog.kind(of: app.bundleIdentifier) == nil
+    }
+
+    /// Electron needs a few seconds to build its Accessibility tree, so ask
+    /// every candidate app up front rather than when it comes to the front.
+    private func primeEmbeddedWeb() {
+        guard AXIsProcessTrusted() else { return }
+        for app in NSWorkspace.shared.runningApplications where hasEmbeddedWeb(app) && !primed.contains(app.processIdentifier) {
+            primed.insert(app.processIdentifier)
+            let pid = app.processIdentifier
+            embeddedQueue.async { EmbeddedWebReader.prime(pid: pid) }
+        }
+    }
+
+    /// During a session, checks the pages shown inside the frontmost app. If
+    /// one is blocked, Renew covers the screen and hides the app (it can't
+    /// redirect a page inside another app). Every time the app is brought
+    /// back, a banner gives `embeddedGrace` seconds to close the page; after
+    /// that the app is hidden again (without the overlay, which only shows the
+    /// first time).
+    private func checkEmbeddedWeb() {
+        guard sessionLive else {
+            primed.removeAll()
+            embeddedBlocks.removeAll()
+            notice.hide()
+            return
+        }
+        guard AXIsProcessTrusted() else { return }
+        primeEmbeddedWeb()
+        let front = NSWorkspace.shared.frontmostApplication
+        // The grace banner belongs to the app in grace; drop it if the user moved on.
+        let frontInGrace = front.map { embeddedBlocks[$0.processIdentifier]?.graceUntil != nil } ?? false
+        if !frontInGrace { notice.hide() }
+        guard !embeddedBusy, let app = front, hasEmbeddedWeb(app) else { return }
+        let pid = app.processIdentifier
+        let rules = ruleSet
+        embeddedBusy = true
+        embeddedQueue.async { [weak self] in
+            let urls = EmbeddedWebReader.pageURLs(pid: pid)
+            let hit = urls.lazy.compactMap { url in rules.match(url).map { (url, $0) } }.first
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.embeddedBusy = false
+                guard self.sessionLive, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+                guard let (url, rule) = hit else {
+                    self.embeddedMiss(app, pageCount: urls.count)
+                    return
+                }
+                self.handleEmbeddedHit(app, url: url, rule: rule)
+            }
+        }
+    }
+
+    /// A scan found no blocked page. It only counts as closed after two such
+    /// scans that could actually read the app: an empty result (not even the
+    /// app's own UI) is a failed read.
+    private func embeddedMiss(_ app: NSRunningApplication, pageCount: Int) {
+        let pid = app.processIdentifier
+        guard var block = embeddedBlocks[pid], pageCount > 0 else { return }
+        block.misses += 1
+        guard block.misses >= 2 else { embeddedBlocks[pid] = block; return }
+        embeddedBlocks[pid] = nil
+        log("blocked page closed in \(app.bundleIdentifier ?? "pid \(pid)")")
+        notice.hide()
+    }
+
+    private func handleEmbeddedHit(_ app: NSRunningApplication, url: String, rule: Rule) {
+        let pid = app.processIdentifier
+        let name = app.localizedName ?? app.bundleIdentifier ?? "This app"
+        let host = NormalizedURL(url)?.host ?? url
+        let now = Date()
+
+        guard var block = embeddedBlocks[pid] else {
+            hideEmbedded(app, host: host, rule: rule, name: name, firstTime: true)
+            return
+        }
+        block.misses = 0
+        embeddedBlocks[pid] = block
+        if let until = block.graceUntil {
+            if until > now {
+                notice.show("Close \(host) in \(name) within \(Int(until.timeIntervalSince(now).rounded(.up)))s, or Renew hides \(name) again")
+            } else {
+                hideEmbedded(app, host: host, rule: rule, name: name, firstTime: false)
+            }
+            return
+        }
+        // Still in front right after hiding: hiding takes a moment.
+        guard now.timeIntervalSince(block.hiddenAt) > 2 else { app.hide(); return }
+        // The user brought the app back: let them close the page.
+        block.graceUntil = now.addingTimeInterval(Self.embeddedGrace)
+        embeddedBlocks[pid] = block
+        log("grace period for \(app.bundleIdentifier ?? name) to close \(host)")
+        notice.show("Close \(host) in \(name) within \(Int(Self.embeddedGrace))s, or Renew hides \(name) again")
+    }
+
+    private func hideEmbedded(_ app: NSRunningApplication, host: String, rule: Rule, name: String, firstTime: Bool) {
+        log("blocked \(host) in the built-in browser of \(app.bundleIdentifier ?? name) (rule \(rule)); hiding it")
+        embeddedBlocks[app.processIdentifier] = EmbeddedBlock(hiddenAt: Date(), graceUntil: nil)
+        notice.hide()
+        app.hide()
+        // The overlay explains it once; after that the banner says enough.
+        guard firstTime else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastUnsupportedOverlay) > 3 else { return }
+        lastUnsupportedOverlay = now
+        overlay.show(title: "\(host) is blocked",
+                     detail: "\(name)'s built-in browser was showing it, so Renew hid \(name). Open \(name) again and you'll have \(Int(Self.embeddedGrace)) seconds to go back or close that page. Matched rule: \(rule)",
                      endsAt: session?.endsAt)
     }
 
     @objc private func appLaunched(_ note: Notification) {
-        guard let s = session, s.isActive(),
-              let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              isUnsupportedBrowserApp(app) else { return }
-        quitUnsupported(app)
+        guard session != nil, sessionLive,
+              let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        if isUnsupportedBrowserApp(app) {
+            quitUnsupported(app)
+        } else if hasEmbeddedWeb(app), AXIsProcessTrusted() {
+            primed.insert(app.processIdentifier)
+            let pid = app.processIdentifier
+            embeddedQueue.async { EmbeddedWebReader.prime(pid: pid) }
+        }
     }
 
     /// Only ever close real, user-facing apps (with a Dock icon), never helpers
     /// or background processes that happen to share a bundle-ID prefix.
+    ///
+    /// Apps Renew has no entry for are inspected once per process: anything
+    /// built on Chromium or Gecko that isn't an Electron/CEF app counts as an
+    /// unsupported browser (a renamed copy of Chrome, Chrome for Testing, a
+    /// Firefox fork).
     private func isUnsupportedBrowserApp(_ app: NSRunningApplication) -> Bool {
-        !app.isTerminated
-            && app.activationPolicy == .regular
-            && BrowserCatalog.kind(of: app.bundleIdentifier) == .unsupported
+        guard !app.isTerminated, app.activationPolicy == .regular else { return false }
+        switch BrowserCatalog.kind(of: app.bundleIdentifier) {
+        case .unsupported: return true
+        case .some: return false
+        case nil: return engine(of: app) != nil
+        }
+    }
+
+    private func engine(of app: NSRunningApplication) -> BrowserEngine? {
+        let pid = app.processIdentifier
+        if let cached = engineCache[pid] { return cached }
+        guard pid != getpid(), let path = app.bundleURL?.path else { return nil }
+        let engine = EngineDetector.browserEngine(bundleAt: path, bundleID: app.bundleIdentifier)
+        engineCache[pid] = engine
+        if let engine { log("\(app.bundleIdentifier ?? path) looks like a \(engine.rawValue) browser") }
+        return engine
     }
 }

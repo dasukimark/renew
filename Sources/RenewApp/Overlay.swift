@@ -105,3 +105,57 @@ final class OverlayController: NSObject {
         return l
     }
 }
+
+/// Small banner at the top of the main screen that doesn't take focus or
+/// clicks: used while the user has a few seconds to close a blocked page
+/// inside another app.
+final class NoticeController {
+    private var panel: NSPanel?
+    private var label: NSTextField?
+
+    func show(_ text: String) {
+        if let label {
+            label.stringValue = text
+            return
+        }
+        guard let screen = NSScreen.main else { return }
+        let l = NSTextField(labelWithString: text)
+        l.font = .systemFont(ofSize: 15, weight: .semibold)
+        l.textColor = .white
+        l.alignment = .center
+        l.translatesAutoresizingMaskIntoConstraints = false
+
+        let size = NSSize(width: min(720, screen.visibleFrame.width - 40), height: 48)
+        let origin = NSPoint(x: screen.visibleFrame.midX - size.width / 2, y: screen.visibleFrame.maxY - size.height - 12)
+        let p = NSPanel(contentRect: NSRect(origin: origin, size: size), styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        p.level = .statusBar
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        p.ignoresMouseEvents = true
+        p.isOpaque = false
+        p.hasShadow = true
+        p.backgroundColor = .clear
+        p.isReleasedWhenClosed = false
+
+        let box = NSView(frame: NSRect(origin: .zero, size: size))
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor(calibratedRed: 0.75, green: 0.33, blue: 0.1, alpha: 0.95).cgColor
+        box.layer?.cornerRadius = 12
+        box.addSubview(l)
+        NSLayoutConstraint.activate([
+            l.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+            l.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+            l.leadingAnchor.constraint(greaterThanOrEqualTo: box.leadingAnchor, constant: 16),
+        ])
+        p.contentView = box
+        p.orderFrontRegardless()
+        panel = p
+        label = l
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+        panel = nil
+        label = nil
+    }
+}

@@ -5,17 +5,24 @@ struct SetupView: View {
     @ObservedObject var model: AppModel
     @State private var showingProfile = false
     @State private var showingUninstall = false
+    @State private var confirmingRequest = false
+    @State private var alertDraft = ""
 
     var body: some View {
         Form {
             serviceSection
             permissionsSection
             profileSection
+            alertsSection
             uninstallSection
         }
         .formStyle(.grouped)
         .navigationTitle("Setup")
-        .onAppear { model.refreshPermissions() }
+        .onAppear {
+            model.refreshPermissions()
+            alertDraft = model.alertURL ?? ""
+        }
+        .onChange(of: model.alertURL) { alertDraft = $0 ?? "" }
         .sheet(isPresented: $showingProfile) { ProfileSheet() }
         .sheet(isPresented: $showingUninstall) { UninstallSheet(model: model) }
     }
@@ -157,6 +164,54 @@ struct SetupView: View {
         }
     }
 
+    // MARK: alerts
+
+    /// Alerts can be turned on any time, but changed or turned off only
+    /// between sessions (renewd enforces this too).
+    private var alertsLocked: Bool { model.session != nil && model.alertURL != nil }
+
+    private var alertsSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Renew messages someone you trust if it's stopped, its files are tampered with, or the clock is changed during a focus session, and when an uninstall is requested or done.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("https://ntfy.sh/your-secret-topic", text: $alertDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(alertsLocked || !model.daemonReachable)
+                HStack {
+                    Button(model.alertURL == nil ? "Turn on alerts" : "Save") {
+                        model.setAlerts(alertDraft)
+                    }
+                    .disabled(alertsLocked || model.busy || !model.daemonReachable
+                              || alertDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                              || alertDraft == (model.alertURL ?? ""))
+                    if model.alertURL != nil {
+                        Button("Send test") { model.testAlert() }
+                            .disabled(model.busy)
+                        Button("Turn off") { model.setAlerts(nil) }
+                            .disabled(alertsLocked || model.busy)
+                    }
+                    Spacer()
+                    if model.alertURL != nil { status("On", .green) } else { status("Off", .secondary) }
+                }
+                if alertsLocked {
+                    Text("Alerts can be changed after the current session ends.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+        } header: {
+            Text("Accountability alerts")
+        } footer: {
+            Text("Free and no account needed: your partner installs the ntfy app and subscribes to a hard-to-guess topic, and you enter https://ntfy.sh/<that topic> here. Discord and Slack webhook URLs work too. When the destination changes or alerts are turned off, the old destination is told.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: uninstall
 
     private var uninstallSection: some View {
@@ -164,15 +219,45 @@ struct SetupView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Uninstall Renew")
-                    Text(model.session != nil ? "Not available during a focus session." : "Removes the app and its background service.")
+                    Text(uninstallCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                Button("Uninstall…", role: .destructive) { showingUninstall = true }
-                    .disabled(!model.isInstalled || model.session != nil || model.busy)
+                if model.uninstallRequest != nil {
+                    Button("Cancel request") { model.cancelUninstall() }
+                        .disabled(model.busy)
+                }
+                if model.uninstallUnlocked {
+                    Button("Uninstall…", role: .destructive) { showingUninstall = true }
+                        .disabled(!model.isInstalled || model.session != nil || model.busy)
+                } else if model.uninstallRequest == nil {
+                    Button("Request uninstall…") { confirmingRequest = true }
+                        .disabled(!model.isInstalled || !model.daemonReachable || model.busy)
+                }
             }
+        } footer: {
+            Text("Uninstalling has a 24-hour cooling-off period. Once it unlocks, it stays available for 2 days, between focus sessions only.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .confirmationDialog("Request uninstall?", isPresented: $confirmingRequest) {
+            Button("Request uninstall") { model.requestUninstall() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Renew keeps working as normal. You can uninstall it 24 hours from now, between focus sessions.\(model.alertURL != nil ? " Your accountability partner is told." : "")")
+        }
+    }
+
+    private var uninstallCaption: String {
+        guard let u = model.uninstallRequest else { return "Removes the app and its background service, after a 24-hour wait." }
+        if model.uninstallUnlocked {
+            let until = "Available until \(Format.clock(u.expiresAt))."
+            return model.session != nil ? "\(until) Not available during a focus session." : until
+        }
+        let left = DurationText.format(Int(u.unlocksAt.timeIntervalSince(model.now)))
+        return "Requested. Unlocks at \(Format.clock(u.unlocksAt)) (in \(left))."
     }
 
     private func status(_ text: String, _ color: Color) -> some View {
