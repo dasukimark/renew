@@ -8,22 +8,42 @@ enum Uninstall {
         "quartz", "saddle", "timber", "velvet", "walnut", "yonder", "zephyr", "beacon", "cobalt", "drift",
     ]
 
+    /// Uninstalling takes two steps. The first call files a request with
+    /// renewd (no sudo needed). After `UninstallPolicy.delay`, and while no
+    /// session is running, `sudo renew uninstall` removes Renew. An unused
+    /// request expires after `UninstallPolicy.window`.
+    ///
     /// `confirmed` skips the typed phrase. The app passes it after running
-    /// its own typing challenge. The session check still applies.
+    /// its own typing challenge. The cooling-off and session checks still apply.
     static func run(confirmed: Bool) -> Never {
-        guard getuid() == 0 else { die("uninstall must be run with sudo: sudo renew uninstall") }
-
         // Ask the daemon first; fall back to the state file if it isn't running.
-        var session: SessionInfo?
-        if let r = try? DaemonClient.send(Request(cmd: .status)) {
-            session = r.status?.session
+        let daemon = try? DaemonClient.send(Request(cmd: .status))
+        let session: SessionInfo?
+        let request: UninstallStatus?
+        let alertURL: String?
+        if let status = daemon?.status {
+            (session, request, alertURL) = (status.session, status.uninstall, status.alertURL)
         } else {
-            session = StateStore.load()?.activeSession
+            let file = StateStore.load()
+            (session, request, alertURL) = (file?.activeSession, file?.uninstallStatus(), file?.alertURL)
+        }
+
+        guard let request else {
+            guard !confirmed else { die("Uninstall hasn't been requested yet. Request it first; it unlocks after a day.") }
+            fileRequest(reachable: daemon != nil)
+        }
+        guard request.unlocked else {
+            die("""
+            Uninstall was requested \(clock(request.requestedAt)). It unlocks \(clock(request.unlocksAt)) \
+            (in \(DurationText.format(Int(request.unlocksAt.timeIntervalSinceNow)))).
+            Cancel the request with: renew uninstall --cancel
+            """)
         }
         if let s = session, s.isActive() {
             let left = Int(s.endsAt.timeIntervalSinceNow)
             die("A focus session is running (\(DurationText.format(left)) left, ends \(clock(s.endsAt))). Uninstall is allowed after it ends.")
         }
+        guard getuid() == 0 else { die("Uninstall is unlocked. Finish it with sudo: sudo renew uninstall") }
 
         if !confirmed {
             let phrase = (0..<8).map { _ in words.randomElement()! }.joined(separator: " ")
@@ -41,6 +61,7 @@ enum Uninstall {
         }
 
         print("Removing Renew…")
+        Alerts.send(to: alertURL, "Renew was uninstalled. It no longer blocks anything on this Mac.", wait: true)
         // Guard first, so it can't bring the daemon back.
         Launchctl.bootout("system/\(Paths.guardLabel)")
         Launchctl.bootout("system/\(Paths.daemonLabel)")
@@ -73,6 +94,32 @@ enum Uninstall {
         try? fm.removeItem(atPath: Paths.agentPlist)
         for uid in uids { Launchctl.bootout("gui/\(uid)/\(Paths.agentLabel)") }
         shell("/usr/bin/pkill", ["-f", Paths.agentExecutable])
+        exit(0)
+    }
+
+    private static func fileRequest(reachable: Bool) -> Never {
+        guard reachable else {
+            die("renewd isn't running, so the uninstall request can't be filed. Restart Renew's service and try again.")
+        }
+        guard let r = try? DaemonClient.send(Request(cmd: .requestUninstall)), r.ok, let u = r.status?.uninstall else {
+            die("renewd refused the uninstall request.")
+        }
+        print("""
+        Uninstall requested. Renew keeps working until then.
+
+        You can finish it from \(clock(u.unlocksAt)) until \(clock(u.expiresAt)), between focus sessions:
+            sudo renew uninstall
+
+        Changed your mind? renew uninstall --cancel
+        """)
+        exit(0)
+    }
+
+    static func cancel() -> Never {
+        guard let r = try? DaemonClient.send(Request(cmd: .cancelUninstall)), r.ok else {
+            die("Couldn't reach renewd to cancel the request.")
+        }
+        print("Uninstall request cancelled.")
         exit(0)
     }
 }

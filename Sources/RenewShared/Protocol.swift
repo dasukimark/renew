@@ -3,9 +3,13 @@ import Foundation
 /// Newline-delimited JSON over the daemon's Unix socket.
 ///
 /// The daemon only accepts commands that make things stricter: nothing here
-/// can shorten, stop or loosen a running session.
+/// can shorten, stop or loosen a running session. Alerts can only be changed
+/// between sessions (or turned on during one), and an uninstall request only
+/// unlocks `sudo renew uninstall` after a cooling-off period.
 public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
+    case setAlerts, testAlert
+    case requestUninstall, cancelUninstall
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -22,12 +26,16 @@ public struct Request: Codable, Sendable {
     public var durationSeconds: Int?
     public var rules: [String]?
     public var report: AgentReport?
+    /// For `setAlerts`: the new destination, or nil to turn alerts off.
+    public var alertURL: String?
 
-    public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil) {
+    public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
+                alertURL: String? = nil) {
         self.cmd = cmd
         self.durationSeconds = durationSeconds
         self.rules = rules
         self.report = report
+        self.alertURL = alertURL
     }
 }
 
@@ -59,15 +67,53 @@ public struct AgentStatus: Codable, Sendable {
     }
 }
 
+/// Uninstalling takes two steps: a request, then `sudo renew uninstall`
+/// once the cooling-off period has passed. An unused request expires.
+public enum UninstallPolicy {
+    public static let delay: TimeInterval = 24 * 3_600
+    /// How long the uninstall stays available after it unlocks.
+    public static let window: TimeInterval = 48 * 3_600
+}
+
+public struct UninstallRequest: Codable, Equatable, Sendable {
+    public var requestedAt: Date
+    /// Counts down to when the request expires (delay + window).
+    public var countdown: Countdown
+
+    public init(requestedAt: Date, countdown: Countdown) {
+        self.requestedAt = requestedAt
+        self.countdown = countdown
+    }
+}
+
+public struct UninstallStatus: Codable, Equatable, Sendable {
+    public var requestedAt: Date
+    public var unlocksAt: Date
+    public var expiresAt: Date
+    public var unlocked: Bool
+
+    public init(requestedAt: Date, unlocksAt: Date, expiresAt: Date, unlocked: Bool) {
+        self.requestedAt = requestedAt
+        self.unlocksAt = unlocksAt
+        self.expiresAt = expiresAt
+        self.unlocked = unlocked
+    }
+}
+
 public struct Status: Codable, Sendable {
     public var session: SessionInfo?
     public var serverTime: Date
     public var agents: [AgentStatus]
+    public var alertURL: String?
+    public var uninstall: UninstallStatus?
 
-    public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus]) {
+    public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
+                alertURL: String? = nil, uninstall: UninstallStatus? = nil) {
         self.session = session
         self.serverTime = serverTime
         self.agents = agents
+        self.alertURL = alertURL
+        self.uninstall = uninstall
     }
 }
 

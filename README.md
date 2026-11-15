@@ -38,8 +38,8 @@ the window:
   extra sites and start. During a session it shows a countdown ring and the blocked
   sites, and lets you add time or block another site. There's no stop button.
 - **Blocklists**: edit the built-in lists (social, video, news, test) or make your own.
-- **Setup**: service status, permissions, the lock-down profile, and uninstall
-  (between sessions only, after typing a confirmation phrase).
+- **Setup**: service status, permissions, the lock-down profile, accountability
+  alerts, and uninstall (see below).
 
 Closing the window or pressing ⌘Q leaves Renew running in the menu bar.
 
@@ -53,7 +53,29 @@ Rule syntax:
 | `!music.youtube.com` | an allow exception (always wins) |
 
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
-`renew status`, `renew extend 30m`, `renew add x.com`, `sudo renew uninstall`).
+`renew status`, `renew extend 30m`, `renew add x.com`, `renew alerts set <url>`,
+`renew uninstall`).
+
+### Accountability alerts
+
+Renew can message someone you trust when it's stopped, its files are deleted or
+changed, or the Mac's clock is changed during a focus session, and when an
+uninstall is requested, cancelled or done. Your partner installs the free
+[ntfy](https://ntfy.sh) app and subscribes to a hard-to-guess topic, and you enter
+`https://ntfy.sh/<topic>` in **Setup → Accountability alerts** (or
+`renew alerts set https://ntfy.sh/<topic>`). Discord and Slack webhook URLs work too.
+
+Alerts can be turned on at any time, but changed or turned off only between
+sessions, and the old destination is told when that happens. This is the only
+thing Renew sends off the Mac.
+
+### Uninstalling
+
+Uninstalling has a 24-hour cooling-off period. Click **Request uninstall…** in
+Setup (or run `renew uninstall`). Renew keeps working as normal. After 24 hours the
+uninstall unlocks for 2 days: click **Uninstall…** and type the confirmation phrase,
+or run `sudo renew uninstall`, between sessions. An unused request expires;
+`renew uninstall --cancel` cancels one.
 
 ## How it works
 
@@ -66,16 +88,26 @@ A command-line tool is also installed for scripting (`renew start 2h --list soci
   │            (Firefox, or if the redirect fails → full-screen overlay + Cmd-W)
   ├─ unsupported browsers (Opera, Orion, Zen, Tor, DuckDuckGo…) and web apps
   │    (Safari "Add to Dock", Chrome/Edge installed apps) → quit + overlay
+  ├─ unknown apps built on Chromium or Firefox's engine (a renamed copy of
+  │    Chrome, Chrome for Testing, a Firefox fork) → quit + overlay.
+  │    Electron and CEF apps (Slack, Claude, Spotify…) are left alone
+  ├─ built-in browsers inside other apps (T3 Code, Claude, Codex…), read through
+  │    Accessibility → overlay + hide the app; bringing it back gives 15 s to close the page
   ├─ supported browser it can't watch (permission off, or unreadable for ~10 s)
   │    → quit + overlay, again on every relaunch
   └─ every 2 s: heartbeat + permission report → renewd
         │
 renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/status/report only)
   ├─ owns /var/db/com.renew/state.json (root-only; edits to it can only lengthen a session)
+  ├─ counts sessions down on the monotonic clock, so changing the date does nothing
+  │    (time the Mac is switched off still counts)
+  ├─ sends tamper alerts, if set up
   ├─ re-loads the agent if it's unloaded, restarts it if silent
   ├─ restores its files from /var/db/com.renew/backup if deleted or altered
   └─ keeps the guard loaded
 renewd --guard  (second LaunchDaemon) ── keeps renewd loaded, repairs files, restores state.json
+
+Stopping renewd or the guard during a session sends an alert.
 ```
 
 **Turning off a permission doesn't get you past it.** If you switch off Renew's
@@ -86,6 +118,10 @@ keep working with blocking as normal.
 
 Renew never changes your network settings, `/etc/hosts` or the firewall.
 
+Unknown Chromium apps are closed only when they have a Dock icon, so headless
+browsers used by tests and AI tools keep working. A Playwright run with a visible
+Chrome for Testing window (`--headed`) is closed mid-session.
+
 ## What's left for someone determined to escape
 
 Renew is friction, not a vault. An admin who goes through all of this can
@@ -94,7 +130,13 @@ still get out:
 - remove the configuration profile (needs its password)
 - `sudo launchctl bootout` the guard, the daemon *and* the app's LaunchAgent fast
   enough, then delete `/var/db/com.renew/backup` and the installed files
-- boot into Safe Mode or Recovery and delete things
+  (with alerts on, this tells your partner)
+- boot into Safe Mode or Recovery and delete things, or change the clock while
+  the Mac is off
+- turn off Accessibility, which stops Renew seeing built-in browsers inside apps
+  (Firefox is closed in that case, but apps like T3 Code are left running)
+- reach the web without a browser window: `curl`, a terminal browser, a small
+  WKWebView app, or an AI agent fetching pages
 
 For a real lock, use a **standard (non-admin) account** day to day and let someone
 else hold the admin password.

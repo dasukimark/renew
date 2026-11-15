@@ -66,7 +66,12 @@ enum SelfRepair {
     static func ensureLoaded(label: String, plist: String) {
         guard !Launchctl.isLoaded("system/\(label)") else { return }
         guard fm.fileExists(atPath: plist) else { return }
-        let r = Launchctl.bootstrap(domain: "system", plist: plist)
+        var r = Launchctl.bootstrap(domain: "system", plist: plist)
+        if !r.ok {
+            // `launchctl disable` makes bootstrap fail; undo it and retry.
+            shell("/bin/launchctl", ["enable", "system/\(label)"])
+            r = Launchctl.bootstrap(domain: "system", plist: plist)
+        }
         log("re-loaded \(label): \(r.ok ? "ok" : r.err.trimmingCharacters(in: .whitespacesAndNewlines))")
     }
 

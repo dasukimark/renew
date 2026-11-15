@@ -38,7 +38,13 @@ Usage:
   renew lists add <NAME> <SITE>...                     add sites to a list (creates it)
   renew lists remove <NAME> [SITE]...                  remove sites, or reset/delete the list
   renew check <URL> [--list NAME]... [SITE]...         test whether a URL would be blocked
-  sudo renew uninstall                                 remove Renew (only between sessions)
+  renew alerts                                         show where tamper alerts go
+  renew alerts set <URL>                               send tamper alerts to a URL (e.g. https://ntfy.sh/<topic>)
+  renew alerts off                                     turn alerts off (between sessions only)
+  renew alerts test                                    send a test alert
+  renew uninstall                                      request uninstall (unlocks after 24 hours)
+  sudo renew uninstall                                 finish an unlocked uninstall (only between sessions)
+  renew uninstall --cancel                             cancel an uninstall request
 
 Durations: 25m, 2h, 1h30m, 1d (a bare number means minutes)
 Sites:     reddit.com          domain and subdomains
@@ -90,6 +96,14 @@ func printStatus(_ s: Status) {
     printAgents(s)
 }
 
+func printExtras(_ s: Status) {
+    print("  Alerts: \(s.alertURL ?? "off")")
+    if let u = s.uninstall {
+        print(u.unlocked ? "  Uninstall: unlocked until \(clock(u.expiresAt)) (sudo renew uninstall)"
+                         : "  Uninstall: requested, unlocks \(clock(u.unlocksAt))")
+    }
+}
+
 func printAgents(_ s: Status) {
     if s.agents.isEmpty {
         print("  Agent: not reporting yet")
@@ -131,7 +145,27 @@ case "add":
     printStatus(send(Request(cmd: .add, rules: rules)))
 
 case "status":
-    printStatus(send(Request(cmd: .status)))
+    let st = send(Request(cmd: .status))
+    printStatus(st)
+    printExtras(st)
+
+case "alerts":
+    switch args.first ?? "show" {
+    case "show":
+        print("Alerts: \(send(Request(cmd: .status)).alertURL ?? "off")")
+    case "set":
+        guard args.count == 2 else { die("usage: renew alerts set <URL>") }
+        let st = send(Request(cmd: .setAlerts, alertURL: args[1]))
+        print("Alerts go to \(st.alertURL ?? "?"). A confirmation was sent there.")
+    case "off":
+        _ = send(Request(cmd: .setAlerts, alertURL: nil))
+        print("Alerts are off.")
+    case "test":
+        _ = send(Request(cmd: .testAlert))
+        print("Test alert sent.")
+    default:
+        die("usage: renew alerts [show | set URL | off | test]")
+    }
 
 case "lists":
     let sub = args.first ?? "show"
@@ -179,6 +213,7 @@ case "check":
     }
 
 case "uninstall":
+    if args.contains("--cancel") { Uninstall.cancel() }
     Uninstall.run(confirmed: args.contains("--confirmed"))
 
 case "help", "-h", "--help":

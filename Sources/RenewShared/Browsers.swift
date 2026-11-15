@@ -80,3 +80,82 @@ public enum BrowserCatalog {
         return nil
     }
 }
+
+/// The web engine an unknown app is built on, when it looks like a full browser.
+public enum BrowserEngine: String, Sendable {
+    case chromium = "Chromium"
+    case gecko = "Firefox"
+}
+
+/// Recognises browsers Renew has no entry for (a copy of Chrome with a new
+/// bundle ID, Chrome for Testing, a Firefox fork) by what's inside the app
+/// rather than by name.
+///
+/// Electron and CEF apps also embed Chromium but aren't browsers, so they're
+/// excluded by their own markers, with `exceptions` as a backstop.
+public enum EngineDetector {
+    /// Apps built on a browser engine that aren't browsers. Electron and CEF
+    /// apps are normally caught by their markers; these are listed in case a
+    /// future version renames its framework.
+    public static let exceptions: Set<String> = [
+        "com.anthropic.claudefordesktop",
+        "com.t3tools.t3code",
+        "com.openai.codex", "com.openai.chat",
+        "com.tinyspeck.slackmacgap",
+        "notion.id",
+        "md.obsidian",
+        "com.postmanlabs.mac",
+        "com.bitwarden.desktop",
+        "com.spotify.client",
+        "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+        "com.todesktop.230313mzl4w4u92", // Cursor
+        "com.hnc.Discord",
+        "com.figma.Desktop",
+        "com.github.GitHubClient",
+        "com.microsoft.teams2",
+        "org.mozilla.thunderbird", "org.mozilla.thunderbird-daily",
+        "org.zotero.zotero",
+    ]
+
+    /// The engine if the app bundle at `path` looks like a Chromium or
+    /// Firefox-based browser, nil for anything else.
+    public static func browserEngine(bundleAt path: String, bundleID: String?) -> BrowserEngine? {
+        if let id = bundleID, exceptions.contains(id) { return nil }
+        let fm = FileManager.default
+        let contents = path + "/Contents"
+
+        // Gecko: Firefox and its forks ship libxul as Contents/MacOS/XUL.
+        if fm.fileExists(atPath: contents + "/MacOS/XUL") || fm.fileExists(atPath: contents + "/Frameworks/XUL.framework") {
+            return .gecko
+        }
+
+        let frameworks = (try? fm.contentsOfDirectory(atPath: contents + "/Frameworks")) ?? []
+        if frameworks.contains("Electron Framework.framework")
+            || frameworks.contains("Chromium Embedded Framework.framework") {
+            return nil
+        }
+        if isElectron(contents: contents) { return nil }
+
+        // Chromium browsers: "<Product> Framework.framework" with the helper
+        // apps inside it (Versions/<v>/Helpers/<Product> Helper (Renderer).app).
+        for fw in frameworks where fw.hasSuffix(" Framework.framework") {
+            let versions = contents + "/Frameworks/" + fw + "/Versions"
+            for v in (try? fm.contentsOfDirectory(atPath: versions)) ?? [] where v != "Current" {
+                let helpers = (try? fm.contentsOfDirectory(atPath: versions + "/" + v + "/Helpers")) ?? []
+                if helpers.contains(where: { $0.hasSuffix("(Renderer).app") }) { return .chromium }
+            }
+        }
+        return nil
+    }
+
+    /// Electron apps with a renamed framework (e.g. Codex) still declare
+    /// Electron keys in Info.plist and ship their code as app.asar. Requiring
+    /// both means a copied Chrome needs more than one edit to pass as Electron.
+    private static func isElectron(contents: String) -> Bool {
+        let info = NSDictionary(contentsOfFile: contents + "/Info.plist") as? [String: Any] ?? [:]
+        guard info.keys.contains(where: { $0.hasPrefix("Electron") }) else { return false }
+        let fm = FileManager.default
+        let resources = contents + "/Resources"
+        return fm.fileExists(atPath: resources + "/app.asar") || fm.fileExists(atPath: resources + "/app")
+    }
+}
