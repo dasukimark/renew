@@ -6,20 +6,42 @@ import Foundation
 /// WKWebView) through the Accessibility tree. Chromium and WebKit expose each
 /// loaded page as an AXWebArea with an AXURL.
 ///
-/// Electron only builds that tree once another app sets AXManualAccessibility
-/// on it, and takes a few seconds to do so, so `prime` is called as early as
-/// possible (session start, app launch).
+/// Chromium-based apps only build that tree when asked, and take a few
+/// seconds to do so, so `prime` is called as early as possible (session
+/// start, app launch):
+/// - Electron apps (T3 Code, Claude) accept AXManualAccessibility.
+/// - Other Chromium apps (ChatGPT/Codex) reject it but respond to
+///   AXEnhancedUserInterface, the switch screen readers use. That one can
+///   make the app's window moves animate oddly, so it's only used for apps
+///   that reject the first, and `release` turns it off after the session.
+///
+/// Only call from one serial queue: `enhanced` isn't locked.
 enum EmbeddedWebReader {
     private static let maxNodes = 6_000
     private static let maxDepth = 80
+    /// Apps Renew switched AXEnhancedUserInterface on for.
+    private static var enhanced: Set<pid_t> = []
 
-    /// Asks an Electron app to expose its Accessibility tree. Harmless for
-    /// other apps. Repeated on every scan because Electron forgets it when a
-    /// renderer restarts.
+    /// Asks the app to expose its Accessibility tree. Repeated on every scan
+    /// because Electron forgets it when a renderer restarts.
     static func prime(pid: pid_t) {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
-        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        guard manual == .attributeUnsupported, !enhanced.contains(pid) else { return }
+        // Chromium reports an error here but still turns its tree on.
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        enhanced.insert(pid)
+    }
+
+    /// Turns AXEnhancedUserInterface back off wherever Renew turned it on.
+    static func release() {
+        for pid in enhanced {
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.5)
+            AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+        }
+        enhanced.removeAll()
     }
 
     /// Every distinct page URL in the app's windows, main UI included.
@@ -29,9 +51,9 @@ enum EmbeddedWebReader {
     /// https): their content is large and never contains another page that
     /// matters.
     static func pageURLs(pid: pid_t) -> [String] {
+        prime(pid: pid)
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
-        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
         let windows = copy(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
         var queue: [(el: AXUIElement, depth: Int)] = windows.map { ($0, 0) }

@@ -340,6 +340,7 @@ final class Monitor: NSObject {
     /// first time).
     private func checkEmbeddedWeb() {
         guard sessionLive else {
+            if !primed.isEmpty { embeddedQueue.async { EmbeddedWebReader.release() } }
             primed.removeAll()
             embeddedBlocks.removeAll()
             notice.hide()
