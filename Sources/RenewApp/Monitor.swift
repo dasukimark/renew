@@ -42,7 +42,7 @@ final class Monitor: NSObject {
             guard session != oldValue else { return }
             ruleSet = RuleSet(strings: session?.rules ?? [])
             server.update(endsAt: session?.endsAt)
-            if session == nil { switchBlocker.setEnabled(false) }
+            if session == nil { switchBlocker.setActive(false) }
             if let s = session { log("session: ends \(s.endsAt), rules \(s.rules)") } else { log("no session") }
         }
     }
@@ -107,13 +107,6 @@ final class Monitor: NSObject {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appLaunched(_:)),
             name: NSWorkspace.didLaunchApplicationNotification, object: nil)
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-                self?.switchBlocker.setFrontmostPID(app.processIdentifier)
-            }
-        }
-        switchBlocker.setFrontmostPID(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
 
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in self?.sync() }
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.check() }
@@ -342,7 +335,7 @@ final class Monitor: NSObject {
     /// be turned on but not off (`OffSwitchBlocker`). If that filter can't run,
     /// System Settings is closed while it shows one of those pages instead.
     ///
-    /// The filter is only enabled while System Settings is running, since it
+    /// The filter only exists while System Settings is running, since it
     /// holds up every click while it looks. Window titles are read on
     /// `settingsQueue`, so an unresponsive System Settings never holds up the
     /// browser checks: every second when they decide whether to close it,
@@ -353,7 +346,7 @@ final class Monitor: NSObject {
         lastSettingsCheck = now
         let apps = SettingsGuard.runningApps
         switchBlocker.setSettingsPIDs(Set(apps.map(\.processIdentifier)))
-        let filtering = switchBlocker.ensureStarted(enabled: !apps.isEmpty)
+        let filtering = switchBlocker.setActive(!apps.isEmpty)
         guard let app = apps.first, !settingsBusy,
               !filtering || now.timeIntervalSince(lastSettingsTitleRead) >= 10 else { return }
         lastSettingsTitleRead = now
@@ -519,7 +512,7 @@ final class Monitor: NSObject {
         if app.bundleIdentifier == SettingsGuard.bundleID {
             // Before the next settings check, so a quick click is still filtered.
             switchBlocker.addSettingsPID(app.processIdentifier)
-            switchBlocker.ensureStarted(enabled: true)
+            switchBlocker.setActive(true)
         } else if isUnsupportedBrowserApp(app) {
             quitUnsupported(app)
         } else if hasEmbeddedWeb(app), AXIsProcessTrusted() {

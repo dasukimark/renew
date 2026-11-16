@@ -7,44 +7,67 @@ import RenewShared
 /// from their lists. Renew's own switches are protected on every page. The
 /// rest of System Settings works as usual.
 ///
-/// An event tap looks at clicks and key presses aimed at System Settings and
-/// drops the ones that would:
+/// Event taps look at clicks and key presses aimed at System Settings and
+/// drop the ones that would:
 /// - click a switch or checkbox that is on (including dragging it off);
 /// - click a remove (−) button;
 /// - press Space on a focused switch that is on, or a remove button;
 /// - press Delete in a list.
 ///
-/// The tap holds up all input while its callback runs, so it's only enabled
-/// while System Settings is running, events aimed elsewhere pass after a
-/// cheap check, and Accessibility reads get a short timeout each and a total
-/// budget well under the point where macOS disables a slow tap. When System
-/// Settings doesn't answer within that budget on a page that is (or may be)
-/// locked, the click is dropped rather than let through, and the user can
-/// click again. The tap runs on its own thread, so a busy main thread never
-/// delays input.
+/// The taps are kept as narrow as they can be, so Renew doesn't look like a
+/// keylogger to security software:
+/// - they exist only while System Settings is running during a session, and
+///   are removed (not just disabled) as soon as it quits or the session ends;
+/// - the tap on all apps sees mouse clicks only, since a click on a System
+///   Settings window can arrive while another app is frontmost;
+/// - key presses are tapped per System Settings process
+///   (`CGEvent.tapCreateForPid`), so typing in other apps never reaches Renew.
+///
+/// A tap holds up the input it sees while its callback runs, so events aimed
+/// elsewhere pass after a cheap check, and Accessibility reads get a short
+/// timeout each and a total budget well under the point where macOS disables
+/// a slow tap. When System Settings doesn't answer within that budget on a
+/// page that is (or may be) locked, the click is dropped rather than let
+/// through, and the user can click again. Each tap runs on its own thread, so
+/// a busy main thread never delays input.
 final class OffSwitchBlocker {
     /// Called on the main thread with what was blocked.
     var onBlocked: ((String) -> Void)?
 
+    private struct Tap {
+        let port: CFMachPort
+        let runLoop: CFRunLoop
+    }
+
+    /// What a tap's callback gets: the key taps know their process, so they
+    /// never have to guess an event's target. Kept alive by the tap's thread.
+    private final class TapContext {
+        unowned let blocker: OffSwitchBlocker
+        let pid: pid_t?
+        init(_ blocker: OffSwitchBlocker, pid: pid_t?) {
+            self.blocker = blocker
+            self.pid = pid
+        }
+    }
+
     private let lock = NSLock()
-    /// Guarded by `lock`. `tap` and `tapRunLoop` are written on the main
-    /// thread only.
-    private var tap: CFMachPort?
-    private var tapRunLoop: CFRunLoop?
-    private var active = false
+    /// Guarded by `lock`. The taps are created and removed on the main thread
+    /// only.
+    private var mouseTap: Tap?
+    private var keyTaps: [pid_t: Tap] = [:]
     private var settingsPIDs: Set<pid_t> = []
-    private var frontmostPID: pid_t = 0
+    private var loggedKeySeen = false
 
     /// Main thread only.
-    private var lastStartAttempt = Date.distantPast
-    private var loggedStartFailure = false
-    /// The rest of a click whose mouse-down was dropped (tap thread only).
+    private var lastFailure = Date.distantPast
+    private var loggedFailure = false
+    /// When a live System Settings process last refused a key tap.
+    private var keyTapFailures: [pid_t: Date] = [:]
+    /// The rest of a click whose mouse-down was dropped (mouse tap thread only).
     private var droppingClick = false
 
     static let callTimeout: Float = 0.1
     static let budget: TimeInterval = 0.4
-
-    var isRunning: Bool { lock.withLock { tap != nil } }
 
     /// The running System Settings processes, kept by the monitor.
     func setSettingsPIDs(_ pids: Set<pid_t>) {
@@ -55,91 +78,132 @@ final class OffSwitchBlocker {
         lock.withLock { _ = settingsPIDs.insert(pid) }
     }
 
-    /// The frontmost app, kept by the monitor: key events at the session tap
-    /// don't always carry their target process yet.
-    func setFrontmostPID(_ pid: pid_t) {
-        lock.withLock { frontmostPID = pid }
-    }
-
-    /// Ensures the tap exists, then enables or disables it. Returns false if
-    /// the tap isn't running (Accessibility off, or macOS refused it; that's
-    /// retried once a minute).
+    /// Creates the taps (`on`) or removes them. Returns false if the filter
+    /// should be running but isn't fully (Accessibility off, or macOS refused
+    /// the mouse tap or a key tap; that's retried once a minute), so the
+    /// caller can fall back to closing the locked pages.
     @discardableResult
-    func ensureStarted(enabled on: Bool) -> Bool {
-        if lock.withLock({ tap == nil }), AXIsProcessTrusted(), Date().timeIntervalSince(lastStartAttempt) >= 60 {
-            lastStartAttempt = Date()
-            start()
+    func setActive(_ on: Bool) -> Bool {
+        guard on else { removeTaps(); return true }
+        if lock.withLock({ mouseTap == nil }) {
+            guard AXIsProcessTrusted(), Date().timeIntervalSince(lastFailure) >= 60 else { return false }
+            guard let tap = makeTap(pid: nil) else {
+                lastFailure = Date()
+                if !loggedFailure { log("couldn't start the System Settings switch filter; retrying every minute") }
+                loggedFailure = true
+                return false
+            }
+            lock.withLock { mouseTap = tap }
+            log("System Settings switch filter started")
         }
-        guard lock.withLock({ tap != nil }) else { return false }
-        setEnabled(on)
-        return true
+        return syncKeyTaps()
     }
 
-    func setEnabled(_ on: Bool) {
-        guard let tap = lock.withLock({ tap }) else { return }
-        let changed: Bool = lock.withLock {
-            defer { active = on }
-            return active != on
-        }
-        if changed { CGEvent.tapEnable(tap: tap, enable: on) }
-    }
-
-    /// Removes the tap as soon as Renew loses Accessibility. An active tap
+    /// Removes the taps as soon as Renew loses Accessibility. An active tap
     /// left in place after its app loses the permission can stall input
     /// (System Settings froze when Renew was switched off there). Called on
-    /// the main thread every half second; the tap is recreated once the
+    /// the main thread every half second; the taps are recreated once the
     /// permission is back.
     func stopIfUntrusted() {
-        guard let tap = lock.withLock({ tap }), !AXIsProcessTrusted() else { return }
-        CGEvent.tapEnable(tap: tap, enable: false)
-        CFMachPortInvalidate(tap)
-        let runLoop: CFRunLoop? = lock.withLock {
-            defer { self.tap = nil; tapRunLoop = nil; active = false }
-            return tapRunLoop
-        }
-        if let runLoop { CFRunLoopStop(runLoop) }
-        lastStartAttempt = .distantPast
+        guard lock.withLock({ mouseTap != nil || !keyTaps.isEmpty }), !AXIsProcessTrusted() else { return }
+        removeTaps()
+        lastFailure = .distantPast
         log("Accessibility is off for Renew; stopped the System Settings switch filter")
     }
 
-    private func start() {
-        let types: [CGEventType] = [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .keyDown]
-        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: { _, type, event, refcon in
-                Unmanaged<OffSwitchBlocker>.fromOpaque(refcon!).takeUnretainedValue().handle(type, event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque())
-        else {
-            if !loggedStartFailure { log("couldn't start the System Settings switch filter; retrying every minute") }
-            loggedStartFailure = true
-            return
+    /// One key tap per running System Settings process. Returns false while
+    /// a live process has none, since Space and Delete wouldn't be checked.
+    private func syncKeyTaps() -> Bool {
+        let (pids, existing): (Set<pid_t>, Set<pid_t>) = lock.withLock { (settingsPIDs, Set(keyTaps.keys)) }
+        for pid in existing.subtracting(pids) {
+            if let tap = lock.withLock({ keyTaps.removeValue(forKey: pid) }) { Self.remove(tap) }
         }
-        CGEvent.tapEnable(tap: tap, enable: false)
-        lock.withLock { self.tap = tap }
-        let thread = Thread { [weak self] in
-            let source = CFMachPortCreateRunLoopSource(nil, tap, 0)
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            self?.lock.withLock { self?.tapRunLoop = CFRunLoopGetCurrent() }
-            CFRunLoopRun()
+        keyTapFailures = keyTapFailures.filter { pids.contains($0.key) }
+        var covered = true
+        for pid in pids.subtracting(existing) {
+            if let failed = keyTapFailures[pid], Date().timeIntervalSince(failed) < 60 {
+                covered = false
+                continue
+            }
+            if let tap = makeTap(pid: pid) {
+                lock.withLock { keyTaps[pid] = tap }
+                keyTapFailures[pid] = nil
+                continue
+            }
+            // A System Settings that is still quitting also refuses a tap, so
+            // only a live process counts as a failure.
+            guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated, kill(pid, 0) == 0 else { continue }
+            if keyTapFailures[pid] == nil {
+                log("couldn't start the System Settings key filter for pid \(pid); closing locked pages instead, retrying every minute")
+            }
+            keyTapFailures[pid] = Date()
+            covered = false
         }
-        thread.name = "renew.settings-switches"
-        thread.qualityOfService = .userInteractive
-        thread.start()
-        log("System Settings switch filter started")
+        return covered
     }
 
-    // MARK: tap thread
+    private func removeTaps() {
+        keyTapFailures = [:]
+        let taps: [Tap] = lock.withLock {
+            defer { mouseTap = nil; keyTaps = [:] }
+            return (mouseTap.map { [$0] } ?? []) + Array(keyTaps.values)
+        }
+        guard !taps.isEmpty else { return }
+        taps.forEach(Self.remove)
+        log("System Settings switch filter removed")
+    }
 
-    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+    private static func remove(_ tap: Tap) {
+        CGEvent.tapEnable(tap: tap.port, enable: false)
+        CFMachPortInvalidate(tap.port)
+        CFRunLoopStop(tap.runLoop)
+    }
+
+    /// The mouse tap on all apps (`pid` nil), or the key tap for one process.
+    private func makeTap(pid: pid_t?) -> Tap? {
+        let types: [CGEventType] = pid == nil ? [.leftMouseDown, .leftMouseUp, .leftMouseDragged] : [.keyDown]
+        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            let context = Unmanaged<TapContext>.fromOpaque(refcon!).takeUnretainedValue()
+            return context.blocker.handle(type, event, keyPID: context.pid)
+        }
+        let context = TapContext(self, pid: pid)
+        let me = Unmanaged.passUnretained(context).toOpaque()
+        let port: CFMachPort?
+        if let pid {
+            port = CGEvent.tapCreateForPid(pid: pid, place: .headInsertEventTap, options: .defaultTap,
+                                           eventsOfInterest: mask, callback: callback, userInfo: me)
+        } else {
+            port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                     eventsOfInterest: mask, callback: callback, userInfo: me)
+        }
+        guard let port else { return nil }
+        var runLoop: CFRunLoop?
+        let ready = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            withExtendedLifetime(context) {
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), CFMachPortCreateRunLoopSource(nil, port, 0), .commonModes)
+                runLoop = CFRunLoopGetCurrent()
+                ready.signal()
+                CFRunLoopRun()
+            }
+        }
+        thread.name = pid == nil ? "renew.settings-clicks" : "renew.settings-keys.\(pid!)"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        ready.wait()
+        return Tap(port: port, runLoop: runLoop!)
+    }
+
+    // MARK: tap threads
+
+    /// `keyPID` is the process a key tap belongs to (nil for the mouse tap).
+    private func handle(_ type: CGEventType, _ event: CGEvent, keyPID: pid_t?) -> Unmanaged<CGEvent>? {
         let pass = Unmanaged.passUnretained(event)
-        let (on, pids, front, tap): (Bool, Set<pid_t>, pid_t, CFMachPort?) =
-            lock.withLock { (self.active, self.settingsPIDs, self.frontmostPID, self.tap) }
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            if on, let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            let ports: [CFMachPort] = lock.withLock { (mouseTap.map { [$0.port] } ?? []) + keyTaps.values.map(\.port) }
+            for port in ports where !CGEvent.tapIsEnabled(tap: port) { CGEvent.tapEnable(tap: port, enable: true) }
             return pass
         case .leftMouseDragged, .leftMouseUp:
             guard droppingClick else { return pass }
@@ -147,7 +211,8 @@ final class OffSwitchBlocker {
             return nil
         case .leftMouseDown:
             droppingClick = false
-            guard on, !pids.isEmpty else { return pass }
+            let pids = lock.withLock { settingsPIDs }
+            guard !pids.isEmpty else { return pass }
             // The window under the pointer, not the event's target app: a
             // click on a background window goes to that window's app.
             let owner = Self.windowOwner(at: event.location)
@@ -175,10 +240,12 @@ final class OffSwitchBlocker {
             case 51, 117: space = false
             default: return pass
             }
-            guard on else { return pass }
-            let target = pid_t(event.getIntegerValueField(.eventTargetUnixProcessID))
-            let pid = pids.contains(target) ? target : front
-            guard pids.contains(pid) else { return pass }
+            guard let pid = keyPID else { return pass }
+            let first: Bool = lock.withLock {
+                defer { loggedKeySeen = true }
+                return !loggedKeySeen
+            }
+            if first { DispatchQueue.main.async { log("System Settings key filter is receiving key presses") } }
             var check = SettingsCheck(pid: pid)
             guard let what = check.key(space: space) else {
                 letThrough(check)
