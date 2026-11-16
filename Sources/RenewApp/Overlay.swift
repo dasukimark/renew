@@ -112,6 +112,12 @@ final class OverlayController: NSObject {
 final class NoticeController {
     private var panel: NSPanel?
     private var label: NSTextField?
+    /// Banners in different slots stack instead of overlapping.
+    private let slot: Int
+
+    init(slot: Int = 0) {
+        self.slot = slot
+    }
 
     func show(_ text: String) {
         if let label {
@@ -126,7 +132,8 @@ final class NoticeController {
         l.translatesAutoresizingMaskIntoConstraints = false
 
         let size = NSSize(width: min(720, screen.visibleFrame.width - 40), height: 48)
-        let origin = NSPoint(x: screen.visibleFrame.midX - size.width / 2, y: screen.visibleFrame.maxY - size.height - 12)
+        let origin = NSPoint(x: screen.visibleFrame.midX - size.width / 2,
+                             y: screen.visibleFrame.maxY - CGFloat(slot + 1) * (size.height + 12))
         let p = NSPanel(contentRect: NSRect(origin: origin, size: size), styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         p.level = .statusBar

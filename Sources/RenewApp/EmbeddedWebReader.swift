@@ -53,35 +53,23 @@ enum EmbeddedWebReader {
     static func pageURLs(pid: pid_t) -> [String] {
         prime(pid: pid)
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.5)
+        var ax = AXReader(timeout: 0.5)
 
-        let windows = copy(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        let windows = ax.copy(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
         var queue: [(el: AXUIElement, depth: Int)] = windows.map { ($0, 0) }
         var head = 0
         var urls: [String] = []
         while head < queue.count && head < maxNodes {
             let (el, depth) = queue[head]
             head += 1
-            if (copy(el, kAXRoleAttribute) as? String) == "AXWebArea", let u = url(el) {
+            if ax.string(el, kAXRoleAttribute) == "AXWebArea", let u = ax.url(el) {
                 if !urls.contains(u) { urls.append(u) }
                 if u.lowercased().hasPrefix("http") { continue }
             }
-            if depth < maxDepth, let kids = copy(el, kAXChildrenAttribute) as? [AXUIElement] {
+            if depth < maxDepth, let kids = ax.children(el) {
                 for k in kids { queue.append((k, depth + 1)) }
             }
         }
         return urls
-    }
-
-    private static func copy(_ el: AXUIElement, _ attr: String) -> CFTypeRef? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, attr as CFString, &value) == .success else { return nil }
-        return value
-    }
-
-    private static func url(_ el: AXUIElement) -> String? {
-        guard let v = copy(el, "AXURL") else { return nil }
-        if let u = v as? URL { return u.absoluteString }
-        return v as? String
     }
 }

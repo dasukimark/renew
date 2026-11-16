@@ -42,6 +42,7 @@ final class Monitor: NSObject {
             guard session != oldValue else { return }
             ruleSet = RuleSet(strings: session?.rules ?? [])
             server.update(endsAt: session?.endsAt)
+            if session == nil { switchBlocker.setEnabled(false) }
             if let s = session { log("session: ends \(s.endsAt), rules \(s.rules)") } else { log("no session") }
         }
     }
@@ -74,10 +75,24 @@ final class Monitor: NSObject {
     /// counts as unwatchable instead of silently passing.
     private var readFailures: [String: Int] = [:]
     private static let maxReadFailures = 20
+    private var lastSettingsCheck = Date.distantPast
+    /// System Settings page titles already logged, to confirm the names
+    /// `SettingsGuard` matches on this macOS version.
+    private var seenSettingsTitles: Set<String> = []
+    private let switchBlocker = OffSwitchBlocker()
+    /// Drawn below `notice`, so the two banners never overlap.
+    private let settingsNotice = NoticeController(slot: 1)
+    private let settingsQueue = DispatchQueue(label: "agent.settings", qos: .userInitiated)
+    private var settingsBusy = false
+    private var lastSettingsTitleRead = Date.distantPast
+    /// Its own throttle, so another overlay can't hide why System Settings closed.
+    private var lastSettingsOverlay = Date.distantPast
+    private var settingsNoticeHide: DispatchWorkItem?
 
     init(localSession: SessionInfo?) {
         self.localSession = localSession
         super.init()
+        switchBlocker.onBlocked = { [weak self] what in self?.showSwitchNotice(what) }
     }
 
     func start() {
@@ -92,6 +107,13 @@ final class Monitor: NSObject {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appLaunched(_:)),
             name: NSWorkspace.didLaunchApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                self?.switchBlocker.setFrontmostPID(app.processIdentifier)
+            }
+        }
+        switchBlocker.setFrontmostPID(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
 
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in self?.sync() }
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.check() }
@@ -152,8 +174,10 @@ final class Monitor: NSObject {
     // MARK: monitoring
 
     private func check() {
+        switchBlocker.stopIfUntrusted()
         guard session != nil else { return }
         guard sessionLive else { setSession(nil); return }
+        checkSettings()
         guard !busy else { return }
 
         let ws = NSWorkspace.shared
@@ -312,6 +336,66 @@ final class Monitor: NSObject {
                      endsAt: session?.endsAt)
     }
 
+    // MARK: System Settings
+
+    /// On the pages locked during sessions (see `SettingsGuard`), switches can
+    /// be turned on but not off (`OffSwitchBlocker`). If that filter can't run,
+    /// System Settings is closed while it shows one of those pages instead.
+    ///
+    /// The filter is only enabled while System Settings is running, since it
+    /// holds up every click while it looks. Window titles are read on
+    /// `settingsQueue`, so an unresponsive System Settings never holds up the
+    /// browser checks: every second when they decide whether to close it,
+    /// every 10 seconds (to log new page names) while the filter handles it.
+    private func checkSettings() {
+        let now = Date()
+        guard now.timeIntervalSince(lastSettingsCheck) >= 1 else { return }
+        lastSettingsCheck = now
+        let apps = SettingsGuard.runningApps
+        switchBlocker.setSettingsPIDs(Set(apps.map(\.processIdentifier)))
+        let filtering = switchBlocker.ensureStarted(enabled: !apps.isEmpty)
+        guard let app = apps.first, !settingsBusy,
+              !filtering || now.timeIntervalSince(lastSettingsTitleRead) >= 10 else { return }
+        lastSettingsTitleRead = now
+        settingsBusy = true
+        settingsQueue.async { [weak self] in
+            let titles = SettingsGuard.windowTitles(of: app)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.settingsBusy = false
+                for t in titles where !self.seenSettingsTitles.contains(t) {
+                    self.seenSettingsTitles.insert(t)
+                    log("System Settings page open during a session: \(t)")
+                }
+                guard !filtering, self.sessionLive, let locked = titles.first(where: SettingsGuard.isLocked) else { return }
+                self.closeSettings(app, locked: locked)
+            }
+        }
+    }
+
+    /// Fallback when the switch filter can't run.
+    private func closeSettings(_ app: NSRunningApplication, locked: String) {
+        log("closing System Settings: \(locked) is locked during a focus session")
+        app.terminate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            if !app.isTerminated { app.forceTerminate() }
+        }
+        let now = Date()
+        guard now.timeIntervalSince(lastSettingsOverlay) > 3 else { return }
+        lastSettingsOverlay = now
+        overlay.show(title: "\(locked) is locked during your session",
+                     detail: "Renew closes this page in System Settings until the focus session ends, so its background services and permissions can't be turned off. The rest of System Settings works as usual.",
+                     endsAt: session?.endsAt)
+    }
+
+    private func showSwitchNotice(_ what: String) {
+        settingsNotice.show("Blocked \(what): switches here can be turned on but not off until your session ends")
+        settingsNoticeHide?.cancel()
+        let hide = DispatchWorkItem { [weak self] in self?.settingsNotice.hide() }
+        settingsNoticeHide = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: hide)
+    }
+
     // MARK: built-in browsers in other apps
 
     /// Apps whose built-in browser Renew checks: everything with a Dock icon
@@ -432,7 +516,11 @@ final class Monitor: NSObject {
     @objc private func appLaunched(_ note: Notification) {
         guard session != nil, sessionLive,
               let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-        if isUnsupportedBrowserApp(app) {
+        if app.bundleIdentifier == SettingsGuard.bundleID {
+            // Before the next settings check, so a quick click is still filtered.
+            switchBlocker.addSettingsPID(app.processIdentifier)
+            switchBlocker.ensureStarted(enabled: true)
+        } else if isUnsupportedBrowserApp(app) {
             quitUnsupported(app)
         } else if hasEmbeddedWeb(app), AXIsProcessTrusted() {
             primed.insert(app.processIdentifier)
