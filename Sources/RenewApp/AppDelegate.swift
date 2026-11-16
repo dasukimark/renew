@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Only the installed copy (or a local test run) watches browsers. Any other
         // copy, such as a freshly built one, is just the installer/settings UI.
         let watches = model.isRunningInstalledCopy || localSession != nil
+        if watches && localSession == nil && !takeOverFromOtherCopies() { return }
         if watches {
             monitor.start()
             statusItem = StatusItemController(model: model) { [weak self] in self?.showWindow() }
@@ -47,6 +48,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if !model.isInstalled && localSession == nil { model.section = .setup }
         if !launchedInBackground { showWindow() }
+    }
+
+    /// Only one installed copy may watch browsers (two would fight over the
+    /// block-page port). Renew can be started by launchd (its login agent),
+    /// by LaunchServices (opened by hand, or by the installer), so a second
+    /// copy can appear. launchd's copy wins; otherwise the copy that was there
+    /// first stays, with the process ID breaking ties so exactly one copy
+    /// stays. Returns false if this copy is quitting.
+    ///
+    /// Two copies starting at the same moment may not see each other yet, so
+    /// the copy that stays checks once more a few seconds later.
+    private func takeOverFromOtherCopies() -> Bool {
+        let showWindowNote = Notification.Name("com.renew.app.showWindow")
+        let isLaunchdCopy = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == Paths.agentLabel
+
+        func others() -> [NSRunningApplication] {
+            let me = NSRunningApplication.current.processIdentifier
+            return NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.renew.app")
+                .filter { $0.processIdentifier != me && !$0.isTerminated
+                    && $0.bundleURL?.resolvingSymlinksInPath().path == Paths.agentApp }
+        }
+
+        /// Returns true if this copy stays.
+        func resolve() -> Bool {
+            let found = others()
+            guard !found.isEmpty else { return true }
+            if isLaunchdCopy {
+                log("replacing \(found.count) other running copy/copies with launchd's")
+                // A copy opened in the last few seconds was opened to show its
+                // window (by hand or by the installer); show it from here instead.
+                let justOpened = found.contains { ($0.launchDate?.timeIntervalSinceNow ?? -60) > -15 }
+                found.forEach { $0.forceTerminate() }
+                if justOpened { showWindow() }
+                return true
+            }
+            // Same fallback for a missing launch date on both sides, so the order
+            // is strict and the same as seen from either copy.
+            func key(_ app: NSRunningApplication) -> (Date, pid_t) { (app.launchDate ?? .distantFuture, app.processIdentifier) }
+            let mine = key(NSRunningApplication.current)
+            guard found.contains(where: { key($0) < mine }) else { return true }
+            log("another copy is already running; handing over to it")
+            if !launchedInBackground {
+                DistributedNotificationCenter.default().postNotificationName(showWindowNote, object: nil, deliverImmediately: true)
+            }
+            allowQuit = true
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            return false
+        }
+
+        guard resolve() else { return false }
+        DistributedNotificationCenter.default().addObserver(forName: showWindowNote, object: nil, queue: .main) { [weak self] _ in
+            self?.showWindow()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { _ = resolve() }
+        return true
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

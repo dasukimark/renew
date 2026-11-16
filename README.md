@@ -95,6 +95,8 @@ or run `sudo renew uninstall`, between sessions. An unused request expires;
   │    Accessibility → overlay + hide the app; bringing it back gives 15 s to close the page
   ├─ supported browser it can't watch (permission off, or unreadable for ~10 s)
   │    → quit + overlay, again on every relaunch
+  ├─ System Settings showing Login Items & Extensions or Privacy & Security
+  │    (including its Accessibility and Automation pages) → switches turn on, not off
   └─ every 2 s: heartbeat + permission report → renewd
         │
 renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/status/report only)
@@ -116,6 +118,24 @@ and closes it again whenever it's reopened, until the session ends or you turn t
 permission back on. Turning off Accessibility does the same to Firefox. Other browsers
 keep working with blocking as normal.
 
+### Turning Renew off in System Settings
+
+macOS lists Renew's three launchd services under one **Renew** switch in
+**System Settings → General → Login Items & Extensions → Allow in the Background**.
+Turning it off stops all of them at once, and no app can turn it back on. So during
+a session, switches on that page can only be turned on:
+
+- On Login Items & Extensions and Privacy & Security (including its Accessibility
+  and Automation pages), clicks that would turn a switch off or remove an item from
+  a list are blocked, and so are Space on a switch that's on and Delete in a list.
+  Renew's own switches can't be turned off on any page, whatever macOS calls it.
+  Turning things on, and the rest of System Settings, work as usual. If System
+  Settings is too slow to answer, the click is dropped rather than let through;
+  click again.
+- This needs Accessibility. If that's off, Renew leaves System Settings alone so you
+  can turn it back on, and it removes the filter the moment the permission goes, so
+  input isn't held up. If the filter can't start, Renew closes those pages instead.
+
 Renew never changes your network settings, `/etc/hosts` or the firewall.
 
 Unknown Chromium apps are closed only when they have a Dock icon, so headless
@@ -128,13 +148,15 @@ Renew is friction, not a vault. An admin who goes through all of this can
 still get out:
 
 - remove the configuration profile (needs its password)
-- `sudo launchctl bootout` the guard, the daemon *and* the app's LaunchAgent fast
-  enough, then delete `/var/db/com.renew/backup` and the installed files
-  (with alerts on, this tells your partner)
+- use Terminal and `sudo` to stop every part of Renew (both daemons and the app)
+  in an order that stops each part from putting the others back (with alerts on,
+  this tells your partner)
 - boot into Safe Mode or Recovery and delete things, or change the clock while
   the Mac is off
-- turn off Accessibility, which stops Renew seeing built-in browsers inside apps
-  (Firefox is closed in that case, but apps like T3 Code are left running)
+- turn off Accessibility before a session, which stops Renew seeing built-in
+  browsers inside apps and System Settings' pages, so the Renew switch can then be
+  turned off mid-session (Firefox is closed in that case, but apps like T3 Code are
+  left running)
 - reach the web without a browser window: `curl`, a terminal browser, a small
   WKWebView app, or an AI agent fetching pages
 
@@ -152,6 +174,15 @@ else hold the admin password.
   effect when the profile is delivered by MDM on some macOS versions. The removal
   password and browser policies work when installed by hand.
 - The block page runs on plain `http://127.0.0.1`; that's expected.
+- Locking System Settings pages relies on their window titles, which are English
+  names (macOS 13 and later; macOS 27 moved the Accessibility list to "Device Control
+  and Data Access"). Renew's own switches are recognised by the "Renew" label in
+  their row instead, so they're protected on any page. The top-level Accessibility page (Zoom, display
+  options) shares its name, so its switches also only turn on during a session.
+  Changes made by a script or VoiceOver rather than a click or key press aren't
+  caught. Other languages, or a renamed page in
+  a future macOS, aren't caught (the app logs every page title it sees during a
+  session, to make this easy to update).
 
 ## Development
 
