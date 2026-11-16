@@ -34,9 +34,18 @@ Renew lives in the **menu bar**: a lock icon, with a countdown during a session.
 Click it to start a quick session or add time, or choose **Open Renew…** for
 the window:
 
-- **Focus**: pick a duration (25 min to 4 hours, or custom), tick blocklists, add
-  extra sites and start. During a session it shows a countdown ring and the blocked
-  sites, and lets you add time or block another site. There's no stop button.
+- **Block Sessions**: your saved block sessions. Each has a name, its own
+  blocklists and sites, and either a length (start it with one click) or **set
+  times on chosen days** (e.g. weekdays 9:00–17:00, or 22:00–06:00 overnight).
+  Scheduled block sessions start on their own, even with the window closed, and
+  can't be stopped once they start; you can edit, pause or delete them any time
+  before then. They live in `~/.config/renew/sessions.json`, and the app hands the
+  schedules (with their sites resolved) to the background service, which starts
+  them. A running block session shows below the list.
+- **Quick Block**: a one-off block. Pick a length (25 min to 4 hours, or type a
+  custom one), tick blocklists, add extra sites and start. During a block session
+  it shows a countdown ring and the blocked sites, and lets you add time or block
+  another site. There's no stop button.
 - **Blocklists**: edit the built-in lists (social, video, news, test) or make your own.
 - **Setup**: service status, permissions, the lock-down profile, accountability
   alerts, and uninstall (see below).
@@ -53,13 +62,19 @@ Rule syntax:
 | `!music.youtube.com` | an allow exception (always wins) |
 
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
-`renew status`, `renew extend 30m`, `renew add x.com`, `renew alerts set <url>`,
-`renew uninstall`).
+`renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
+`renew alerts set <url>`, `renew uninstall`).
+
+Schedules can't be skipped by changing the Mac's clock: renewd also keeps
+time on a clock that ignores date changes (since the Mac last started), and a
+window opens if either clock says so. Changing the date is reported as tampering
+whenever schedules are set. Once a block session is running, it counts down on
+the same date-proof clock.
 
 ### Accountability alerts
 
 Renew can message someone you trust when it's stopped, its files are deleted or
-changed, or the Mac's clock is changed during a focus session, and when an
+changed, or the Mac's clock is changed during a block session, and when an
 uninstall is requested, cancelled or done. Your partner installs the free
 [ntfy](https://ntfy.sh) app and subscribes to a hard-to-guess topic, and you enter
 `https://ntfy.sh/<topic>` in **Setup → Accountability alerts** (or

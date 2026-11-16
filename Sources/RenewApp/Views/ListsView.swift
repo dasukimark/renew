@@ -7,6 +7,7 @@ struct ListsView: View {
     @State private var newRule = ""
     @State private var creating = false
     @State private var newListName = ""
+    @State private var confirmingDelete = false
 
     var body: some View {
         HSplitView {
@@ -27,7 +28,7 @@ struct ListsView: View {
                 HStack(spacing: 2) {
                     Button { newListName = ""; creating = true } label: { Image(systemName: "plus") }
                         .help("New blocklist")
-                    Button { deleteSelected() } label: { Image(systemName: "minus") }
+                    Button { confirmDelete() } label: { Image(systemName: "minus") }
                         .help("Delete blocklist")
                         .disabled(selected == nil || ListStore.isBuiltIn(selected ?? ""))
                     Spacer()
@@ -44,6 +45,11 @@ struct ListsView: View {
         .onAppear {
             model.reloadLists()
             if selected == nil { selected = model.sortedListNames.first }
+        }
+        .confirmationDialog("Delete “\(selected?.capitalized ?? "")”?", isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) { deleteSelected() }
+        } message: {
+            Text("Used by \(sessionsUsing(selected ?? "").map { "“\($0.name)”" }.joined(separator: ", ")). Scheduled block sessions left with nothing to block won't start.")
         }
         .alert("New blocklist", isPresented: $creating) {
             TextField("Name", text: $newListName)
@@ -101,7 +107,7 @@ struct ListsView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("`reddit.com` blocks the site and its subdomains · `youtube.com/shorts` blocks just that part · `keyword:casino` blocks any URL containing the word · `!music.youtube.com` always allows")
-                    Text("Changes apply to your next session. To add a site to the running session, use Focus → Block another site.")
+                    Text("Changes apply to your next session. To add a site to the running session, use Quick Block → Block another site.")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -116,7 +122,7 @@ struct ListsView: View {
     }
 
     private func add(to name: String) {
-        let parts = newRule.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+        let parts = parseSites(newRule)
         let (valid, rejected) = canonicalRules(parts)
         if !rejected.isEmpty {
             model.errorMessage = "Not a valid site: \(rejected.joined(separator: ", "))"
@@ -156,6 +162,16 @@ struct ListsView: View {
         } catch {
             model.errorMessage = "Couldn't save: \(error.localizedDescription)"
         }
+    }
+
+    private func sessionsUsing(_ list: String) -> [BlockSession] {
+        model.savedSessions.filter { $0.lists.contains(list) }
+    }
+
+    /// Asks first if a saved block session uses the list.
+    private func confirmDelete() {
+        guard let name = selected else { return }
+        if sessionsUsing(name).isEmpty { deleteSelected() } else { confirmingDelete = true }
     }
 
     private func deleteSelected() {

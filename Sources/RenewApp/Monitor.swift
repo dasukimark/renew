@@ -324,7 +324,7 @@ final class Monitor: NSObject {
         guard now.timeIntervalSince(lastUnsupportedOverlay) > 3 else { return }
         lastUnsupportedOverlay = now
         let why = engine.map { "\(name) looks like a browser built on \($0.rawValue). " } ?? ""
-        overlay.show(title: "\(name) isn't allowed during a focus session",
+        overlay.show(title: "\(name) isn't allowed during a block session",
                      detail: why + "Renew can only watch Safari, Chrome, Edge, Brave, Arc, Vivaldi and Firefox, so other browsers are closed until the session ends.",
                      endsAt: session?.endsAt)
     }
@@ -368,7 +368,7 @@ final class Monitor: NSObject {
 
     /// Fallback when the switch filter can't run.
     private func closeSettings(_ app: NSRunningApplication, locked: String) {
-        log("closing System Settings: \(locked) is locked during a focus session")
+        log("closing System Settings: \(locked) is locked during a block session")
         app.terminate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             if !app.isTerminated { app.forceTerminate() }
@@ -377,7 +377,7 @@ final class Monitor: NSObject {
         guard now.timeIntervalSince(lastSettingsOverlay) > 3 else { return }
         lastSettingsOverlay = now
         overlay.show(title: "\(locked) is locked during your session",
-                     detail: "Renew closes this page in System Settings until the focus session ends, so its background services and permissions can't be turned off. The rest of System Settings works as usual.",
+                     detail: "Renew closes this page in System Settings until the block session ends, so its background services and permissions can't be turned off. The rest of System Settings works as usual.",
                      endsAt: session?.endsAt)
     }
 

@@ -29,6 +29,6 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Renew reads the address of your current browser tab and swaps blocked sites for a block page during focus sessions.</string>
+	<string>Renew reads the address of your current browser tab and swaps blocked sites for a block page during block sessions.</string>
 </dict>
 </plist>

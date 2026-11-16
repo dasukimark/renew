@@ -41,7 +41,7 @@ enum Uninstall {
         }
         if let s = session, s.isActive() {
             let left = Int(s.endsAt.timeIntervalSinceNow)
-            die("A focus session is running (\(DurationText.format(left)) left, ends \(clock(s.endsAt))). Uninstall is allowed after it ends.")
+            die("A block session is running (\(DurationText.format(left)) left, ends \(clock(s.endsAt))). Uninstall is allowed after it ends.")
         }
         guard getuid() == 0 else { die("Uninstall is unlocked. Finish it with sudo: sudo renew uninstall") }
 
@@ -107,7 +107,7 @@ enum Uninstall {
         print("""
         Uninstall requested. Renew keeps working until then.
 
-        You can finish it from \(clock(u.unlocksAt)) until \(clock(u.expiresAt)), between focus sessions:
+        You can finish it from \(clock(u.unlocksAt)) until \(clock(u.expiresAt)), between block sessions:
             sudo renew uninstall
 
         Changed your mind? renew uninstall --cancel

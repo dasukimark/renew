@@ -286,7 +286,7 @@ final class OffSwitchBlocker {
 
     private func report(_ what: String, page: String) {
         DispatchQueue.main.async { [weak self] in
-            log("blocked \(what) on \(page) during a focus session")
+            log("blocked \(what) on \(page) during a block session")
             self?.onBlocked?(what)
         }
     }

@@ -34,6 +34,7 @@ Usage:
   renew extend <duration>                              add time to the running session
   renew add <SITE>...                                  block more sites in the running session
   renew status                                         show the session and agent health
+  renew schedules                                      show scheduled block sessions (set them up in the app)
   renew lists                                          show all blocklists
   renew lists add <NAME> <SITE>...                     add sites to a list (creates it)
   renew lists remove <NAME> [SITE]...                  remove sites, or reset/delete the list
@@ -86,12 +87,12 @@ func collectRules(_ args: [String]) -> [String] {
 
 func printStatus(_ s: Status) {
     guard let session = s.session else {
-        print("No focus session running.")
+        print("No block session running.")
         printAgents(s)
         return
     }
     let left = Int(session.endsAt.timeIntervalSince(s.serverTime))
-    print("● Focus session active: \(DurationText.format(left)) left (ends \(clock(session.endsAt)))")
+    print("● Block session active: \(DurationText.format(left)) left (ends \(clock(session.endsAt)))")
     print("  Blocking: \(session.rules.joined(separator: ", "))")
     printAgents(s)
 }
@@ -101,6 +102,24 @@ func printExtras(_ s: Status) {
     if let u = s.uninstall {
         print(u.unlocked ? "  Uninstall: unlocked until \(clock(u.expiresAt)) (sudo renew uninstall)"
                          : "  Uninstall: requested, unlocks \(clock(u.unlocksAt))")
+    }
+}
+
+/// After a blocklist edit, hands the renewd the schedules re-resolved
+/// against the new lists, so they don't wait for the app to notice.
+func syncSchedules() {
+    guard let status = (try? DaemonClient.send(Request(cmd: .status)))?.status else { return }
+    let desired = BlockSessionStore.schedules()
+    guard desired != (status.schedules ?? []) else { return }
+    do {
+        let r = try DaemonClient.send(Request(cmd: .setSchedules, schedules: desired))
+        if r.ok {
+            print("Updated the scheduled block sessions that use this list.")
+        } else {
+            print("⚠︎ Couldn't update scheduled block sessions: \(r.error ?? "refused")")
+        }
+    } catch {
+        print("⚠︎ Couldn't update scheduled block sessions: \(error)")
     }
 }
 
@@ -149,6 +168,25 @@ case "status":
     printStatus(st)
     printExtras(st)
 
+case "schedules":
+    let st = send(Request(cmd: .status))
+    guard let schedules = st.schedules, !schedules.isEmpty else {
+        print("No scheduled block sessions. Create them in the Renew app under Block Sessions.")
+        exit(0)
+    }
+    for sc in schedules {
+        let state: String
+        if let end = sc.activeWindowEnd(at: st.serverTime) {
+            state = "active until \(clock(end))"
+        } else if let next = sc.nextStart(after: st.serverTime) {
+            state = "next \(clock(next))"
+        } else {
+            state = "no upcoming start"
+        }
+        print("\(sc.name.isEmpty ? "(untitled)" : sc.name): \(sc.summary()) (\(state))")
+        print("  Blocking: \(sc.rules.joined(separator: ", "))")
+    }
+
 case "alerts":
     switch args.first ?? "show" {
     case "show":
@@ -188,12 +226,14 @@ case "lists":
             let list = try ListStore.add(args[1], extra)
             print("\(args[1].lowercased()): \(list.joined(separator: ", "))")
         } catch { die("couldn't save lists: \(error)") }
+        syncSchedules()
     case "remove", "rm":
         guard args.count >= 2 else { die("usage: renew lists remove <NAME> [SITE]...") }
         do {
             let remaining = try ListStore.remove(args[1], Array(args.dropFirst(2)))
             print("\(args[1].lowercased()): \(remaining?.joined(separator: ", ") ?? "(deleted)")")
         } catch { die("couldn't save lists: \(error)") }
+        syncSchedules()
     default:
         die("usage: renew lists [show [NAME] | add NAME SITE... | remove NAME [SITE...]]")
     }

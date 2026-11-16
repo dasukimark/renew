@@ -12,7 +12,7 @@ import RenewShared
 final class Daemon {
     static let minSession = 60
     static let maxSession = 7 * 86_400
-    static let maxRules = 2_000
+    static let maxRules = Schedule.maxRules
 
     private let dev: Bool
     private let queue = DispatchQueue(label: "renewd.state")
@@ -24,6 +24,8 @@ final class Daemon {
     private var lastKick = Date.distantPast
     /// Monotonic time of the last state.json checkpoint.
     private var lastCheckpointSave: UInt64 = 0
+    /// Wall clock minus the anchored clock at the last tick (see `runSchedules`).
+    private var lastClockDivergence: TimeInterval = 0
     private var server: SocketServer!
     private var timer: DispatchSourceTimer?
     private var termSource: DispatchSourceSignal?
@@ -48,11 +50,15 @@ final class Daemon {
                 log("uninstall request expired while renewd was not running")
             }
             state.checkpoint(at: r)
+            // Keep this boot's anchor across renewd restarts, so restarting
+            // renewd after changing the date doesn't launder the change.
+            if state.wallAnchor?.trustedWall(at: r) == nil { state.wallAnchor = WallAnchor(at: r) }
+            lastClockDivergence = clockDivergence(r)
             StateStore.save(state)
             lastCheckpointSave = r.mono
             log("renewd started\(dev ? " (dev mode)" : ""); session: \(describe(state.activeSession(at: r)))")
             if rebooted, let s = state.activeSession(at: r) {
-                alert("The Mac restarted during a focus session. Renew is running again (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left).",
+                alert("The Mac restarted during a block session. Renew is running again (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left).",
                       kind: "rebooted", every: 300)
             }
         }
@@ -99,22 +105,13 @@ final class Daemon {
             let (valid, rejected) = canonicalRules(req.rules ?? [])
             if !rejected.isEmpty { return fail("Invalid rule(s): \(rejected.joined(separator: ", "))") }
 
-            if var s = state.activeSession(at: r) {
-                // Starting during a session can only lengthen it and add rules.
-                s.endsAt = max(s.endsAt, now.addingTimeInterval(duration))
-                s.rules = merge(s.rules, valid)
-                state.setSession(s, at: r)
-                log("start merged into running session by uid \(uid): ends \(s.endsAt), \(s.rules.count) rules")
-            } else {
-                guard !valid.isEmpty else { return fail("Nothing to block. Pass sites or --list.") }
-                state.setSession(SessionInfo(startedAt: now, endsAt: now.addingTimeInterval(duration), rules: valid), at: r)
-                if !dev { SelfRepair.refreshBackups() }
-                log("session started by uid \(uid): \(Int(duration))s, rules \(valid)")
+            if state.activeSession(at: r) == nil, valid.isEmpty {
+                return fail("Nothing to block. Pass sites or --list.")
             }
-            StateStore.save(state)
+            startOrMerge(until: now.addingTimeInterval(duration), rules: valid, at: r, by: "uid \(uid)")
 
         case .extend:
-            guard var s = state.activeSession(at: r) else { return fail("No focus session is running.") }
+            guard var s = state.activeSession(at: r) else { return fail("No block session is running.") }
             guard let d = req.durationSeconds, d > 0 else { return fail("Give a positive duration.") }
             let capped = min(s.endsAt.addingTimeInterval(TimeInterval(d)),
                              now.addingTimeInterval(TimeInterval(Self.maxSession)))
@@ -124,7 +121,7 @@ final class Daemon {
             log("session extended by uid \(uid) to \(s.endsAt)")
 
         case .add:
-            guard var s = state.activeSession(at: r) else { return fail("No focus session is running.") }
+            guard var s = state.activeSession(at: r) else { return fail("No block session is running.") }
             let (valid, rejected) = canonicalRules(req.rules ?? [])
             if !rejected.isEmpty { return fail("Invalid rule(s): \(rejected.joined(separator: ", "))") }
             s.rules = merge(s.rules, valid)
@@ -158,8 +155,11 @@ final class Daemon {
                 StateStore.save(state)
                 let unlocks = now.addingTimeInterval(UninstallPolicy.delay)
                 log("uninstall requested by uid \(uid); unlocks \(unlocks)")
-                alert("Someone asked to uninstall Renew. It can be removed after \(Self.dateText(unlocks)), if no focus session is running then.")
+                alert("Someone asked to uninstall Renew. It can be removed after \(Self.dateText(unlocks)), if no block session is running then.")
             }
+
+        case .setSchedules:
+            if let error = setSchedules(req.schedules ?? [], by: uid) { return fail(error) }
 
         case .cancelUninstall:
             if state.uninstall != nil {
@@ -170,6 +170,105 @@ final class Daemon {
             }
         }
         return Response(ok: true, status: makeStatus(now, r))
+    }
+
+    /// Starts a session that ends at `end`, or folds into the running one.
+    /// Only ever makes things stricter: the later end and the union of rules
+    /// win. Returns whether anything changed.
+    @discardableResult
+    private func startOrMerge(until end: Date, rules: [String], at r: ClockReading, by who: String) -> Bool {
+        let now = r.wall
+        let end = min(end, now.addingTimeInterval(TimeInterval(Self.maxSession)))
+        if var s = state.activeSession(at: r) {
+            let merged = merge(s.rules, rules)
+            // Under a second of difference is rounding, not a longer session.
+            let ends = end.timeIntervalSince(s.endsAt) >= 1 ? end : s.endsAt
+            guard merged != s.rules || ends != s.endsAt else { return false }
+            s.rules = merged
+            s.endsAt = ends
+            state.setSession(s, at: r)
+            log("start merged into running session by \(who): ends \(s.endsAt), \(s.rules.count) rules")
+        } else {
+            guard !rules.isEmpty, end > now else { return false }
+            state.setSession(SessionInfo(startedAt: now, endsAt: end, rules: Array(rules.prefix(Self.maxRules))), at: r)
+            if !dev { SelfRepair.refreshBackups() }
+            log("session started by \(who): \(Int(end.timeIntervalSince(now)))s, rules \(rules)")
+        }
+        StateStore.save(state)
+        return true
+    }
+
+    static let maxSchedules = 50
+
+    /// Replaces the schedules. Allowed at any time: a schedule only starts
+    /// sessions, so removing one never ends or loosens a running session.
+    private func setSchedules(_ raw: [Schedule], by uid: uid_t) -> String? {
+        guard raw.count <= Self.maxSchedules else { return "At most \(Self.maxSchedules) scheduled block sessions." }
+        var clean: [Schedule] = []
+        var ids = Set<UUID>()
+        for raw in raw {
+            let s = raw.normalized()
+            let label = s.name.isEmpty ? "A scheduled block session" : "“\(s.name)”"
+            guard ids.insert(s.id).inserted else { return "\(label) is listed twice." }
+            guard s.days.isValid else { return "\(label) needs at least one day." }
+            guard s.window.isValid else { return "\(label) needs different start and end times." }
+            let rejected = canonicalRules(raw.rules).rejected
+            if !rejected.isEmpty { return "Invalid rule(s) in \(label): \(rejected.joined(separator: ", "))" }
+            guard !s.rules.isEmpty else { return "\(label) has nothing to block." }
+            clean.append(s)
+        }
+        let new: [Schedule]? = clean.isEmpty ? nil : clean
+        guard new != state.schedules else { return nil }
+        state.schedules = new
+        StateStore.save(state)
+        log("schedules set by uid \(uid): \(clean.map { "\($0.name) [\($0.summary())]" })")
+        return nil
+    }
+
+    /// Starts (or lengthens) a session for every schedule whose window is
+    /// open now. Idempotent, so it runs on every tick.
+    ///
+    /// Windows are checked against both the wall clock and the anchored
+    /// clock (wall time carried forward on the monotonic clock since boot),
+    /// so moving the date before a window opens doesn't skip it: whichever
+    /// says a window is open wins.
+    private func runSchedules(_ r: ClockReading) {
+        let divergence = clockDivergence(r)
+        defer { lastClockDivergence = divergence }
+        guard let schedules = state.schedules else { return }
+
+        let jump = divergence - lastClockDivergence
+        if abs(jump) >= Self.clockAlertThreshold, state.activeSession(at: r) == nil {
+            // During a session `checkpoint` already reports this.
+            let direction = jump > 0 ? "forward" : "back"
+            log("clock moved \(Int(jump))s with schedules set; schedules follow the real time")
+            alert("The Mac's clock was set \(direction) by \(DurationText.format(Int(abs(jump)))). Scheduled block sessions still start at the real time.",
+                  kind: "clock", every: 600)
+        }
+
+        var times = [r.wall]
+        // Small differences are ordinary clock drift and corrections.
+        if abs(divergence) >= Self.clockAlertThreshold / 2 { times.append(r.wall.addingTimeInterval(-divergence)) }
+        for s in schedules {
+            for t in times {
+                // A few seconds of slack keeps a just-finished session (monotonic
+                // clock) from restarting for the last instant of the window.
+                guard let end = s.activeWindowEnd(at: t) else { continue }
+                let left = end.timeIntervalSince(t)
+                guard left > 5 else { continue }
+                startOrMerge(until: r.wall.addingTimeInterval(left), rules: s.rules, at: r, by: "schedule “\(s.name)”")
+            }
+        }
+    }
+
+    /// How far the wall clock is from the anchored clock (0 if unknown).
+    private func clockDivergence(_ r: ClockReading) -> TimeInterval {
+        if state.wallAnchor?.trustedWall(at: r) == nil {
+            state.wallAnchor = WallAnchor(at: r)
+            StateStore.save(state)
+        }
+        guard let trusted = state.wallAnchor?.trustedWall(at: r) else { return 0 }
+        return r.wall.timeIntervalSince(trusted)
     }
 
     /// Alerts can be turned on at any time, but changed or turned off only
@@ -185,7 +284,7 @@ final class Daemon {
         let old = state.alertURL
         guard new != old else { return nil }
         if old != nil, state.activeSession(at: r) != nil {
-            return "Alerts can't be changed or turned off during a focus session."
+            return "Alerts can't be changed or turned off during a block session."
         }
         if let old {
             alert(new == nil ? "Alerts from Renew were turned off. This is the last message you'll get here."
@@ -196,7 +295,7 @@ final class Daemon {
         StateStore.save(state)
         log("alerts \(new == nil ? "turned off" : "set to \(new!)") by uid \(uid)")
         if new != nil {
-            alert("Renew alerts are on. You'll hear here if Renew is stopped, its files are tampered with, or the clock is changed during a focus session, and before it can be uninstalled.")
+            alert("Renew alerts are on. You'll hear here if Renew is stopped, its files are tampered with, or the clock is changed during a block session, and before it can be uninstalled.")
         }
         return nil
     }
@@ -224,7 +323,7 @@ final class Daemon {
         StateStore.save(state)
         if let s = state.activeSession(at: r) {
             log("SIGTERM during a session")
-            alert("Renew's background service was stopped during a focus session (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
+            alert("Renew's background service was stopped during a block session (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
                   kind: "stopped", every: 60, wait: true)
         }
         log("renewd exiting")
@@ -248,7 +347,8 @@ final class Daemon {
             serverTime: now,
             agents: agents.values.sorted { $0.uid < $1.uid },
             alertURL: state.alertURL,
-            uninstall: state.uninstallStatus(at: r)
+            uninstall: state.uninstallStatus(at: r),
+            schedules: state.schedules
         )
     }
 
@@ -264,15 +364,16 @@ final class Daemon {
             StateStore.save(state)
             log("uninstall request expired")
         }
+        runSchedules(r)
 
         checkpoint(r)
 
         let active = state.activeSession(at: r)
-        if (active != nil || state.alertURL != nil || state.uninstall != nil)
+        if (active != nil || state.alertURL != nil || state.uninstall != nil || state.schedules != nil)
             && !FileManager.default.fileExists(atPath: Paths.stateFile) {
             log("state file was removed; rewriting")
             StateStore.save(state)
-            if active != nil { alert("Renew's session file was deleted during a focus session. Renew restored it.", kind: "state-deleted", every: 600) }
+            if active != nil { alert("Renew's session file was deleted during a block session. Renew restored it.", kind: "state-deleted", every: 600) }
         }
         server.ensureBound()
         updateConsole(now)
@@ -282,7 +383,7 @@ final class Daemon {
             if deep { lastDeepCheck = now }
             let restored = SelfRepair.repair(deep: deep)
             if !restored.isEmpty {
-                alert("Renew's files were deleted or changed during a focus session. Renew put them back: \(restored.joined(separator: ", ")).",
+                alert("Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
                       kind: "repair", every: 600)
             }
             SelfRepair.ensureLoaded(label: Paths.guardLabel, plist: Paths.guardPlist)
@@ -301,7 +402,7 @@ final class Daemon {
             log("clock moved \(Int(shift))s during a session; session end unaffected (now \(describe(state.activeSession(at: r))))")
             if abs(shift) >= Self.clockAlertThreshold {
                 let direction = shift > 0 ? "forward" : "back"
-                alert("The Mac's clock was set \(direction) by \(DurationText.format(Int(abs(shift)))) during a focus session. The session still ends on time.",
+                alert("The Mac's clock was set \(direction) by \(DurationText.format(Int(abs(shift)))) during a block session. The session still ends on time.",
                       kind: "clock", every: 600)
             }
         } else if r.mono &- lastCheckpointSave >= Self.checkpointInterval {
@@ -315,12 +416,14 @@ final class Daemon {
     /// the later end time and the union of rules win, so editing the file
     /// can't shorten or loosen a running session.
     ///
-    /// renewd owns the alert destination and the uninstall request: if the
+    /// renewd owns the alert destination, the uninstall request and the
+    /// schedules: if the
     /// file disagrees (edited or deleted), renewd's copy is written back.
     private func adoptDiskState(_ r: ClockReading) {
         guard let file = StateStore.load() else { return }
-        if file.alertURL != state.alertURL || file.uninstall?.requestedAt != state.uninstall?.requestedAt {
-            log("state file disagrees about alerts/uninstall; rewriting")
+        if file.alertURL != state.alertURL || file.uninstall?.requestedAt != state.uninstall?.requestedAt
+            || file.schedules != state.schedules || file.wallAnchor != state.wallAnchor {
+            log("state file disagrees about alerts/uninstall/schedules; rewriting")
             StateStore.save(state)
         }
         guard var disk = file.activeSession(at: r) else { return }

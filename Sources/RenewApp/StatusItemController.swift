@@ -48,14 +48,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         if let s = model.session {
-            menu.addItem(disabled("Focusing: \(Format.countdown(model.secondsLeft)) left"))
+            menu.addItem(disabled("Blocking: \(Format.countdown(model.secondsLeft)) left"))
             menu.addItem(disabled("Ends at \(Format.clock(s.endsAt)) · \(s.rules.count) sites blocked"))
             menu.addItem(.separator())
             for m in [15, 30, 60] {
                 menu.addItem(action("Add \(Format.minutes(m))", #selector(extend(_:)), tag: m))
             }
         } else if model.isInstalled || model.isLocalTest {
-            menu.addItem(disabled("No focus session"))
+            menu.addItem(disabled("No block session"))
             menu.addItem(.separator())
             let lists = model.selectedLists.sorted().map { $0.capitalized }.joined(separator: ", ")
             if !lists.isEmpty {
