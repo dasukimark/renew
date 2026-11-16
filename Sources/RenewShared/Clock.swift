@@ -71,3 +71,24 @@ public struct Countdown: Codable, Equatable, Sendable {
         Countdown(remaining: remaining(at: r), at: r)
     }
 }
+
+/// Wall-clock time derived from the monotonic clock since a reading taken
+/// earlier in the same boot. Moving the date doesn't move it, so the daemon
+/// can still tell when a schedule's window really opens.
+public struct WallAnchor: Codable, Equatable, Sendable {
+    public var bootID: String
+    public var mono: UInt64
+    public var wall: Date
+
+    public init(at r: ClockReading = .now()) {
+        bootID = r.bootID
+        mono = r.mono
+        wall = r.wall
+    }
+
+    /// The trusted wall time at `r`, or nil if `r` is from another boot.
+    public func trustedWall(at r: ClockReading) -> Date? {
+        guard r.bootID == bootID, r.mono >= mono else { return nil }
+        return wall.addingTimeInterval(Double(r.mono - mono) / 1e9)
+    }
+}

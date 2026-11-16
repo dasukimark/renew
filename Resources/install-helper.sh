@@ -21,8 +21,8 @@ AGENT_PLIST="/Library/LaunchAgents/com.renew.agent.plist"
 
 # Installing over a running session would be an easy way around the lock.
 if [[ -S /var/run/renew.sock && -x "$INSTALL_DIR/bin/renew" ]]; then
-  if "$INSTALL_DIR/bin/renew" status 2>/dev/null | grep -q "Focus session active"; then
-    echo "A focus session is running. Install/update is allowed after it ends." >&2
+  if "$INSTALL_DIR/bin/renew" status 2>/dev/null | grep -qE "(Focus|Block) session active"; then
+    echo "A block session is running. Install/update is allowed after it ends." >&2
     exit 1
   fi
 fi

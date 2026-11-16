@@ -46,7 +46,7 @@ final class OverlayController: NSObject {
             return
         }
         let left = Int(endsAt.timeIntervalSinceNow)
-        let text = left > 0 ? "Focus session ends in \(DurationText.format(left))" : "Focus session finished"
+        let text = left > 0 ? "Block session ends in \(DurationText.format(left))" : "Block session finished"
         countdownLabels.forEach { $0.stringValue = text }
     }
 

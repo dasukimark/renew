@@ -173,7 +173,7 @@ struct SetupView: View {
     private var alertsSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Renew messages someone you trust if it's stopped, its files are tampered with, or the clock is changed during a focus session, and when an uninstall is requested or done.")
+                Text("Renew messages someone you trust if it's stopped, its files are tampered with, or the clock is changed during a block session, and when an uninstall is requested or done.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -238,7 +238,7 @@ struct SetupView: View {
                 }
             }
         } footer: {
-            Text("Uninstalling has a 24-hour cooling-off period. Once it unlocks, it stays available for 2 days, between focus sessions only.")
+            Text("Uninstalling has a 24-hour cooling-off period. Once it unlocks, it stays available for 2 days, between block sessions only.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -246,7 +246,7 @@ struct SetupView: View {
             Button("Request uninstall") { model.requestUninstall() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Renew keeps working as normal. You can uninstall it 24 hours from now, between focus sessions.\(model.alertURL != nil ? " Your accountability partner is told." : "")")
+            Text("Renew keeps working as normal. You can uninstall it 24 hours from now, between block sessions.\(model.alertURL != nil ? " Your accountability partner is told." : "")")
         }
     }
 
@@ -254,7 +254,7 @@ struct SetupView: View {
         guard let u = model.uninstallRequest else { return "Removes the app and its background service, after a 24-hour wait." }
         if model.uninstallUnlocked {
             let until = "Available until \(Format.clock(u.expiresAt))."
-            return model.session != nil ? "\(until) Not available during a focus session." : until
+            return model.session != nil ? "\(until) Not available during a block session." : until
         }
         let left = DurationText.format(Int(u.unlocksAt.timeIntervalSince(model.now)))
         return "Requested. Unlocks at \(Format.clock(u.unlocksAt)) (in \(left))."

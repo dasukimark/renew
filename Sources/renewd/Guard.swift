@@ -42,7 +42,7 @@ final class Guard {
         let restored = SelfRepair.repair(deep: deep)
         if !restored.isEmpty {
             Alerts.send(to: state.alertURL,
-                        "Renew's files were deleted or changed during a focus session. Renew put them back: \(restored.joined(separator: ", ")).",
+                        "Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
                         kind: "repair", minInterval: 600)
         }
         SelfRepair.ensureLoaded(label: Paths.daemonLabel, plist: Paths.daemonPlist)
@@ -55,7 +55,7 @@ final class Guard {
         if let state, let s = state.activeSession {
             log("SIGTERM during a session")
             Alerts.send(to: state.alertURL,
-                        "Renew's background service was stopped during a focus session (\(DurationText.format(Int(s.endsAt.timeIntervalSinceNow))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
+                        "Renew's background service was stopped during a block session (\(DurationText.format(Int(s.endsAt.timeIntervalSinceNow))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
                         kind: "stopped", minInterval: 60, wait: true)
         }
         log("guard exiting")

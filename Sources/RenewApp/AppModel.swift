@@ -5,30 +5,42 @@ import RenewShared
 /// Everything the UI shows, kept on the main thread.
 final class AppModel: ObservableObject {
     enum Section: String, CaseIterable, Identifiable {
-        case focus = "Focus"
+        case sessions = "Block Sessions"
+        case quick = "Quick Block"
         case lists = "Blocklists"
         case setup = "Setup"
         var id: String { rawValue }
         var symbol: String {
             switch self {
-            case .focus: return "timer"
+            case .sessions: return "calendar.badge.clock"
+            case .quick: return "bolt"
             case .lists: return "list.bullet.rectangle"
             case .setup: return "gearshape"
             }
         }
     }
 
-    @Published var section: Section = .focus
+    @Published var section: Section = .sessions
     @Published private(set) var status: Status?
     @Published private(set) var daemonReachable = false
     @Published private(set) var now = Date()
-    @Published private(set) var lists: [String: [String]] = ListStore.all()
+    @Published private(set) var lists: [String: [String]] = ListStore.all() {
+        didSet { recomputeDerived() }
+    }
     @Published private(set) var accessibilityGranted = Permissions.accessibilityGranted
     @Published private(set) var browsers: [BrowserPermission] = []
+    @Published private(set) var savedSessions: [BlockSession] = BlockSessionStore.all() {
+        didSet { recomputeDerived() }
+    }
+    /// Each saved session's sites, resolved against `lists`. Cached because
+    /// the views redraw every second.
+    private(set) var sessionRules: [UUID: [String]] = [:]
+    /// The schedules the daemon should enforce, from the saved sessions.
+    private(set) var desiredSchedules: [Schedule] = []
     @Published var busy = false
     @Published var errorMessage: String?
 
-    /// Lists ticked on the Focus screen, remembered between launches.
+    /// Lists ticked for a quick start, remembered between launches.
     @Published var selectedLists: Set<String> {
         didSet { UserDefaults.standard.set(Array(selectedLists), forKey: "selectedLists") }
     }
@@ -39,6 +51,18 @@ final class AppModel: ObservableObject {
     let isLocalTest: Bool
     private let queue = DispatchQueue(label: "app.model")
     private var clock: Timer?
+    private var scheduleSyncInFlight = false
+    /// The last schedules that failed to sync, and when. Retried after
+    /// `syncRetryInterval` (or sooner if they change or the service
+    /// reconnects), so a fixed service still gets them.
+    private var failedSync: (schedules: [Schedule], at: Date)?
+    /// The schedules an error was last shown for, so retries don't nag.
+    private var reportedSyncError: [Schedule]?
+    private let syncRetryInterval: TimeInterval = 30
+    /// Modification dates of lists.json and sessions.json, to pick up edits
+    /// made elsewhere (e.g. `renew lists add`).
+    private var listsFileDate: Date?
+    private var sessionsFileDate: Date?
 
     init(isLocalTest: Bool) {
         self.isLocalTest = isLocalTest
@@ -46,6 +70,9 @@ final class AppModel: ObservableObject {
         selectedLists = Set(saved)
         let minutes = UserDefaults.standard.integer(forKey: "durationMinutes")
         durationMinutes = minutes > 0 ? minutes : 60
+        listsFileDate = Self.modificationDate(ListStore.fileURL)
+        sessionsFileDate = Self.modificationDate(BlockSessionStore.fileURL)
+        recomputeDerived()
         clock = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.now = Date()
         }
@@ -90,8 +117,7 @@ final class AppModel: ObservableObject {
 
     func rules(forSelection names: Set<String>, extra: String) -> [String] {
         let picked = names.sorted().flatMap { lists[$0] ?? [] }
-        let typed = extra.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" }).map(String.init)
-        return canonicalRules(picked + typed).valid
+        return canonicalRules(picked + parseSites(extra)).valid
     }
 
     // MARK: updates from the monitor
@@ -99,7 +125,10 @@ final class AppModel: ObservableObject {
     func update(status: Status?) {
         if let status {
             self.status = status
+            if !daemonReachable { failedSync = nil } // reconnected: retry right away
             daemonReachable = true
+            reloadIfFilesChanged()
+            syncSchedules()
         } else {
             daemonReachable = false
         }
@@ -126,7 +155,125 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func reloadLists() { lists = ListStore.all() }
+    func reloadLists() {
+        listsFileDate = Self.modificationDate(ListStore.fileURL)
+        let fresh = ListStore.all()
+        if fresh != lists { lists = fresh }
+        syncSchedules()
+    }
+
+    private func reloadIfFilesChanged() {
+        if Self.modificationDate(ListStore.fileURL) != listsFileDate { reloadLists() }
+        if Self.modificationDate(BlockSessionStore.fileURL) != sessionsFileDate { reloadSessions() }
+    }
+
+    private static func modificationDate(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    private func recomputeDerived() {
+        var rules: [UUID: [String]] = [:]
+        for s in savedSessions { rules[s.id] = s.rules(in: lists) }
+        sessionRules = rules
+        desiredSchedules = savedSessions.compactMap { $0.schedule(in: lists) }
+    }
+
+    // MARK: saved block sessions
+
+    func reloadSessions() {
+        sessionsFileDate = Self.modificationDate(BlockSessionStore.fileURL)
+        let fresh = BlockSessionStore.all()
+        if fresh != savedSessions { savedSessions = fresh }
+        syncSchedules()
+    }
+
+    /// A saved session's sites, given the current blocklists.
+    func rules(for session: BlockSession) -> [String] {
+        sessionRules[session.id] ?? session.rules(in: lists)
+    }
+
+    /// Enabled schedules that can't run because they have nothing to block
+    /// (e.g. their blocklist was deleted or emptied).
+    var schedulesWithNothingToBlock: [BlockSession] {
+        savedSessions.filter { $0.isScheduled && $0.enabled && rules(for: $0).isEmpty }
+    }
+
+    func saveSession(_ session: BlockSession) {
+        var s = session
+        s.name = String(s.name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Schedule.maxNameLength))
+        do {
+            savedSessions = try BlockSessionStore.upsert(s)
+            sessionsFileDate = Self.modificationDate(BlockSessionStore.fileURL)
+        } catch {
+            errorMessage = "Couldn't save the block session: \(error.localizedDescription)"
+        }
+        syncSchedules()
+    }
+
+    func deleteSession(_ id: UUID) {
+        do {
+            savedSessions = try BlockSessionStore.delete(id)
+            sessionsFileDate = Self.modificationDate(BlockSessionStore.fileURL)
+        } catch {
+            errorMessage = "Couldn't delete the block session: \(error.localizedDescription)"
+        }
+        syncSchedules()
+    }
+
+    func setEnabled(_ enabled: Bool, for id: UUID) {
+        guard var s = savedSessions.first(where: { $0.id == id }) else { return }
+        s.enabled = enabled
+        saveSession(s)
+    }
+
+    /// Starts a length-based saved session now.
+    func start(_ session: BlockSession, completion: ((Bool) -> Void)? = nil) {
+        guard case let .length(minutes) = session.timing else { return }
+        start(minutes: minutes, rules: rules(for: session), completion: completion)
+    }
+
+    /// Whether `session` is a schedule whose window is open right now, so
+    /// turning it on (or saving it) starts blocking at once.
+    func opensNow(_ session: BlockSession) -> Bool {
+        guard case let .schedule(window, days) = session.timing else { return false }
+        return Schedule(name: session.name, window: window, days: days, rules: []).activeWindowEnd(at: Date()) != nil
+    }
+
+    /// The daemon's copy of a saved schedule, if it's enforcing it.
+    func enforcedSchedule(_ id: UUID) -> Schedule? { status?.schedules?.first { $0.id == id } }
+
+    /// Sends the saved schedules to the daemon if its copy differs.
+    func syncSchedules() {
+        guard !isLocalTest, daemonReachable, let status, !scheduleSyncInFlight else { return }
+        let desired = desiredSchedules
+        guard desired != (status.schedules ?? []) else { return }
+        if let f = failedSync, f.schedules == desired, Date().timeIntervalSince(f.at) < syncRetryInterval { return }
+        scheduleSyncInFlight = true
+        queue.async { [weak self] in
+            let result = Result { try DaemonClient.send(Request(cmd: .setSchedules, schedules: desired)) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scheduleSyncInFlight = false
+                switch result {
+                case .success(let r):
+                    if let s = r.status { self.status = s }
+                    if r.ok && (r.status?.schedules ?? []) == desired {
+                        self.failedSync = nil
+                        self.reportedSyncError = nil
+                    } else {
+                        self.failedSync = (desired, Date())
+                        let why = r.ok ? "it stored them differently" : (r.error ?? "unknown error")
+                        self.reportSyncError(desired, "The Renew service didn't accept your scheduled block sessions: \(why). If Renew was just updated, reinstall it from Setup.")
+                    }
+                case .failure(let e):
+                    self.failedSync = (desired, Date())
+                    self.reportSyncError(desired, "Couldn't send your scheduled block sessions to the Renew service: \(e)")
+                }
+                // Something may have changed while the request was out.
+                if self.desiredSchedules != desired { self.syncSchedules() }
+            }
+        }
+    }
 
     // MARK: daemon commands
 
@@ -199,6 +346,12 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func reportSyncError(_ schedules: [Schedule], _ message: String) {
+        guard reportedSyncError != schedules else { return }
+        reportedSyncError = schedules
+        errorMessage = message
     }
 
     // MARK: install / uninstall

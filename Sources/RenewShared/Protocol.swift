@@ -10,6 +10,8 @@ public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
     case setAlerts, testAlert
     case requestUninstall, cancelUninstall
+    /// Replaces the recurring block sessions the daemon starts on its own.
+    case setSchedules
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -28,14 +30,17 @@ public struct Request: Codable, Sendable {
     public var report: AgentReport?
     /// For `setAlerts`: the new destination, or nil to turn alerts off.
     public var alertURL: String?
+    /// For `setSchedules`: the full new set.
+    public var schedules: [Schedule]?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
-                alertURL: String? = nil) {
+                alertURL: String? = nil, schedules: [Schedule]? = nil) {
         self.cmd = cmd
         self.durationSeconds = durationSeconds
         self.rules = rules
         self.report = report
         self.alertURL = alertURL
+        self.schedules = schedules
     }
 }
 
@@ -106,14 +111,17 @@ public struct Status: Codable, Sendable {
     public var agents: [AgentStatus]
     public var alertURL: String?
     public var uninstall: UninstallStatus?
+    /// The schedules the daemon enforces. nil from daemons that predate them.
+    public var schedules: [Schedule]?
 
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
-                alertURL: String? = nil, uninstall: UninstallStatus? = nil) {
+                alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil) {
         self.session = session
         self.serverTime = serverTime
         self.agents = agents
         self.alertURL = alertURL
         self.uninstall = uninstall
+        self.schedules = schedules
     }
 }
 

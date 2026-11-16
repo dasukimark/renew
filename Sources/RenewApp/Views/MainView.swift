@@ -23,7 +23,8 @@ struct MainView: View {
             .safeAreaInset(edge: .bottom) { sidebarStatus }
         } detail: {
             switch model.section {
-            case .focus: FocusView(model: model)
+            case .sessions: BlockSessionsView(model: model)
+            case .quick: QuickBlockView(model: model)
             case .lists: ListsView(model: model)
             case .setup: SetupView(model: model)
             }
@@ -37,6 +38,7 @@ struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             model.refreshPermissions()
             model.reloadLists()
+            model.reloadSessions()
         }
     }
 
@@ -46,7 +48,7 @@ struct MainView: View {
                 .foregroundStyle(model.session != nil ? Color.orange : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 if model.session != nil {
-                    Text("Focusing").font(.callout.weight(.semibold))
+                    Text("Blocking").font(.callout.weight(.semibold))
                     Text("\(Format.countdown(model.secondsLeft)) left")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)

@@ -10,6 +10,10 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// Where tamper alerts go (see `Alerts`). nil means off.
     public var alertURL: String?
     public var uninstall: UninstallRequest?
+    /// Recurring block sessions renewd starts on its own (see `Schedule`).
+    public var schedules: [Schedule]?
+    /// Monotonic-anchored wall time for the current boot (see `WallAnchor`).
+    public var wallAnchor: WallAnchor?
 
     public init(session: SessionInfo? = nil) {
         self.session = session

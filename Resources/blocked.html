@@ -64,7 +64,7 @@
   <h1>{{BLOCKED_HOST}} is blocked</h1>
   <p id="message">This one can wait. Back to what you were doing.</p>
   <div class="time" id="time">--:--</div>
-  <div class="label" id="time-label">left in this focus session</div>
+  <div class="label" id="time-label">left in this block session</div>
   <div class="rule">Matched rule <code>{{RULE}}</code></div>
 </main>
 <script>
@@ -82,7 +82,7 @@
   function tick() {
     if (!endsAt) { timeEl.textContent = ""; labelEl.textContent = ""; return; }
     const s = Math.max(0, Math.round((endsAt - Date.now()) / 1000));
-    if (s === 0) { timeEl.textContent = "Done"; labelEl.textContent = "focus session finished"; return; }
+    if (s === 0) { timeEl.textContent = "Done"; labelEl.textContent = "block session finished"; return; }
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
     timeEl.textContent = h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
   }

@@ -171,3 +171,8 @@ public func canonicalRules(_ raw: [String]) -> (valid: [String], rejected: [Stri
     }
     return (valid, rejected)
 }
+
+/// Splits typed sites on commas, spaces, tabs and newlines.
+public func parseSites(_ text: String) -> [String] {
+    text.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map(String.init)
+}
