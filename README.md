@@ -135,6 +135,10 @@ a session, switches on that page can only be turned on:
 - This needs Accessibility. If that's off, Renew leaves System Settings alone so you
   can turn it back on, and it removes the filter the moment the permission goes, so
   input isn't held up. If the filter can't start, Renew closes those pages instead.
+- The filter is kept narrow so it doesn't look like a keylogger to security
+  software. It only exists while System Settings is open during a session. Across
+  apps it sees mouse clicks only, and it sees key presses only when they go to
+  System Settings, so typing in other apps never reaches Renew.
 
 Renew never changes your network settings, `/etc/hosts` or the firewall.
 
