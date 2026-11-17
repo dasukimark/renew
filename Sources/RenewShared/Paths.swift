@@ -44,7 +44,11 @@ public enum Paths {
     public static let guardLabel = "com.renew.guard"
     public static let agentLabel = "com.renew.agent"
     public static let daemonPlist = "/Library/LaunchDaemons/com.renew.daemon.plist"
-    public static let guardPlist = "/Library/LaunchDaemons/com.renew.guard.plist"
+    /// Kept out of /Library/LaunchDaemons so launchd doesn't start the guard at
+    /// boot: renewd loads it only while the "keep Renew running" protection is on.
+    public static let guardPlist = installDir + "/com.renew.guard.plist"
+    /// Where installs from before that kept it.
+    public static let legacyGuardPlist = "/Library/LaunchDaemons/com.renew.guard.plist"
     public static let agentPlist = "/Library/LaunchAgents/com.renew.agent.plist"
 
     public static let cliSymlink = "/usr/local/bin/renew"

@@ -2,8 +2,11 @@
 
 A FocusMe-style website blocker for macOS. It watches your browsers, and when the
 current tab is on a blocked site, it swaps the page for a block page. Sessions can't
-be shortened or stopped once started, and Renew is deliberately hard (not
-impossible) to kill or uninstall while one is running.
+be shortened or stopped once started.
+
+Out of the box Renew is an ordinary blocker, fine to use on a work Mac. The
+features that make it hard to stop or remove are **protections** you turn on
+yourself in **Setup → Protections** (see [Protections](#protections)).
 
 ## Install
 
@@ -47,8 +50,8 @@ the window:
   it shows a countdown ring and the blocked sites, and lets you add time or block
   another site. There's no stop button.
 - **Blocklists**: edit the built-in lists (social, video, news, test) or make your own.
-- **Setup**: service status, permissions, the lock-down profile, accountability
-  alerts, and uninstall (see below).
+- **Setup**: service status, permissions, protections, the lock-down profile,
+  accountability alerts, and uninstall (see below).
 
 Closing the window or pressing ⌘Q leaves Renew running in the menu bar.
 
@@ -63,13 +66,35 @@ Rule syntax:
 
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
-`renew alerts set <url>`, `renew uninstall`).
+`renew alerts set <url>`, `renew protections on all`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
 time on a clock that ignores date changes (since the Mac last started), and a
 window opens if either clock says so. Changing the date is reported as tampering
 whenever schedules are set. Once a block session is running, it counts down on
 the same date-proof clock.
+
+### Protections
+
+All four are off until you turn them on, in **Setup → Protections** or with
+`renew protections on <name>` (`renew protections` lists them). Blocking works
+either way, and a running session can't be shortened or stopped either way.
+
+| Protection | CLI name | What it does |
+|---|---|---|
+| Keep Renew running | `keep-running` | Runs a second root service, the guard (otherwise only renewd runs). During a session, renewd and the guard bring each other and the app back if they're stopped, undo `launchctl disable`, and put Renew's files back if they're deleted or changed. |
+| Lock System Settings switches | `lock-settings` | During a session, switches for background items and permissions only turn on, not off (see [below](#turning-renew-off-in-system-settings)). |
+| Close browsers Renew can't watch | `close-browsers` | During a session, closes browsers Renew has lost permission to watch, unsupported browsers and unknown apps built on Chrome's or Firefox's engine. With it off, those browsers just aren't blocked. |
+| Uninstall cooling-off | `cooling-off` | Uninstalling needs a request and a 24-hour wait (see [Uninstalling](#uninstalling)). |
+
+A protection can be turned on at any time, but turned off only between block
+sessions, and with alerts on, your partner is told when it is. Turning off the
+uninstall cooling-off doesn't happen straight away: it stays on for 24 more
+hours, and until the end of any session running then (switch it back on to
+cancel), or it would be a way around the wait.
+
+Installs from before protections existed start with all of them off after
+updating. Turn on the ones you want again.
 
 ### Accountability alerts
 
@@ -86,7 +111,10 @@ thing Renew sends off the Mac.
 
 ### Uninstalling
 
-Uninstalling has a 24-hour cooling-off period. Click **Request uninstall…** in
+With the cooling-off off (the default), click **Uninstall…** in Setup and type the
+confirmation phrase, or run `sudo renew uninstall`, any time between sessions.
+
+With the cooling-off on, uninstalling takes 24 hours. Click **Request uninstall…** in
 Setup (or run `renew uninstall`). Renew keeps working as normal. After 24 hours the
 uninstall unlocks for 2 days: click **Uninstall…** and type the confirmation phrase,
 or run `sudo renew uninstall`, between sessions. An unused request expires;
@@ -101,16 +129,16 @@ or run `sudo renew uninstall`, between sessions. An unused request expires;
   │    Firefox → Accessibility API (AXURL of the web area / address bar)
   ├─ blocked? → redirect tab to http://127.0.0.1:<port>/blocked
   │            (Firefox, or if the redirect fails → full-screen overlay + Cmd-W)
-  ├─ unsupported browsers (Opera, Orion, Zen, Tor, DuckDuckGo…) and web apps
+  ├─ [close-browsers] unsupported browsers (Opera, Orion, Zen, Tor, DuckDuckGo…) and web apps
   │    (Safari "Add to Dock", Chrome/Edge installed apps) → quit + overlay
-  ├─ unknown apps built on Chromium or Firefox's engine (a renamed copy of
+  ├─ [close-browsers] unknown apps built on Chromium or Firefox's engine (a renamed copy of
   │    Chrome, Chrome for Testing, a Firefox fork) → quit + overlay.
   │    Electron and CEF apps (Slack, Claude, Spotify…) are left alone
   ├─ built-in browsers inside other apps (T3 Code, Claude, Codex…), read through
   │    Accessibility → overlay + hide the app; bringing it back gives 15 s to close the page
-  ├─ supported browser it can't watch (permission off, or unreadable for ~10 s)
+  ├─ [close-browsers] supported browser it can't watch (permission off, or unreadable for ~10 s)
   │    → quit + overlay, again on every relaunch
-  ├─ System Settings showing Login Items & Extensions or Privacy & Security
+  ├─ [lock-settings] System Settings showing Login Items & Extensions or Privacy & Security
   │    (including its Accessibility and Automation pages) → switches turn on, not off
   └─ every 2 s: heartbeat + permission report → renewd
         │
@@ -119,15 +147,18 @@ renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/statu
   ├─ counts sessions down on the monotonic clock, so changing the date does nothing
   │    (time the Mac is switched off still counts)
   ├─ sends tamper alerts, if set up
-  ├─ re-loads the agent if it's unloaded, restarts it if silent
-  ├─ restores its files from /var/db/com.renew/backup if deleted or altered
-  └─ keeps the guard loaded
-renewd --guard  (second LaunchDaemon) ── keeps renewd loaded, repairs files, restores state.json
+  ├─ [keep-running] re-loads the agent if it's unloaded, restarts it if silent
+  ├─ [keep-running] restores its files from /var/db/com.renew/backup if deleted or altered
+  └─ [keep-running] keeps the guard loaded
+renewd --guard  (second LaunchDaemon, loaded by renewd only with keep-running on)
+                ── keeps renewd loaded, repairs files, restores state.json
+
+[name]: only with that protection on (see Protections).
 
 Stopping renewd or the guard during a session sends an alert.
 ```
 
-**Turning off a permission doesn't get you past it.** If you switch off Renew's
+**With `close-browsers` on, turning off a permission doesn't get you past it.** If you switch off Renew's
 Automation permission for a browser during a session, Renew closes that browser
 and closes it again whenever it's reopened, until the session ends or you turn the
 permission back on. Turning off Accessibility does the same to Firefox. Other browsers
@@ -135,7 +166,9 @@ keep working with blocking as normal.
 
 ### Turning Renew off in System Settings
 
-macOS lists Renew's three launchd services under one **Renew** switch in
+This is the `lock-settings` protection; without it, System Settings is left alone.
+
+macOS lists Renew's launchd services under one **Renew** switch in
 **System Settings → General → Login Items & Extensions → Allow in the Background**.
 Turning it off stops all of them at once, and no app can turn it back on. So during
 a session, switches on that page can only be turned on:
@@ -163,8 +196,8 @@ Chrome for Testing window (`--headed`) is closed mid-session.
 
 ## What's left for someone determined to escape
 
-Renew is friction, not a vault. An admin who goes through all of this can
-still get out:
+Renew is friction, not a vault. With every protection on, an admin who goes
+through all of this can still get out (and with them off, far less is needed):
 
 - remove the configuration profile (needs its password)
 - use Terminal and `sudo` to stop every part of Renew (both daemons and the app)
@@ -219,6 +252,7 @@ export RENEW_DATA_DIR=/tmp/renew-dev RENEW_SOCKET=/tmp/renew-dev/s.sock
 # The app with a throwaway session, no background service needed
 # (watches your browsers for real; macOS will ask for permissions):
 RENEW_PORT=48000 build/Renew.app/Contents/MacOS/Renew --local-session 5m reddit.com
+# Add RENEW_PROTECTIONS=all (or e.g. lock-settings,close-browsers) to try those too.
 ```
 
 Logs: `/var/log/renew.log`, `/var/log/renew-guard.log`, `~/Library/Logs/Renew/app.log`,

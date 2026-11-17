@@ -12,6 +12,8 @@ public enum Command: String, Codable, Sendable {
     case requestUninstall, cancelUninstall
     /// Replaces the recurring block sessions the daemon starts on its own.
     case setSchedules
+    /// Changes the optional hardening features (see `Protections`).
+    case setProtections
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -32,15 +34,18 @@ public struct Request: Codable, Sendable {
     public var alertURL: String?
     /// For `setSchedules`: the full new set.
     public var schedules: [Schedule]?
+    /// For `setProtections`: the full new set.
+    public var protections: Protections?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
-                alertURL: String? = nil, schedules: [Schedule]? = nil) {
+                alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil) {
         self.cmd = cmd
         self.durationSeconds = durationSeconds
         self.rules = rules
         self.report = report
         self.alertURL = alertURL
         self.schedules = schedules
+        self.protections = protections
     }
 }
 
@@ -113,15 +118,36 @@ public struct Status: Codable, Sendable {
     public var uninstall: UninstallStatus?
     /// The schedules the daemon enforces. nil from daemons that predate them.
     public var schedules: [Schedule]?
+    /// The hardening features in force. nil from daemons that predate them.
+    public var protections: Protections?
+    /// When the uninstall cooling-off turns off, if someone asked for that.
+    public var coolingOffRemovalAt: Date?
+
+    /// The protections as the user wants them: like `protections`, but with
+    /// the cooling-off off once its removal has been asked for. Clients build
+    /// changes on this, so changing another protection doesn't cancel the
+    /// removal. nil from daemons that predate protections.
+    public var requestedProtections: Protections? {
+        guard var p = protections else { return nil }
+        if coolingOffRemovalAt != nil { p.uninstallCoolingOff = false }
+        return p
+    }
+
+    /// Whether uninstalling needs a request and a wait. A daemon that
+    /// predates protections always had the cooling-off.
+    public var enforcesCoolingOff: Bool { protections?.uninstallCoolingOff ?? true }
 
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
-                alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil) {
+                alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
+                protections: Protections? = nil, coolingOffRemovalAt: Date? = nil) {
         self.session = session
         self.serverTime = serverTime
         self.agents = agents
         self.alertURL = alertURL
         self.uninstall = uninstall
         self.schedules = schedules
+        self.protections = protections
+        self.coolingOffRemovalAt = coolingOffRemovalAt
     }
 }
 

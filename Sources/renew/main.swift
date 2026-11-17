@@ -43,9 +43,18 @@ Usage:
   renew alerts set <URL>                               send tamper alerts to a URL (e.g. https://ntfy.sh/<topic>)
   renew alerts off                                     turn alerts off (between sessions only)
   renew alerts test                                    send a test alert
-  renew uninstall                                      request uninstall (unlocks after 24 hours)
-  sudo renew uninstall                                 finish an unlocked uninstall (only between sessions)
+  renew protections                                    show which hardening protections are on
+  renew protections on|off <NAME>...                   turn protections on, or off (between sessions only)
+  sudo renew uninstall                                 uninstall Renew (only between sessions)
+  renew uninstall                                      with the cooling-off on: request uninstall (unlocks after 24 hours)
   renew uninstall --cancel                             cancel an uninstall request
+
+Protections (all off unless you turn them on):
+  keep-running     during sessions, Renew's services restart each other and restore deleted files
+  lock-settings    during sessions, System Settings switches for Renew and permissions turn on, not off
+  close-browsers   during sessions, browsers Renew can't watch are closed
+  cooling-off      uninstalling needs a request and a 24-hour wait (turning this off takes 24 hours too)
+  all              every one of the above
 
 Durations: 25m, 2h, 1h30m, 1d (a bare number means minutes)
 Sites:     reddit.com          domain and subdomains
@@ -99,6 +108,10 @@ func printStatus(_ s: Status) {
 
 func printExtras(_ s: Status) {
     print("  Alerts: \(s.alertURL ?? "off")")
+    if let p = s.protections {
+        print("  Protections: \(p.onNames.isEmpty ? "none" : p.onNames.joined(separator: ", "))")
+    }
+    if let when = s.coolingOffRemovalAt { print("  Cooling-off: turns off \(clock(when))") }
     if let u = s.uninstall {
         print(u.unlocked ? "  Uninstall: unlocked until \(clock(u.expiresAt)) (sudo renew uninstall)"
                          : "  Uninstall: requested, unlocks \(clock(u.unlocksAt))")
@@ -203,6 +216,38 @@ case "alerts":
         print("Test alert sent.")
     default:
         die("usage: renew alerts [show | set URL | off | test]")
+    }
+
+case "protections":
+    let sub = args.first ?? "show"
+    func show(_ st: Status) {
+        guard let p = st.protections else { die("This Renew service predates protections. Reinstall Renew.") }
+        for item in Protections.catalog {
+            var line = "  \(p[keyPath: item.key] ? "on " : "off") \(item.name.padding(toLength: 16, withPad: " ", startingAt: 0))\(item.label)"
+            if item.key == \Protections.uninstallCoolingOff, let when = st.coolingOffRemovalAt {
+                line += " (turns off \(clock(when)); `renew protections on cooling-off` cancels)"
+            }
+            print(line)
+        }
+    }
+    switch sub {
+    case "show":
+        show(send(Request(cmd: .status)))
+    case "on", "off":
+        let names = Array(args.dropFirst())
+        let known = Protections.allNames.joined(separator: ", ")
+        guard !names.isEmpty else { die("usage: renew protections \(sub) <NAME>... (\(known))") }
+        let current = send(Request(cmd: .status))
+        // Built on the requested set, so a pending cooling-off removal isn't cancelled.
+        guard var p = current.requestedProtections else { die("This Renew service predates protections. Reinstall Renew.") }
+        for name in names {
+            guard let keys = Protections.keys(named: name) else { die("unknown protection '\(name)'. Use: \(known)") }
+            for k in keys { p[keyPath: k] = sub == "on" }
+        }
+        let st = send(Request(cmd: .setProtections, protections: p))
+        show(st)
+    default:
+        die("usage: renew protections [show | on NAME... | off NAME...]")
     }
 
 case "lists":

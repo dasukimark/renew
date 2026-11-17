@@ -13,7 +13,10 @@ APP="/Applications/Renew.app"
 INSTALL_DIR="/Library/Application Support/Renew"
 DATA_DIR="/var/db/com.renew"
 DAEMON_PLIST="/Library/LaunchDaemons/com.renew.daemon.plist"
-GUARD_PLIST="/Library/LaunchDaemons/com.renew.guard.plist"
+# Not in /Library/LaunchDaemons: renewd loads the guard only while the
+# "keep Renew running" protection is on.
+GUARD_PLIST="$INSTALL_DIR/com.renew.guard.plist"
+LEGACY_GUARD_PLIST="/Library/LaunchDaemons/com.renew.guard.plist"
 AGENT_PLIST="/Library/LaunchAgents/com.renew.agent.plist"
 
 [[ $EUID -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
@@ -51,6 +54,7 @@ install -m 755 "$APP/Contents/Helpers/renewd" "$INSTALL_DIR/bin/renewd"
 install -m 755 "$APP/Contents/Helpers/renew" "$INSTALL_DIR/bin/renew"
 install -m 644 "$APP/Contents/Resources/com.renew.daemon.plist" "$DAEMON_PLIST"
 install -m 644 "$APP/Contents/Resources/com.renew.guard.plist" "$GUARD_PLIST"
+rm -f "$LEGACY_GUARD_PLIST"
 install -m 644 "$APP/Contents/Resources/com.renew.agent.plist" "$AGENT_PLIST"
 chown -R root:wheel "$INSTALL_DIR" "$DATA_DIR" "$DAEMON_PLIST" "$GUARD_PLIST" "$AGENT_PLIST"
 chmod -R go-w "$INSTALL_DIR"
@@ -66,7 +70,6 @@ for p in "$DAEMON_PLIST" "$GUARD_PLIST" "$AGENT_PLIST"; do ditto "$p" "$DATA_DIR
 
 echo "==> Starting services"
 launchctl bootstrap system "$DAEMON_PLIST"
-launchctl bootstrap system "$GUARD_PLIST"
 if [[ "$USER_UID" != "0" ]]; then
   launchctl bootstrap "gui/$USER_UID" "$AGENT_PLIST" || launchctl kickstart -k "gui/$USER_UID/com.renew.agent" || true
 fi

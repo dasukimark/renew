@@ -1,8 +1,9 @@
 import Foundation
 import RenewShared
 
-/// The enforcer. Owns session state, answers the control socket, keeps the
-/// guard and the Renew app alive, and repairs tampering. If the app loses
+/// The enforcer. Owns session state and answers the control socket. With the
+/// "keep Renew running" protection on, it also runs the guard, keeps the Renew
+/// app alive and repairs tampering during sessions. If the app loses
 /// permission to watch a browser, the app itself closes that browser for the
 /// rest of the session. The only network traffic is the optional tamper
 /// alert (see `Alerts`).
@@ -22,6 +23,16 @@ final class Daemon {
     private var lastDeepCheck = Date.distantPast
     private var lastAgentCheck = Date.distantPast
     private var lastKick = Date.distantPast
+    private var lastGuardCheck = Date.distantPast
+    /// Whether the countdown to turning off the cooling-off is in step with
+    /// the file, give or take checkpoint rounding.
+    private func sameCoolingOffRemoval(_ file: PersistedState, _ r: ClockReading) -> Bool {
+        switch (file.coolingOffRemoval, state.coolingOffRemoval) {
+        case (nil, nil): return true
+        case let (a?, b?): return abs(a.remaining(at: r) - b.remaining(at: r)) < 2
+        default: return false
+        }
+    }
     /// Monotonic time of the last state.json checkpoint.
     private var lastCheckpointSave: UInt64 = 0
     /// Wall clock minus the anchored clock at the last tick (see `runSchedules`).
@@ -49,6 +60,10 @@ final class Daemon {
                 state.uninstall = nil
                 log("uninstall request expired while renewd was not running")
             }
+            if state.applyDueCoolingOffRemoval(at: r) {
+                log("uninstall cooling-off turned off (its wait ended while renewd was not running)")
+                alert("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
+            }
             state.checkpoint(at: r)
             // Keep this boot's anchor across renewd restarts, so restarting
             // renewd after changing the date doesn't launder the change.
@@ -57,6 +72,7 @@ final class Daemon {
             StateStore.save(state)
             lastCheckpointSave = r.mono
             log("renewd started\(dev ? " (dev mode)" : ""); session: \(describe(state.activeSession(at: r)))")
+            syncGuard()
             if rebooted, let s = state.activeSession(at: r) {
                 alert("The Mac restarted during a block session. Renew is running again (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left).",
                       kind: "rebooted", every: 300)
@@ -147,6 +163,9 @@ final class Daemon {
         case .requestUninstall:
             if let u = state.uninstallStatus(at: r) {
                 log("uninstall already requested; unlocks \(u.unlocksAt)")
+            } else if !state.effectiveProtections.uninstallCoolingOff {
+                // No cooling-off: nothing to request. `renew uninstall` goes ahead.
+                log("uninstall request by uid \(uid) ignored: the cooling-off is off")
             } else {
                 let total = UninstallPolicy.delay + UninstallPolicy.window
                 // Whole seconds, so the date survives the JSON round trip unchanged.
@@ -160,6 +179,10 @@ final class Daemon {
 
         case .setSchedules:
             if let error = setSchedules(req.schedules ?? [], by: uid) { return fail(error) }
+
+        case .setProtections:
+            guard let p = req.protections else { return fail("Missing protections.") }
+            if let error = setProtections(p, by: uid, at: r) { return fail(error) }
 
         case .cancelUninstall:
             if state.uninstall != nil {
@@ -271,6 +294,33 @@ final class Daemon {
         return r.wall.timeIntervalSince(trusted)
     }
 
+    /// Protections can be turned on at any time, but off only between
+    /// sessions; the cooling-off turns off a day after it's asked to.
+    private func setProtections(_ requested: Protections, by uid: uid_t, at r: ClockReading) -> String? {
+        let change: ProtectionChange
+        switch state.setProtections(requested, sessionActive: state.activeSession(at: r) != nil, at: r) {
+        case .failure(let refusal): return refusal.message
+        case .success(let c): change = c
+        }
+        guard !change.isEmpty else { return nil }
+        StateStore.save(state)
+        syncGuard()
+        if !change.turnedOn.isEmpty { log("protections turned on by uid \(uid): \(change.turnedOn.joined(separator: ", "))") }
+        if !change.turnedOff.isEmpty {
+            log("protections turned off by uid \(uid): \(change.turnedOff.joined(separator: ", "))")
+            alert("Renew protections were turned off: \(change.turnedOff.joined(separator: ", ")).")
+        }
+        if change.coolingOffRemovalRequested, let when = state.coolingOffRemovalDate(at: r) {
+            log("uid \(uid) asked to turn off the uninstall cooling-off; it turns off \(when)")
+            alert("Someone asked to turn off Renew's uninstall cooling-off. It turns off after \(Self.dateText(when)); after that Renew can be uninstalled without waiting.")
+        }
+        if change.coolingOffRemovalCancelled {
+            log("uid \(uid) cancelled turning off the uninstall cooling-off")
+            alert("The request to turn off Renew's uninstall cooling-off was cancelled.")
+        }
+        return nil
+    }
+
     /// Alerts can be turned on at any time, but changed or turned off only
     /// between sessions, and the old destination hears about it.
     private func setAlerts(_ raw: String?, by uid: uid_t, at r: ClockReading) -> String? {
@@ -348,7 +398,9 @@ final class Daemon {
             agents: agents.values.sorted { $0.uid < $1.uid },
             alertURL: state.alertURL,
             uninstall: state.uninstallStatus(at: r),
-            schedules: state.schedules
+            schedules: state.schedules,
+            protections: state.effectiveProtections,
+            coolingOffRemovalAt: state.coolingOffRemovalDate(at: r)
         )
     }
 
@@ -364,12 +416,18 @@ final class Daemon {
             StateStore.save(state)
             log("uninstall request expired")
         }
+        if state.applyDueCoolingOffRemoval(at: r) {
+            StateStore.save(state)
+            log("uninstall cooling-off turned off (its wait is over)")
+            alert("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
+        }
         runSchedules(r)
 
         checkpoint(r)
 
         let active = state.activeSession(at: r)
-        if (active != nil || state.alertURL != nil || state.uninstall != nil || state.schedules != nil)
+        if (active != nil || state.alertURL != nil || state.uninstall != nil || state.schedules != nil
+            || state.protections != nil || state.coolingOffRemoval != nil)
             && !FileManager.default.fileExists(atPath: Paths.stateFile) {
             log("state file was removed; rewriting")
             StateStore.save(state)
@@ -378,7 +436,8 @@ final class Daemon {
         server.ensureBound()
         updateConsole(now)
 
-        if active != nil, !dev {
+        // The rest is the optional "keep Renew running" protection.
+        if active != nil, !dev, state.effectiveProtections.keepRunning {
             let deep = now.timeIntervalSince(lastDeepCheck) >= 10
             if deep { lastDeepCheck = now }
             let restored = SelfRepair.repair(deep: deep)
@@ -386,15 +445,29 @@ final class Daemon {
                 alert("Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
                       kind: "repair", every: 600)
             }
-            SelfRepair.ensureLoaded(label: Paths.guardLabel, plist: Paths.guardPlist)
             ensureAgent(now)
+            // Bring the guard back if it was stopped during the session.
+            if now.timeIntervalSince(lastGuardCheck) >= 10 { syncGuard() }
+        }
+    }
+
+    /// The guard runs only while "keep Renew running" is on: renewd loads it
+    /// at startup and when that's turned on, and stops it when it's turned off.
+    private func syncGuard() {
+        guard !dev else { return }
+        lastGuardCheck = Date()
+        if state.effectiveProtections.keepRunning {
+            SelfRepair.ensureLoaded(label: Paths.guardLabel, plist: Paths.guardPlist)
+        } else if Launchctl.isLoaded("system/\(Paths.guardLabel)") {
+            let r = Launchctl.bootout("system/\(Paths.guardLabel)")
+            log("stopped the guard (keep Renew running is off): \(r.ok ? "ok" : r.err.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
     }
 
     /// Re-anchors the countdowns. A date change shows up here as the session's
     /// wall-clock end moving; the time left is unaffected.
     private func checkpoint(_ r: ClockReading) {
-        guard state.session != nil || state.uninstall != nil else { return }
+        guard state.session != nil || state.uninstall != nil || state.coolingOffRemoval != nil else { return }
         let shift = state.checkpoint(at: r)
         if abs(shift) >= Self.clockLogThreshold {
             StateStore.save(state)
@@ -416,14 +489,17 @@ final class Daemon {
     /// the later end time and the union of rules win, so editing the file
     /// can't shorten or loosen a running session.
     ///
-    /// renewd owns the alert destination, the uninstall request and the
-    /// schedules: if the
+    /// renewd owns the alert destination, the uninstall request, the
+    /// schedules and the protections: if the
     /// file disagrees (edited or deleted), renewd's copy is written back.
     private func adoptDiskState(_ r: ClockReading) {
         guard let file = StateStore.load() else { return }
         if file.alertURL != state.alertURL || file.uninstall?.requestedAt != state.uninstall?.requestedAt
-            || file.schedules != state.schedules || file.wallAnchor != state.wallAnchor {
-            log("state file disagrees about alerts/uninstall/schedules; rewriting")
+            || file.schedules != state.schedules
+            // The anchor's date may not survive the JSON round trip bit for bit.
+            || file.wallAnchor?.bootID != state.wallAnchor?.bootID || file.wallAnchor?.mono != state.wallAnchor?.mono
+            || file.protections != state.protections || !sameCoolingOffRemoval(file, r) {
+            log("state file disagrees about alerts/uninstall/schedules/protections; rewriting")
             StateStore.save(state)
         }
         guard var disk = file.activeSession(at: r) else { return }
