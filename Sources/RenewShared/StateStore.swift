@@ -19,6 +19,31 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// Counts down to when the uninstall cooling-off turns off, once someone
     /// has asked. Turning it back on cancels this.
     public var coolingOffRemoval: Countdown?
+    /// What activity monitoring watches, per user (keyed by uid). Users
+    /// missing here (and older files) have it off.
+    public var monitoringByUser: [String: MonitoringSettings]?
+    /// The single setting kept before settings were per user. Read once and
+    /// moved to the console user's entry (see `migrateMonitoring`).
+    public var monitoring: MonitoringSettings?
+
+    public func monitoring(for uid: uid_t) -> MonitoringSettings {
+        monitoringByUser?[String(uid)] ?? .off
+    }
+
+    /// Stores `uid`'s settings; settings equal to the default are dropped.
+    public mutating func setMonitoring(_ m: MonitoringSettings, for uid: uid_t) {
+        var all = monitoringByUser ?? [:]
+        all[String(uid)] = m == .off ? nil : m
+        monitoringByUser = all.isEmpty ? nil : all
+    }
+
+    /// Moves the old single setting to `uid`. Returns whether anything changed.
+    public mutating func migrateMonitoring(to uid: uid_t?) -> Bool {
+        guard let old = monitoring, let uid else { return false }
+        monitoring = nil
+        if monitoringByUser?[String(uid)] == nil { setMonitoring(old, for: uid) }
+        return true
+    }
 
     public var effectiveProtections: Protections { protections ?? .off }
 

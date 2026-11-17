@@ -5,7 +5,9 @@ import Foundation
 /// The daemon only accepts commands that make things stricter: nothing here
 /// can shorten, stop or loosen a running session. Alerts can only be changed
 /// between sessions (or turned on during one), and an uninstall request only
-/// unlocks `sudo renew uninstall` after a cooling-off period.
+/// unlocks `sudo renew uninstall` after a cooling-off period. Each user has
+/// their own activity monitoring settings and log, and only ever reads and
+/// changes their own.
 public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
     case setAlerts, testAlert
@@ -14,6 +16,12 @@ public enum Command: String, Codable, Sendable {
     case setSchedules
     /// Changes the optional hardening features (see `Protections`).
     case setProtections
+    /// Changes what activity monitoring watches (see `MonitoringSettings`).
+    case setMonitoring
+    /// Stores finished page visits in the caller's activity log.
+    case recordActivity
+    /// Reads the caller's activity log (see `ActivityQuery`).
+    case activity
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -36,9 +44,16 @@ public struct Request: Codable, Sendable {
     public var schedules: [Schedule]?
     /// For `setProtections`: the full new set.
     public var protections: Protections?
+    /// For `setMonitoring`: the full new settings.
+    public var monitoring: MonitoringSettings?
+    /// For `recordActivity`: finished visits.
+    public var events: [ActivityEvent]?
+    /// For `activity`: which part of the log to read.
+    public var activityQuery: ActivityQuery?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
-                alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil) {
+                alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil,
+                monitoring: MonitoringSettings? = nil, events: [ActivityEvent]? = nil, activityQuery: ActivityQuery? = nil) {
         self.cmd = cmd
         self.durationSeconds = durationSeconds
         self.rules = rules
@@ -46,6 +61,9 @@ public struct Request: Codable, Sendable {
         self.alertURL = alertURL
         self.schedules = schedules
         self.protections = protections
+        self.monitoring = monitoring
+        self.events = events
+        self.activityQuery = activityQuery
     }
 }
 
@@ -122,6 +140,9 @@ public struct Status: Codable, Sendable {
     public var protections: Protections?
     /// When the uninstall cooling-off turns off, if someone asked for that.
     public var coolingOffRemovalAt: Date?
+    /// What activity monitoring watches for the user asking (each user has
+    /// their own). nil from daemons that predate it.
+    public var monitoring: MonitoringSettings?
 
     /// The protections as the user wants them: like `protections`, but with
     /// the cooling-off off once its removal has been asked for. Clients build
@@ -139,7 +160,7 @@ public struct Status: Codable, Sendable {
 
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
                 alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
-                protections: Protections? = nil, coolingOffRemovalAt: Date? = nil) {
+                protections: Protections? = nil, coolingOffRemovalAt: Date? = nil, monitoring: MonitoringSettings? = nil) {
         self.session = session
         self.serverTime = serverTime
         self.agents = agents
@@ -148,6 +169,7 @@ public struct Status: Codable, Sendable {
         self.schedules = schedules
         self.protections = protections
         self.coolingOffRemovalAt = coolingOffRemovalAt
+        self.monitoring = monitoring
     }
 }
 
@@ -155,11 +177,21 @@ public struct Response: Codable, Sendable {
     public var ok: Bool
     public var error: String?
     public var status: Status?
+    /// For `activity`: the visits found.
+    public var activity: [ActivityEvent]?
+    /// For `activity`: pass as `ActivityQuery.fromOffset` to get only newer visits.
+    public var activityOffset: Int?
+    /// For `activity`: whether `activity` only holds visits added since the
+    /// query's `fromOffset` (false: it's the whole day).
+    public var activityIncremental: Bool?
 
-    public init(ok: Bool, error: String? = nil, status: Status? = nil) {
+    public init(ok: Bool, error: String? = nil, status: Status? = nil, activity: ActivityPage? = nil) {
         self.ok = ok
         self.error = error
         self.status = status
+        self.activity = activity?.events
+        self.activityOffset = activity?.offset
+        self.activityIncremental = activity?.isIncremental
     }
 }
 

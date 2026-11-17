@@ -14,6 +14,50 @@ final class DaemonLink {
             DispatchQueue.main.async { completion(status) }
         }
     }
+
+    enum RecordResult {
+        case stored
+        /// renewd answered but refused the batch; sending it again won't help.
+        case rejected(String)
+        /// renewd couldn't be reached; try again later.
+        case unreachable
+    }
+
+    /// Sends finished visits to the activity log. `completion` runs on the
+    /// main thread.
+    func record(_ events: [ActivityEvent], completion: @escaping (RecordResult) -> Void) {
+        queue.async {
+            let result: RecordResult
+            do {
+                let r = try DaemonClient.send(Request(cmd: .recordActivity, events: events), timeout: 5)
+                result = r.ok ? .stored : .rejected(r.error ?? "refused")
+            } catch {
+                result = .unreachable
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+}
+
+/// The monitoring settings renewd last reported, so a relaunched app keeps
+/// recording while renewd is unreachable.
+enum MonitoringCache {
+    private static var url: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Renew/agent-monitoring.json")
+    }
+
+    static func load() -> MonitoringSettings {
+        guard let data = try? Data(contentsOf: url),
+              let m = try? Wire.decoder.decode(MonitoringSettings.self, from: data) else { return .off }
+        return m
+    }
+
+    static func save(_ m: MonitoringSettings) {
+        guard let data = try? Wire.encoder.encode(m) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
 }
 
 /// Last session seen from renewd, so a restarted agent keeps enforcing even

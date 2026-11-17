@@ -50,6 +50,8 @@ the window:
   it shows a countdown ring and the blocked sites, and lets you add time or block
   another site. There's no stop button.
 - **Blocklists**: edit the built-in lists (social, video, news, test) or make your own.
+- **Activity**: the log of pages you've visited, and what gets flagged (see
+  [Activity monitoring](#activity-monitoring)). Off until you turn it on.
 - **Setup**: service status, permissions, protections, the lock-down profile,
   accountability alerts, and uninstall (see below).
 
@@ -66,7 +68,8 @@ Rule syntax:
 
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
-`renew alerts set <url>`, `renew protections on all`, `renew uninstall`).
+`renew alerts set <url>`, `renew protections on all`, `renew monitor on`,
+`renew activity --flagged`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
 time on a clock that ignores date changes (since the Mac last started), and a
@@ -109,6 +112,47 @@ Alerts can be turned on at any time, but changed or turned off only between
 sessions, and the old destination is told when that happens. This is the only
 thing Renew sends off the Mac.
 
+### Activity monitoring
+
+Off until you turn it on in **Activity → Settings** (or `renew monitor on`). With it
+on, Renew records each page you look at, session or not:
+
+- **What:** the address, the page title, which browser or app showed it, and how
+  long it was in front. It reads the active tab of the frontmost browser (Safari,
+  Chrome, Edge, Brave, Arc, Vivaldi, Firefox) once a second, and the websites in the
+  built-in browser of the frontmost app (T3 Code, Claude, Codex and other Electron
+  or web-view apps) every 2 seconds. Background tabs and other apps aren't read.
+  Time away doesn't count: after 5 minutes without input, or with the screen
+  locked, the current visit ends.
+- **Flags:** a visit is flagged when its site is on a watched list or its title
+  contains a watched word. Nothing is watched until you choose it: **Explicit
+  sites** (a preset bundled with Renew, see below), any of your blocklists, sites
+  you add, the preset of explicit words, and words you add. Words are matched as
+  whole words, ignoring case and accents, so "sex" doesn't match "Essex". Pages a block
+  session replaced with the block page are logged as blocked.
+- **Where:** renewd keeps the log in `/var/db/com.renew/activity/<uid>/`, one file
+  per day, readable and writable only by root, so it can't be edited from your
+  account. Each user only sees their own log. Days older than 30 days are deleted,
+  and a user's log stops growing past 16 MB a day or 256 MB in all, so it can't
+  fill the disk.
+  If renewd can't be reached, the app holds visits in
+  `~/Library/Application Support/Renew/activity-pending.json` until it can.
+- **Nothing leaves the Mac.** Sending reports to an accountability partner comes later.
+
+Each user on the Mac has their own monitoring settings and only changes their own.
+For now they can be turned off or changed at any time.
+
+The explicit-site preset is a snapshot of the
+[StevenBlack/hosts](https://github.com/StevenBlack/hosts) porn-only list (MIT
+license; tens of thousands of domains), in `Resources/explicit-domains.txt`. Its
+header names the commit it came from. Renew never downloads it; refresh it with
+`scripts/update-explicit-list.sh` and rebuild.
+
+Apps like Codex/ChatGPT only expose their built-in browser with macOS's
+screen-reader mode on, which can make their windows animate oddly. Outside block
+sessions Renew turns that on only while the app is in front, and back off as soon
+as it isn't.
+
 ### Uninstalling
 
 With the cooling-off off (the default), click **Uninstall…** in Setup and type the
@@ -140,6 +184,8 @@ or run `sudo renew uninstall`, between sessions. An unused request expires;
   │    → quit + overlay, again on every relaunch
   ├─ [lock-settings] System Settings showing Login Items & Extensions or Privacy & Security
   │    (including its Accessibility and Automation pages) → switches turn on, not off
+  ├─ [activity monitoring] front browser's tab (1 s) and front app's built-in browser (2 s),
+  │    session or not → visits with URL, title, time and flags → renewd every 5 s
   └─ every 2 s: heartbeat + permission report → renewd
         │
 renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/status/report only)
@@ -147,13 +193,14 @@ renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/statu
   ├─ counts sessions down on the monotonic clock, so changing the date does nothing
   │    (time the Mac is switched off still counts)
   ├─ sends tamper alerts, if set up
+  ├─ keeps the activity log in /var/db/com.renew/activity/<uid>/ (30 days)
   ├─ [keep-running] re-loads the agent if it's unloaded, restarts it if silent
   ├─ [keep-running] restores its files from /var/db/com.renew/backup if deleted or altered
   └─ [keep-running] keeps the guard loaded
 renewd --guard  (second LaunchDaemon, loaded by renewd only with keep-running on)
                 ── keeps renewd loaded, repairs files, restores state.json
 
-[name]: only with that protection on (see Protections).
+[name]: only with that protection on (see Protections), or with activity monitoring on.
 
 Stopping renewd or the guard during a session sends an alert.
 ```
@@ -253,6 +300,7 @@ export RENEW_DATA_DIR=/tmp/renew-dev RENEW_SOCKET=/tmp/renew-dev/s.sock
 # (watches your browsers for real; macOS will ask for permissions):
 RENEW_PORT=48000 build/Renew.app/Contents/MacOS/Renew --local-session 5m reddit.com
 # Add RENEW_PROTECTIONS=all (or e.g. lock-settings,close-browsers) to try those too.
+# Add RENEW_MONITORING=on to record visits; they're written to the app's log.
 ```
 
 Logs: `/var/log/renew.log`, `/var/log/renew-guard.log`, `~/Library/Logs/Renew/app.log`,

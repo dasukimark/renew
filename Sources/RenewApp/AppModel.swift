@@ -8,6 +8,7 @@ final class AppModel: ObservableObject {
         case sessions = "Block Sessions"
         case quick = "Quick Block"
         case lists = "Blocklists"
+        case activity = "Activity"
         case setup = "Setup"
         var id: String { rawValue }
         var symbol: String {
@@ -15,6 +16,7 @@ final class AppModel: ObservableObject {
             case .sessions: return "calendar.badge.clock"
             case .quick: return "bolt"
             case .lists: return "list.bullet.rectangle"
+            case .activity: return "eye"
             case .setup: return "gearshape"
             }
         }
@@ -308,6 +310,42 @@ final class AppModel: ObservableObject {
         send(Request(cmd: .setProtections, protections: p), completion: completion)
     }
 
+    // MARK: activity monitoring
+
+    /// What activity monitoring watches (off unless turned on).
+    var monitoring: MonitoringSettings { status?.monitoring ?? .off }
+
+    /// False if the running service predates activity monitoring.
+    var monitoringSupported: Bool { status?.monitoring != nil }
+
+    func setMonitoring(_ m: MonitoringSettings, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setMonitoring, monitoring: m), completion: completion)
+    }
+
+    /// Reads your activity log for `day`: the whole day, or with `fromOffset`
+    /// (the `offset` of an earlier load) only what's new. `completion` runs on
+    /// the main thread with the visits (oldest first), or an error message.
+    func loadActivity(day: Date, flaggedOnly: Bool, fromOffset: Int? = nil,
+                      completion: @escaping (Result<ActivityLoad, ActivityLoadError>) -> Void) {
+        guard !isLocalTest else {
+            completion(.failure(ActivityLoadError(message: "This is a local test run without the Renew service, so there's no activity log. Visits are written to the app's log instead.")))
+            return
+        }
+        let query = ActivityQuery(date: day, flaggedOnly: flaggedOnly, fromOffset: fromOffset)
+        queue.async {
+            let result: Result<ActivityLoad, ActivityLoadError>
+            do {
+                let r = try DaemonClient.send(Request(cmd: .activity, activityQuery: query), timeout: 10)
+                result = r.ok ? .success(ActivityLoad(events: r.activity ?? [], offset: r.activityOffset,
+                                                      isIncremental: r.activityIncremental ?? false))
+                              : .failure(ActivityLoadError(message: r.error ?? "The Renew service refused the request."))
+            } catch {
+                result = .failure(ActivityLoadError(message: "Couldn't reach the Renew service: \(error)"))
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     // MARK: alerts and uninstall request
 
     var alertURL: String? { status?.alertURL }
@@ -431,4 +469,16 @@ func relaunchInstalledCopyAndQuit() {
     p.arguments = ["-c", "sleep 1.5; /usr/bin/open \(Privileged.shellQuote(Paths.agentApp))"]
     try? p.run()
     NSApp.terminate(nil)
+}
+
+struct ActivityLoadError: Error {
+    let message: String
+}
+
+struct ActivityLoad {
+    let events: [ActivityEvent]
+    /// Pass back as `fromOffset` to load only newer visits.
+    let offset: Int?
+    /// `events` only holds visits added since the `fromOffset` asked for.
+    let isIncremental: Bool
 }
