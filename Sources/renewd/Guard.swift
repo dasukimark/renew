@@ -1,7 +1,8 @@
 import Foundation
 import RenewShared
 
-/// Second LaunchDaemon (`renewd --guard`). During a session it keeps the main
+/// Second LaunchDaemon (`renewd --guard`), loaded by renewd only while the
+/// "keep Renew running" protection is on. During a session it keeps the main
 /// daemon loaded, repairs files, and remembers the session so deleting
 /// state.json doesn't end it.
 final class Guard {
@@ -30,11 +31,11 @@ final class Guard {
     private func tick() {
         if let s = StateStore.load() {
             cached = s
-        } else if let c = cached, c.activeSession != nil {
+        } else if let c = cached, c.activeSession != nil, c.effectiveProtections.keepRunning {
             log("state file missing during a session; restoring it")
             StateStore.save(c)
         }
-        guard let state = cached, state.activeSession != nil else { return }
+        guard let state = cached, state.activeSession != nil, state.effectiveProtections.keepRunning else { return }
 
         let now = Date()
         let deep = now.timeIntervalSince(lastDeepCheck) >= 15

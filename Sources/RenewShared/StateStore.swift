@@ -14,6 +14,13 @@ public struct PersistedState: Codable, Equatable, Sendable {
     public var schedules: [Schedule]?
     /// Monotonic-anchored wall time for the current boot (see `WallAnchor`).
     public var wallAnchor: WallAnchor?
+    /// The optional hardening features. nil (older files, fresh installs) means all off.
+    public var protections: Protections?
+    /// Counts down to when the uninstall cooling-off turns off, once someone
+    /// has asked. Turning it back on cancels this.
+    public var coolingOffRemoval: Countdown?
+
+    public var effectiveProtections: Protections { protections ?? .off }
 
     public init(session: SessionInfo? = nil) {
         self.session = session
@@ -54,6 +61,7 @@ public struct PersistedState: Codable, Equatable, Sendable {
             u.countdown = u.countdown.checkpointed(at: r)
             uninstall = u
         }
+        coolingOffRemoval = coolingOffRemoval?.checkpointed(at: r)
         guard var s = session else { return 0 }
         let left = sessionRemaining(at: r)
         guard left > 0 else { return 0 }
@@ -75,6 +83,53 @@ public struct PersistedState: Codable, Equatable, Sendable {
         return shift
     }
 
+    // MARK: protections
+
+    /// When the uninstall cooling-off turns off, if that's been asked for.
+    public func coolingOffRemovalDate(at r: ClockReading = .now()) -> Date? {
+        coolingOffRemoval.map { r.wall.addingTimeInterval(max(0, $0.remaining(at: r))) }
+    }
+
+    /// Changes the protections to `requested`. Turning one on always works;
+    /// turning one off is refused during a session. Turning off the uninstall
+    /// cooling-off doesn't happen straight away: it starts a countdown of
+    /// `UninstallPolicy.delay` (see `applyDueCoolingOffRemoval`), and asking
+    /// for it on again cancels that.
+    public mutating func setProtections(_ requested: Protections, sessionActive: Bool,
+                                        at r: ClockReading = .now()) -> Result<ProtectionChange, ProtectionRefusal> {
+        let current = effectiveProtections
+        var target = requested
+        var change = ProtectionChange()
+        if current.uninstallCoolingOff && !requested.uninstallCoolingOff {
+            target.uninstallCoolingOff = true // stays on until the wait is over
+            change.coolingOffRemovalRequested = coolingOffRemoval == nil
+        } else if requested.uninstallCoolingOff && coolingOffRemoval != nil {
+            change.coolingOffRemovalCancelled = true
+        }
+        change.turnedOff = current.turnedOff(in: target)
+        change.turnedOn = current.turnedOn(in: target)
+        if sessionActive && !change.turnedOff.isEmpty {
+            return .failure(ProtectionRefusal(message: "Protections can be turned off only between block sessions (\(change.turnedOff.joined(separator: ", ")))."))
+        }
+        protections = target.anyOn ? target : nil
+        if change.coolingOffRemovalRequested { coolingOffRemoval = Countdown(remaining: UninstallPolicy.delay, at: r) }
+        if change.coolingOffRemovalCancelled { coolingOffRemoval = nil }
+        return .success(change)
+    }
+
+    /// Applies a pending cooling-off removal whose wait is over. Like any
+    /// protection, it only turns off between sessions, so during one it waits
+    /// for the session to end. Returns whether anything changed.
+    @discardableResult
+    public mutating func applyDueCoolingOffRemoval(at r: ClockReading = .now()) -> Bool {
+        guard let c = coolingOffRemoval, c.remaining(at: r) <= 0, activeSession(at: r) == nil else { return false }
+        coolingOffRemoval = nil
+        var p = effectiveProtections
+        p.uninstallCoolingOff = false
+        protections = p.anyOn ? p : nil
+        return true
+    }
+
     // MARK: uninstall
 
     /// The pending uninstall request as seen at `r`, or nil if there's none or
@@ -89,6 +144,25 @@ public struct PersistedState: Codable, Equatable, Sendable {
                                expiresAt: r.wall.addingTimeInterval(toExpiry),
                                unlocked: toUnlock <= 0)
     }
+}
+
+/// What `PersistedState.setProtections` changed.
+public struct ProtectionChange: Equatable, Sendable {
+    public var turnedOn: [String] = []
+    public var turnedOff: [String] = []
+    /// The uninstall cooling-off was asked to turn off; it does after the wait.
+    public var coolingOffRemovalRequested = false
+    public var coolingOffRemovalCancelled = false
+
+    public init() {}
+
+    public var isEmpty: Bool {
+        turnedOn.isEmpty && turnedOff.isEmpty && !coolingOffRemovalRequested && !coolingOffRemovalCancelled
+    }
+}
+
+public struct ProtectionRefusal: Error, Equatable, Sendable {
+    public var message: String
 }
 
 public enum StateStore {

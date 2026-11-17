@@ -47,6 +47,16 @@ final class Monitor: NSObject {
         }
     }
     private var ruleSet = RuleSet([])
+    /// The optional hardening features, as renewd last reported them. Kept
+    /// while renewd is unreachable.
+    private(set) var protections: Protections = .off {
+        didSet {
+            guard protections != oldValue else { return }
+            log("protections: \(protections.onNames)")
+            if localSession == nil { ProtectionsCache.save(protections) }
+            if !protections.lockSystemSettings { switchBlocker.setActive(false) }
+        }
+    }
     private var automationProblems: [String: String] = [:]
     private var busy = false
     private var lastSweep = Date.distantPast
@@ -102,6 +112,8 @@ final class Monitor: NSObject {
         server.start()
         log("Renew monitor started; block page on 127.0.0.1:\(port)\(localSession != nil ? " (local test session)" : "")")
 
+        // Until renewd answers, enforce what it last said, alongside the cached session.
+        protections = localSession != nil ? Self.localProtections() : ProtectionsCache.load()
         setSession(localSession ?? SessionCache.load())
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -112,6 +124,21 @@ final class Monitor: NSObject {
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.check() }
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.checkEmbeddedWeb() }
         sync()
+    }
+
+    /// For `--local-session` runs: `RENEW_PROTECTIONS=all` or a comma list
+    /// of names (lock-settings, close-browsers). Off by default, like an install.
+    private static func localProtections() -> Protections {
+        let raw = ProcessInfo.processInfo.environment["RENEW_PROTECTIONS"] ?? ""
+        var p = Protections.off
+        for name in raw.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !name.isEmpty {
+            guard let keys = Protections.keys(named: name) else {
+                log("RENEW_PROTECTIONS: unknown protection '\(name)' (known: \(Protections.allNames.joined(separator: ", ")))")
+                continue
+            }
+            for k in keys { p[keyPath: k] = true }
+        }
+        return p
     }
 
     // MARK: daemon sync
@@ -154,6 +181,7 @@ final class Monitor: NSObject {
         link.report(currentReport()) { [weak self] status in
             guard let self else { return }
             if let status {
+                self.protections = status.protections ?? .off
                 self.setSession(status.session, serverTime: status.serverTime)
                 SessionCache.save(status.session)
             } else if self.session != nil, !self.sessionLive {
@@ -170,7 +198,7 @@ final class Monitor: NSObject {
         switchBlocker.stopIfUntrusted()
         guard session != nil else { return }
         guard sessionLive else { setSession(nil); return }
-        checkSettings()
+        if protections.lockSystemSettings { checkSettings() }
         guard !busy else { return }
 
         let ws = NSWorkspace.shared
@@ -179,8 +207,10 @@ final class Monitor: NSObject {
             let alive = Set(running.map(\.processIdentifier))
             engineCache = engineCache.filter { alive.contains($0.key) }
         }
-        for app in running where isUnsupportedBrowserApp(app) {
-            quitUnsupported(app)
+        if protections.closeUnwatchedBrowsers {
+            for app in running where isUnsupportedBrowserApp(app) {
+                quitUnsupported(app)
+            }
         }
 
         let now = Date()
@@ -302,8 +332,10 @@ final class Monitor: NSObject {
 
     /// A supported browser Renew has lost permission to watch: close it,
     /// and it gets closed again on every relaunch until the session ends or
-    /// the permission comes back (the next check then succeeds).
+    /// the permission comes back (the next check then succeeds). Only with
+    /// the "close browsers Renew can't watch" protection on.
     private func quitUnwatchable(_ t: BrowserTarget, why: String, fix: String) {
+        guard protections.closeUnwatchedBrowsers else { return }
         guard let app = NSRunningApplication(processIdentifier: t.pid), !app.isTerminated else { return }
         log("closing \(t.bundleID): can't watch it (\(why))")
         app.forceTerminate()
@@ -510,10 +542,11 @@ final class Monitor: NSObject {
         guard session != nil, sessionLive,
               let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
         if app.bundleIdentifier == SettingsGuard.bundleID {
+            guard protections.lockSystemSettings else { return }
             // Before the next settings check, so a quick click is still filtered.
             switchBlocker.addSettingsPID(app.processIdentifier)
             switchBlocker.setActive(true)
-        } else if isUnsupportedBrowserApp(app) {
+        } else if protections.closeUnwatchedBrowsers, isUnsupportedBrowserApp(app) {
             quitUnsupported(app)
         } else if hasEmbeddedWeb(app), AXIsProcessTrusted() {
             primed.insert(app.processIdentifier)

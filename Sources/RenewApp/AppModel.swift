@@ -289,6 +289,25 @@ final class AppModel: ObservableObject {
         send(Request(cmd: .add, rules: rules), completion: completion)
     }
 
+    // MARK: protections
+
+    /// The hardening features in force (all off unless turned on).
+    var protections: Protections { status?.protections ?? .off }
+
+    /// What the user wants: the cooling-off reads as off once its removal has
+    /// been asked for. Changes are built on this, so they don't cancel that.
+    var requestedProtections: Protections { status?.requestedProtections ?? .off }
+
+    /// False if the running service predates protections.
+    var protectionsSupported: Bool { status?.protections != nil }
+
+    /// When the uninstall cooling-off turns off, if someone asked for that.
+    var coolingOffRemovalAt: Date? { status?.coolingOffRemovalAt }
+
+    func setProtections(_ p: Protections, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setProtections, protections: p), completion: completion)
+    }
+
     // MARK: alerts and uninstall request
 
     var alertURL: String? { status?.alertURL }

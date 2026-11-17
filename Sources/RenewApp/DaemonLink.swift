@@ -41,3 +41,24 @@ enum SessionCache {
         try? data.write(to: url, options: .atomic)
     }
 }
+
+/// The last protections renewd reported, so a relaunched app enforces them
+/// while renewd is unreachable, just as it keeps enforcing the cached session.
+enum ProtectionsCache {
+    private static var url: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Renew/agent-protections.json")
+    }
+
+    static func load() -> Protections {
+        guard let data = try? Data(contentsOf: url),
+              let p = try? Wire.decoder.decode(Protections.self, from: data) else { return .off }
+        return p
+    }
+
+    static func save(_ p: Protections) {
+        guard let data = try? Wire.encoder.encode(p) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+}

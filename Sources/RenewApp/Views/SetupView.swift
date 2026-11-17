@@ -12,6 +12,7 @@ struct SetupView: View {
         Form {
             serviceSection
             permissionsSection
+            protectionsSection
             profileSection
             alertsSection
             uninstallSection
@@ -114,7 +115,9 @@ struct SetupView: View {
         } header: {
             Text("Permissions")
         } footer: {
-            Text("During a session, Renew closes any browser it isn't allowed to watch, and keeps it closed until the session ends or the permission is turned back on. Browsers it doesn't support (Opera, Orion, Zen, Tor, DuckDuckGo…) are closed during sessions too.")
+            Text(model.protections.closeUnwatchedBrowsers
+                 ? "During a session, Renew closes any browser it isn't allowed to watch, and keeps it closed until the session ends or the permission is turned back on. Browsers it doesn't support (Opera, Orion, Zen, Tor, DuckDuckGo…) are closed during sessions too."
+                 : "Renew can only block sites in browsers it's allowed to watch. Browsers it can't watch, or doesn't support (Opera, Orion, Zen, Tor, DuckDuckGo…), aren't blocked unless you turn on \"Close browsers Renew can't watch\" below.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -146,6 +149,67 @@ struct SetupView: View {
                 Button("Check again") { model.askAutomation(b.bundleID) }
             }
         }
+    }
+
+    // MARK: protections
+
+    private var protectionsSection: some View {
+        Section {
+            protectionToggle(\.keepRunning, "Keep Renew running",
+                             "During a block session, Renew's background services restart each other and the app if they're stopped, and put back Renew's files if they're deleted or changed.")
+            protectionToggle(\.lockSystemSettings, "Lock System Settings switches",
+                             "During a block session, switches on System Settings' Login Items and Privacy & Security pages (and Renew's own, on any page) can be turned on but not off. A narrow click filter runs while System Settings is open. Needs Accessibility.")
+            protectionToggle(\.closeUnwatchedBrowsers, "Close browsers Renew can't watch",
+                             "During a block session, closes browsers Renew has lost permission to watch, browsers it doesn't support, and unknown apps built on Chrome's or Firefox's engine.")
+            protectionToggle(\.uninstallCoolingOff, "Uninstall cooling-off",
+                             "Uninstalling needs a request and a 24-hour wait. Turning this off takes 24 hours too.")
+            if model.isInstalled && model.daemonReachable && !model.protectionsSupported {
+                Text("The running background service predates these settings. Update Renew to change them.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Protections")
+        } footer: {
+            Text("All off unless you turn them on, so Renew acts like an ordinary blocker, fine for a work Mac. Blocking works either way, and a running session still can't be shortened or stopped. During a session, protections can be turned on but not off.\(model.alertURL != nil ? " Your accountability partner is told when one is turned off." : "")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func protectionToggle(_ key: WritableKeyPath<Protections, Bool>, _ title: String, _ detail: String) -> some View {
+        let isCoolingOff = key == \Protections.uninstallCoolingOff
+        let pendingRemoval = isCoolingOff ? model.coolingOffRemovalAt : nil
+        // A cooling-off that's on its way out shows as off; switching it on cancels that.
+        let isOn = model.requestedProtections[keyPath: key]
+        let lockedOn = isOn && model.session != nil && !isCoolingOff
+        let binding = Binding<Bool>(
+            get: { isOn },
+            set: { on in
+                var p = model.requestedProtections
+                p[keyPath: key] = on
+                model.setProtections(p)
+            })
+        return Toggle(isOn: binding) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let when = pendingRemoval {
+                    Text("Stays on until \(Format.clock(when))\(model.session != nil ? ", or the end of the session if that's later" : ""). Switch it back on to cancel.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else if lockedOn {
+                    Text("Can be turned off after the current session ends.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .toggleStyle(.switch)
+        .disabled(lockedOn || model.busy || !model.daemonReachable || !model.protectionsSupported)
     }
 
     // MARK: profile
@@ -225,11 +289,11 @@ struct SetupView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                if model.uninstallRequest != nil {
+                if model.uninstallRequest != nil && coolingOff {
                     Button("Cancel request") { model.cancelUninstall() }
                         .disabled(model.busy)
                 }
-                if model.uninstallUnlocked {
+                if model.uninstallUnlocked || !coolingOff {
                     Button("Uninstall…", role: .destructive) { showingUninstall = true }
                         .disabled(!model.isInstalled || model.session != nil || model.busy)
                 } else if model.uninstallRequest == nil {
@@ -238,7 +302,9 @@ struct SetupView: View {
                 }
             }
         } footer: {
-            Text("Uninstalling has a 24-hour cooling-off period. Once it unlocks, it stays available for 2 days, between block sessions only.")
+            Text(coolingOff
+                 ? "Uninstalling has a 24-hour cooling-off period. Once it unlocks, it stays available for 2 days, between block sessions only."
+                 : "Uninstalling is allowed between block sessions.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -250,7 +316,16 @@ struct SetupView: View {
         }
     }
 
+    /// Whether uninstalling needs a request and a wait. Assumed on while the
+    /// service can't be reached or predates protections, as the safe reading.
+    private var coolingOff: Bool {
+        !model.daemonReachable || (model.status?.enforcesCoolingOff ?? true)
+    }
+
     private var uninstallCaption: String {
+        if !coolingOff {
+            return model.session != nil ? "Not available during a block session." : "Removes the app and its background service."
+        }
         guard let u = model.uninstallRequest else { return "Removes the app and its background service, after a 24-hour wait." }
         if model.uninstallUnlocked {
             let until = "Available until \(Format.clock(u.expiresAt))."

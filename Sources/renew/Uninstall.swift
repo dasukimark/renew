@@ -8,10 +8,12 @@ enum Uninstall {
         "quartz", "saddle", "timber", "velvet", "walnut", "yonder", "zephyr", "beacon", "cobalt", "drift",
     ]
 
-    /// Uninstalling takes two steps. The first call files a request with
-    /// renewd (no sudo needed). After `UninstallPolicy.delay`, and while no
-    /// session is running, `sudo renew uninstall` removes Renew. An unused
-    /// request expires after `UninstallPolicy.window`.
+    /// With the uninstall cooling-off on, uninstalling takes two steps. The
+    /// first call files a request with renewd (no sudo needed). After
+    /// `UninstallPolicy.delay`, and while no session is running,
+    /// `sudo renew uninstall` removes Renew. An unused request expires after
+    /// `UninstallPolicy.window`. With it off (the default), `sudo renew
+    /// uninstall` works straight away between sessions.
     ///
     /// `confirmed` skips the typed phrase. The app passes it after running
     /// its own typing challenge. The cooling-off and session checks still apply.
@@ -21,23 +23,30 @@ enum Uninstall {
         let session: SessionInfo?
         let request: UninstallStatus?
         let alertURL: String?
+        let coolingOff: Bool
         if let status = daemon?.status {
             (session, request, alertURL) = (status.session, status.uninstall, status.alertURL)
+            coolingOff = status.enforcesCoolingOff
         } else {
             let file = StateStore.load()
             (session, request, alertURL) = (file?.activeSession, file?.uninstallStatus(), file?.alertURL)
+            // No daemon and no state file: assume the cooling-off is on, so
+            // stopping renewd and deleting its state isn't a way around it.
+            coolingOff = file?.effectiveProtections.uninstallCoolingOff ?? true
         }
 
-        guard let request else {
-            guard !confirmed else { die("Uninstall hasn't been requested yet. Request it first; it unlocks after a day.") }
-            fileRequest(reachable: daemon != nil)
-        }
-        guard request.unlocked else {
-            die("""
-            Uninstall was requested \(clock(request.requestedAt)). It unlocks \(clock(request.unlocksAt)) \
-            (in \(DurationText.format(Int(request.unlocksAt.timeIntervalSinceNow)))).
-            Cancel the request with: renew uninstall --cancel
-            """)
+        if coolingOff {
+            guard let request else {
+                guard !confirmed else { die("Uninstall hasn't been requested yet. Request it first; it unlocks after a day.") }
+                fileRequest(reachable: daemon != nil)
+            }
+            guard request.unlocked else {
+                die("""
+                Uninstall was requested \(clock(request.requestedAt)). It unlocks \(clock(request.unlocksAt)) \
+                (in \(DurationText.format(Int(request.unlocksAt.timeIntervalSinceNow)))).
+                Cancel the request with: renew uninstall --cancel
+                """)
+            }
         }
         if let s = session, s.isActive() {
             let left = Int(s.endsAt.timeIntervalSinceNow)
@@ -67,7 +76,7 @@ enum Uninstall {
         Launchctl.bootout("system/\(Paths.daemonLabel)")
 
         let fm = FileManager.default
-        for path in [Paths.daemonPlist, Paths.guardPlist, Paths.cliSymlink, Paths.socketPath,
+        for path in [Paths.daemonPlist, Paths.guardPlist, Paths.legacyGuardPlist, Paths.cliSymlink, Paths.socketPath,
                      Paths.installDir, Paths.dataDir, Paths.agentApp,
                      "/var/log/renew.log", "/var/log/renew-guard.log"] {
             if fm.fileExists(atPath: path) || (try? fm.destinationOfSymbolicLink(atPath: path)) != nil {
