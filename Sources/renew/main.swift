@@ -45,6 +45,13 @@ Usage:
   renew alerts test                                    send a test alert
   renew protections                                    show which hardening protections are on
   renew protections on|off <NAME>...                   turn protections on, or off (between sessions only)
+  renew monitor                                        show activity monitoring settings
+  renew monitor on|off                                 turn activity monitoring on or off
+  renew monitor watch <LIST>...                        flag visits to these lists' sites ("explicit" = preset)
+  renew monitor sites add|remove <SITE>...             flag visits to other sites
+  renew monitor words add|remove <WORD>...             flag page titles containing a word or phrase
+  renew monitor words preset on|off                    flag page titles containing common explicit words
+  renew activity [--date YYYY-MM-DD] [--flagged]       show the pages you visited (default: today)
   sudo renew uninstall                                 uninstall Renew (only between sessions)
   renew uninstall                                      with the cooling-off on: request uninstall (unlocks after 24 hours)
   renew uninstall --cancel                             cancel an uninstall request
@@ -249,6 +256,101 @@ case "protections":
     default:
         die("usage: renew protections [show | on NAME... | off NAME...]")
     }
+
+case "monitor":
+    func show(_ st: Status) {
+        guard let m = st.monitoring else { die("This Renew service predates activity monitoring. Reinstall Renew.") }
+        print("Activity monitoring: \(m.enabled ? "on" : "off")")
+        print("  Flagged lists: \(m.watchLists.isEmpty ? "none" : m.watchLists.joined(separator: ", "))")
+        print("  Other sites:   \(m.customDomains.isEmpty ? "none" : m.customDomains.joined(separator: ", "))")
+        print("  Explicit words in titles: \(m.flagExplicitTerms ? "on" : "off")")
+        print("  Other words:   \(m.customTerms.isEmpty ? "none" : m.customTerms.joined(separator: ", "))")
+    }
+    func change(_ edit: (inout MonitoringSettings) -> Void) {
+        guard var m = send(Request(cmd: .status)).monitoring else { die("This Renew service predates activity monitoring. Reinstall Renew.") }
+        edit(&m)
+        show(send(Request(cmd: .setMonitoring, monitoring: m)))
+    }
+    let sub = args.first ?? "show"
+    let rest = Array(args.dropFirst())
+    switch sub {
+    case "show":
+        show(send(Request(cmd: .status)))
+    case "on", "off":
+        change { $0.enabled = sub == "on" }
+    case "watch":
+        let known = Set(ListStore.all().keys).union([MonitoringSettings.explicitListName])
+        let names = rest.map { $0.lowercased() }
+        for n in names where !known.contains(n) {
+            die("no list named '\(n)'. Available: \(known.sorted().joined(separator: ", "))")
+        }
+        change { $0.watchLists = names }
+    case "sites", "domains":
+        guard rest.count >= 2, ["add", "remove"].contains(rest[0]) else { die("usage: renew monitor sites add|remove <SITE>...") }
+        let (valid, rejected) = canonicalRules(Array(rest.dropFirst()))
+        if !rejected.isEmpty { die("invalid site(s): \(rejected.joined(separator: ", "))") }
+        change { m in
+            if rest[0] == "add" { m.customDomains += valid.filter { !m.customDomains.contains($0) } }
+            else { m.customDomains.removeAll { valid.contains($0) } }
+        }
+    case "words", "terms":
+        if rest.count == 2, rest[0] == "preset", ["on", "off"].contains(rest[1]) {
+            change { $0.flagExplicitTerms = rest[1] == "on" }
+        } else if rest.count >= 2, ["add", "remove"].contains(rest[0]) {
+            // Each argument is one word or phrase (quote phrases).
+            let words = rest.dropFirst().map(MonitoringSettings.cleanTerm).filter { !$0.isEmpty }
+            change { m in
+                if rest[0] == "add" { m.customTerms += words.filter { !m.customTerms.contains($0) } }
+                else { m.customTerms.removeAll { words.contains($0) } }
+            }
+        } else {
+            die("usage: renew monitor words add|remove <WORD>... | renew monitor words preset on|off")
+        }
+    default:
+        die("usage: renew monitor [show | on | off | watch LIST... | sites add|remove SITE... | words add|remove WORD... | words preset on|off]")
+    }
+
+case "activity":
+    var day = ActivityLogStore.dayKey(Date())
+    var flagged = false
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--flagged", "-f": flagged = true
+        case "--date", "-d":
+            guard i + 1 < args.count else { die("--date needs YYYY-MM-DD") }
+            day = args[i + 1]
+            i += 1
+        default:
+            if args[i].hasPrefix("--date=") { day = String(args[i].dropFirst("--date=".count)) }
+            else { die("usage: renew activity [--date YYYY-MM-DD] [--flagged]") }
+        }
+        i += 1
+    }
+    guard ActivityLogStore.date(ofDay: day) != nil else { die("not a date: \(day) (use YYYY-MM-DD)") }
+    let response: Response
+    do {
+        response = try DaemonClient.send(Request(cmd: .activity, activityQuery: ActivityQuery(day: day, flaggedOnly: flagged)), timeout: 10)
+    } catch {
+        die(String(describing: error))
+    }
+    guard response.ok else { die(response.error ?? "renewd refused the request") }
+    let events = response.activity ?? []
+    if response.status?.monitoring?.enabled == false { print("(Activity monitoring is off. Turn it on with `renew monitor on`.)") }
+    guard !events.isEmpty else {
+        print(flagged ? "No flagged visits on \(day)." : "No visits recorded on \(day).")
+        exit(0)
+    }
+    let time = DateFormatter()
+    time.dateFormat = "HH:mm:ss"
+    for e in events {
+        let marks = (e.blocked ? ["Blocked"] : []) + e.flags.map(\.label)
+        let flag = marks.isEmpty ? "" : "  [\(marks.joined(separator: ", "))]"
+        print("\(time.string(from: e.start))  \(DurationText.format(Int(e.duration.rounded())).padding(toLength: 8, withPad: " ", startingAt: 0))  \(e.browser): \(e.title)\(flag)")
+        print("          \(e.url)")
+    }
+    let count = events.filter(\.isFlagged).count
+    print("\n\(events.count) visit(s)\(flagged ? "" : ", \(count) flagged") on \(day).")
 
 case "lists":
     let sub = args.first ?? "show"

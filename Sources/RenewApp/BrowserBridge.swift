@@ -4,6 +4,8 @@ import RenewShared
 /// The active tab of a browser window, plus enough to address that exact tab later.
 struct TabRef {
     let url: String
+    /// The page title, or "" if the browser didn't give one.
+    let title: String
     /// AppleScript window id, or "" if the browser doesn't expose one.
     let windowID: String
     /// Chromium: tab id. Safari: tab index. "" if unavailable.
@@ -35,6 +37,11 @@ enum BrowserBridge {
         kind == .safari ? "current tab" : "active tab"
     }
 
+    /// Tab title property: Safari calls it `name`, Chromium browsers `title`.
+    private static func titleKey(_ kind: BrowserKind) -> String {
+        kind == .safari ? "name of t" : "title of t"
+    }
+
     /// Tab identifier expression: Chromium tabs have stable ids, Safari tabs only indexes.
     private static func tabKey(_ kind: BrowserKind) -> String {
         kind == .safari ? "index of t" : "id of t"
@@ -63,7 +70,11 @@ enum BrowserBridge {
                             try
                                 set tid to (\(tabKey(kind))) as text
                             end try
-                            return wid & linefeed & tid & linefeed & u
+                            set ttl to ""
+                            try
+                                set ttl to (\(titleKey(kind))) as text
+                            end try
+                            return wid & linefeed & tid & linefeed & u & linefeed & ttl
                         on error errMsg number errNum
                             -- A window without tabs is skipped; timeouts and
                             -- permission errors must still reach the caller.
@@ -87,9 +98,11 @@ enum BrowserBridge {
         case .success(let text):
             let parts = text.components(separatedBy: "\n")
             guard parts.count >= 3 else { return .noPage }
-            let url = parts[2...].joined(separator: "\n")
+            // A URL never contains a line break; a title might.
+            let url = parts[2]
             if url.isEmpty { return .noPage }
-            return .tab(TabRef(url: url, windowID: parts[0], tabID: parts[1]))
+            let title = parts.count > 3 ? parts[3...].joined(separator: " ").trimmingCharacters(in: .whitespaces) : ""
+            return .tab(TabRef(url: url, title: title, windowID: parts[0], tabID: parts[1]))
         case .failure(let code):
             return code == -1743 ? .denied : .failed(code)
         }

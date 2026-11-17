@@ -38,6 +38,8 @@ public enum Paths {
     public static let dataDir = env["RENEW_DATA_DIR"] ?? "/var/db/com.renew"
     public static var stateFile: String { dataDir + "/state.json" }
     public static var backupDir: String { dataDir + "/backup" }
+    /// The activity log, per user (see `ActivityLogStore`).
+    public static var activityDir: String { dataDir + "/activity" }
     public static let socketPath = env["RENEW_SOCKET"] ?? "/var/run/renew.sock"
 
     public static let daemonLabel = "com.renew.daemon"

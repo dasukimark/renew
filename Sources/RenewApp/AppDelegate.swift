@@ -117,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateCancel
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        monitor.shutdown()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Non-installed copies (the installer UI) quit when their window closes.
         !model.isRunningInstalledCopy && localSession == nil

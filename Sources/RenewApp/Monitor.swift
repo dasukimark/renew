@@ -9,19 +9,36 @@ private struct BrowserTarget {
     let kind: BrowserKind
 }
 
+/// A page a browser showed when it was checked.
+private struct SeenPage {
+    let url: String
+    let title: String
+}
+
 private enum Inspection {
-    case clean(BrowserTarget)
+    /// `page` is what the tab showed, if it could be read.
+    case clean(BrowserTarget, page: SeenPage?)
     case denied(BrowserTarget)
     case accessibilityMissing(BrowserTarget)
     /// The browser answered with an error other than a permission denial.
     case unreadable(BrowserTarget, code: Int)
-    case blocked(BrowserTarget, url: String, rule: Rule, redirected: Bool)
+    case blocked(BrowserTarget, page: SeenPage, rule: Rule, redirected: Bool)
+
+    var target: BrowserTarget {
+        switch self {
+        case .clean(let t, _), .denied(let t), .accessibilityMissing(let t), .unreadable(let t, _), .blocked(let t, _, _, _):
+            return t
+        }
+    }
 }
 
-/// The monitoring loop: every 500 ms look at the frontmost browser's active
-/// tab (and every 2 s at other running browsers) and swap blocked pages for
-/// the block page. Reports permission health to renewd every 2 s and hands
-/// each status reply to the UI through `onStatus`.
+/// The monitoring loop: during a session, every 500 ms look at the frontmost
+/// browser's active tab (and every 2 s at other running browsers) and swap
+/// blocked pages for the block page. With activity monitoring on, the front
+/// browser's tab (once a second) and the websites in the front app's built-in
+/// browser (every 2 s) are also recorded, session or not. Reports permission
+/// health to renewd every 2 s and hands each status reply to the UI through
+/// `onStatus`.
 final class Monitor: NSObject {
     /// Called on the main thread after every sync. nil means renewd was unreachable.
     var onStatus: ((Status?) -> Void)?
@@ -99,6 +116,27 @@ final class Monitor: NSObject {
     private var lastSettingsOverlay = Date.distantPast
     private var settingsNoticeHide: DispatchWorkItem?
 
+    /// What activity monitoring watches, as renewd last reported it. Kept
+    /// while renewd is unreachable.
+    private(set) var monitoring: MonitoringSettings = .off {
+        didSet {
+            guard monitoring != oldValue else { return }
+            if monitoring.enabled != oldValue.enabled { log("activity monitoring \(monitoring.enabled ? "on" : "off")") }
+            if localSession == nil { MonitoringCache.save(monitoring) }
+            recorder.settings = monitoring
+        }
+    }
+    private lazy var recorder = ActivityRecorder(link: link, localOnly: localSession != nil)
+    /// Outside sessions the front browser is read at most this often.
+    private static let monitorInterval: TimeInterval = 1
+    private static let embeddedMonitorInterval: TimeInterval = 2
+    private var lastMonitorRead = Date.distantPast
+    private var lastEmbeddedMonitorRead = Date.distantPast
+    /// No input for this long counts as away: open visits end.
+    private static let idleAfter: TimeInterval = 5 * 60
+    /// Only the copy that watches browsers records (see `AppDelegate`).
+    private var started = false
+
     init(localSession: SessionInfo?) {
         self.localSession = localSession
         super.init()
@@ -108,12 +146,16 @@ final class Monitor: NSObject {
     func start() {
         let env = ProcessInfo.processInfo.environment
         let port = env["RENEW_PORT"].flatMap(UInt16.init) ?? Paths.blockPagePort(uid: getuid())
+        started = true
         server = BlockPageServer(port: port)
         server.start()
         log("Renew monitor started; block page on 127.0.0.1:\(port)\(localSession != nil ? " (local test session)" : "")")
 
         // Until renewd answers, enforce what it last said, alongside the cached session.
         protections = localSession != nil ? Self.localProtections() : ProtectionsCache.load()
+        monitoring = localSession != nil ? Self.localMonitoring() : MonitoringCache.load()
+        recorder.settings = monitoring
+        recorder.start()
         setSession(localSession ?? SessionCache.load())
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -141,6 +183,20 @@ final class Monitor: NSObject {
         return p
     }
 
+    /// For `--local-session` runs: `RENEW_MONITORING=on` records visits to
+    /// the log (stdout) with the default watch settings.
+    private static func localMonitoring() -> MonitoringSettings {
+        var m = MonitoringSettings.off
+        m.enabled = ["on", "1", "true"].contains(ProcessInfo.processInfo.environment["RENEW_MONITORING"]?.lowercased() ?? "")
+        return m
+    }
+
+    /// Renew is quitting: save visits that haven't reached renewd yet.
+    func shutdown() {
+        guard started else { return }
+        recorder.shutdown()
+    }
+
     // MARK: daemon sync
 
     private func currentReport() -> AgentReport {
@@ -148,7 +204,9 @@ final class Monitor: NSObject {
         // once the session is over. They're re-detected if the browser comes back.
         let runningIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let inSession = sessionLive
-        automationProblems = automationProblems.filter { inSession && runningIDs.contains($0.key) }
+        // Recording needs the permissions too, session or not.
+        let watching = inSession || recorder.enabled
+        automationProblems = automationProblems.filter { watching && runningIDs.contains($0.key) }
         if !inSession { readFailures.removeAll() }
 
         var problems: [String] = []
@@ -182,6 +240,7 @@ final class Monitor: NSObject {
             guard let self else { return }
             if let status {
                 self.protections = status.protections ?? .off
+                self.monitoring = status.monitoring ?? .off
                 self.setSession(status.session, serverTime: status.serverTime)
                 SessionCache.save(status.session)
             } else if self.session != nil, !self.sessionLive {
@@ -196,45 +255,71 @@ final class Monitor: NSObject {
 
     private func check() {
         switchBlocker.stopIfUntrusted()
-        guard session != nil else { return }
-        guard sessionLive else { setSession(nil); return }
-        if protections.lockSystemSettings { checkSettings() }
+        if session != nil, !sessionLive { setSession(nil) }
+        let live = session != nil
+        let recording = recorder.enabled
+        guard live || recording else { return }
+        if live && protections.lockSystemSettings { checkSettings() }
+
+        let now = Date()
+        let leftAt = recording ? Self.userLeftAt() : nil
+        let away = leftAt != nil
+        if let leftAt { recorder.away(since: leftAt) }
+        // Outside sessions only recording needs the browser, and less often.
+        if !live && (away || now.timeIntervalSince(lastMonitorRead) < Self.monitorInterval) { return }
         guard !busy else { return }
 
         let ws = NSWorkspace.shared
         let running = ws.runningApplications
-        if engineCache.count > 64 {
-            let alive = Set(running.map(\.processIdentifier))
-            engineCache = engineCache.filter { alive.contains($0.key) }
-        }
-        if protections.closeUnwatchedBrowsers {
-            for app in running where isUnsupportedBrowserApp(app) {
-                quitUnsupported(app)
+        if live {
+            if engineCache.count > 64 {
+                let alive = Set(running.map(\.processIdentifier))
+                engineCache = engineCache.filter { alive.contains($0.key) }
+            }
+            if protections.closeUnwatchedBrowsers {
+                for app in running where isUnsupportedBrowserApp(app) {
+                    quitUnsupported(app)
+                }
             }
         }
 
-        let now = Date()
         var targets: [BrowserTarget] = []
         let front = ws.frontmostApplication
-        if let f = front, let t = target(for: f) { targets.append(t) }
-        if now.timeIntervalSince(lastSweep) >= 2 {
+        let frontTarget = front.flatMap(target(for:))
+        if let t = frontTarget { targets.append(t) }
+        if live && now.timeIntervalSince(lastSweep) >= 2 {
             lastSweep = now
             for app in running where app.processIdentifier != front?.processIdentifier && !app.isTerminated {
                 if let t = target(for: app) { targets.append(t) }
             }
         }
+        if recording && !away && frontTarget == nil { recorder.observe(.browser, []) }
         guard !targets.isEmpty else { return }
 
+        lastMonitorRead = now
         busy = true
-        let rules = ruleSet
+        let rules = live ? ruleSet : RuleSet([])
         let server = self.server!
+        let record = recording && !away
         browserQueue.async { [weak self] in
             let results = targets.map { Self.inspect($0, rules: rules, server: server) }
             DispatchQueue.main.async {
                 self?.busy = false
-                self?.apply(results)
+                self?.apply(results, front: record ? frontTarget : nil)
             }
         }
+    }
+
+    /// When the user left, if they're away: the last keyboard or mouse input
+    /// once there's been none for `idleAfter`, or now if the screen is locked.
+    private static func userLeftAt() -> Date? {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        if (session?["CGSSessionScreenIsLocked"] as? Bool) ?? false { return Date() }
+        if let anyInput = CGEventType(rawValue: ~0) {
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+            if idle >= idleAfter { return Date().addingTimeInterval(-idle) }
+        }
+        return nil
     }
 
     private func target(for app: NSRunningApplication) -> BrowserTarget? {
@@ -248,43 +333,67 @@ final class Monitor: NSObject {
         case .safari, .chromium:
             switch BrowserBridge.activeTab(bundleID: t.bundleID, kind: t.kind) {
             case .tab(let tab):
-                guard let rule = rules.match(tab.url) else { return .clean(t) }
+                let page = SeenPage(url: tab.url, title: tab.title)
+                guard let rule = rules.match(tab.url) else { return .clean(t, page: page) }
                 switch BrowserBridge.redirect(bundleID: t.bundleID, kind: t.kind, tab: tab,
                                               to: server.blockURL(for: tab.url, rule: rule)) {
                 case .redirected:
-                    return .blocked(t, url: tab.url, rule: rule, redirected: true)
+                    return .blocked(t, page: page, rule: rule, redirected: true)
                 case .tabChanged:
-                    return .clean(t) // user moved on; the next pass checks the new tab
+                    return .clean(t, page: nil) // user moved on; the next pass checks the new tab
                 case .failed:
-                    return .blocked(t, url: tab.url, rule: rule, redirected: false)
+                    return .blocked(t, page: page, rule: rule, redirected: false)
                 }
             case .denied:
                 return .denied(t)
             case .noPage:
-                return .clean(t)
+                return .clean(t, page: nil)
             case .failed(let code):
                 // -600: the app is quitting or just launched; not a read failure.
-                return code == -600 ? .clean(t) : .unreadable(t, code: code)
+                return code == -600 ? .clean(t, page: nil) : .unreadable(t, code: code)
             }
         case .firefox:
             guard AXIsProcessTrusted() else { return .accessibilityMissing(t) }
-            if let url = FirefoxReader.activeURL(pid: t.pid), let rule = rules.match(url) {
-                return .blocked(t, url: url, rule: rule, redirected: false)
+            guard let p = FirefoxReader.activePage(pid: t.pid) else { return .clean(t, page: nil) }
+            let page = SeenPage(url: p.url, title: p.title)
+            if let rule = rules.match(p.url) {
+                return .blocked(t, page: page, rule: rule, redirected: false)
             }
-            return .clean(t)
+            return .clean(t, page: page)
         case .unsupported:
-            return .clean(t)
+            return .clean(t, page: nil)
         }
     }
 
-    private func apply(_ results: [Inspection]) {
+    /// Acts on what the browsers showed. `front` is the frontmost browser
+    /// when its page should be recorded. Everything that closes or covers
+    /// something only happens during a session.
+    private func apply(_ results: [Inspection], front: BrowserTarget?) {
+        // The user may have switched apps while the browser was being read.
+        if let front, NSWorkspace.shared.frontmostApplication?.processIdentifier == front.pid {
+            var seen: [ActivityRecorder.Seen] = []
+            for r in results where r.target.pid == front.pid {
+                switch r {
+                case .clean(_, let page?):
+                    seen.append(.init(source: front.bundleID, browser: front.name, url: page.url, title: page.title))
+                case .blocked(_, let page, _, _):
+                    seen.append(.init(source: front.bundleID, browser: front.name, url: page.url, title: page.title, blocked: true))
+                default:
+                    break
+                }
+            }
+            recorder.observe(.browser, seen)
+        }
+
+        let live = sessionLive
         var permissionChanged = false
         for r in results {
             switch r {
-            case .clean(let t):
+            case .clean(let t, _):
                 readFailures[t.bundleID] = 0
                 if t.kind != .firefox, automationProblems.removeValue(forKey: t.bundleID) != nil { permissionChanged = true }
             case .unreadable(let t, let code):
+                guard live else { break }
                 let n = (readFailures[t.bundleID] ?? 0) + 1
                 readFailures[t.bundleID] = n
                 if n == 1 || n % 5 == 0 { log("couldn't read \(t.bundleID) (error \(code)), \(n) in a row") }
@@ -294,6 +403,9 @@ final class Monitor: NSObject {
                                     fix: "You can reopen it. If this keeps happening, check Renew's Setup page.")
                 }
             case .denied(let t):
+                // Reported while recording too, so a lost permission doesn't
+                // silently stop the activity log.
+                guard live || recorder.enabled else { break }
                 if automationProblems[t.bundleID] == nil {
                     automationProblems[t.bundleID] = "Automation permission for \(t.name) is off"
                     permissionChanged = true
@@ -304,15 +416,17 @@ final class Monitor: NSObject {
             case .accessibilityMissing(let t):
                 quitUnwatchable(t, why: "Accessibility is turned off for Renew, so it can't check which sites are open in \(t.name).",
                                 fix: "Turn it back on in System Settings → Privacy & Security → Accessibility.")
-            case .blocked(let t, let url, let rule, let redirected):
-                log("blocked \(url) in \(t.name) (rule \(rule))\(redirected ? "" : "; closing tab")")
-                if !redirected { popUpAndCloseTab(t, url: url, rule: rule) }
+            case .blocked(let t, let page, let rule, let redirected):
+                guard live else { break }
+                log("blocked \(page.url) in \(t.name) (rule \(rule))\(redirected ? "" : "; closing tab")")
+                if !redirected { popUpAndCloseTab(t, url: page.url, rule: rule) }
             }
         }
         if permissionChanged { sync() }
     }
 
     private func popUpAndCloseTab(_ t: BrowserTarget, url: String, rule: Rule) {
+        guard sessionLive else { return }
         let now = Date()
         if let until = closeCooldown[t.pid], until > now { return }
         closeCooldown[t.pid] = now.addingTimeInterval(1.5)
@@ -335,7 +449,7 @@ final class Monitor: NSObject {
     /// the permission comes back (the next check then succeeds). Only with
     /// the "close browsers Renew can't watch" protection on.
     private func quitUnwatchable(_ t: BrowserTarget, why: String, fix: String) {
-        guard protections.closeUnwatchedBrowsers else { return }
+        guard protections.closeUnwatchedBrowsers, sessionLive else { return }
         guard let app = NSRunningApplication(processIdentifier: t.pid), !app.isTerminated else { return }
         log("closing \(t.bundleID): can't watch it (\(why))")
         app.forceTerminate()
@@ -348,6 +462,7 @@ final class Monitor: NSObject {
     }
 
     private func quitUnsupported(_ app: NSRunningApplication) {
+        guard sessionLive else { return }
         let name = app.localizedName ?? app.bundleIdentifier ?? "That browser"
         let engine = engineCache[app.processIdentifier] ?? nil
         log("quitting unsupported browser \(app.bundleIdentifier ?? "?")\(engine.map { " (built on \($0.rawValue))" } ?? "")")
@@ -447,33 +562,62 @@ final class Monitor: NSObject {
     /// back, a banner gives `embeddedGrace` seconds to close the page; after
     /// that the app is hidden again (without the overlay, which only shows the
     /// first time).
+    ///
+    /// With activity monitoring on, the websites in the front app's built-in
+    /// browser are also recorded, session or not. Outside sessions only the
+    /// front app is asked to expose its tree, and Renew switches
+    /// AXEnhancedUserInterface (see `EmbeddedWebReader`) back off for an app
+    /// as soon as it leaves the front.
     private func checkEmbeddedWeb() {
-        guard sessionLive else {
-            if !primed.isEmpty { embeddedQueue.async { EmbeddedWebReader.release() } }
+        let live = sessionLive
+        if !live && (!primed.isEmpty || !embeddedBlocks.isEmpty) {
             primed.removeAll()
             embeddedBlocks.removeAll()
             notice.hide()
+        }
+        let front = NSWorkspace.shared.frontmostApplication
+        let recording = recorder.enabled
+        guard (live || recording), AXIsProcessTrusted() else {
+            embeddedQueue.async { EmbeddedWebReader.release() }
             return
         }
-        guard AXIsProcessTrusted() else { return }
-        primeEmbeddedWeb()
-        let front = NSWorkspace.shared.frontmostApplication
-        // The grace banner belongs to the app in grace; drop it if the user moved on.
-        let frontInGrace = front.map { embeddedBlocks[$0.processIdentifier]?.graceUntil != nil } ?? false
-        if !frontInGrace { notice.hide() }
-        guard !embeddedBusy, let app = front, hasEmbeddedWeb(app) else { return }
+        let candidate = front.flatMap { hasEmbeddedWeb($0) ? $0 : nil }
+        if live {
+            primeEmbeddedWeb()
+            // The grace banner belongs to the app in grace; drop it if the user moved on.
+            let frontInGrace = front.map { embeddedBlocks[$0.processIdentifier]?.graceUntil != nil } ?? false
+            if !frontInGrace { notice.hide() }
+        } else {
+            let keep = candidate?.processIdentifier
+            embeddedQueue.async { EmbeddedWebReader.release(except: keep) }
+        }
+        let away = recording && Self.userLeftAt() != nil
+        let record = recording && !away
+        if recording && (away || candidate == nil) { recorder.observe(.embedded, []) }
+        let now = Date()
+        if !live && (!record || now.timeIntervalSince(lastEmbeddedMonitorRead) < Self.embeddedMonitorInterval) { return }
+        guard !embeddedBusy, let app = candidate else { return }
+        lastEmbeddedMonitorRead = now
         let pid = app.processIdentifier
-        let rules = ruleSet
+        let rules = live ? ruleSet : RuleSet([])
         embeddedBusy = true
         embeddedQueue.async { [weak self] in
-            let urls = EmbeddedWebReader.pageURLs(pid: pid)
-            let hit = urls.lazy.compactMap { url in rules.match(url).map { (url, $0) } }.first
+            let pages = EmbeddedWebReader.pages(pid: pid)
+            let hit = pages.lazy.compactMap { p in rules.match(p.url).map { (p.url, $0) } }.first
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.embeddedBusy = false
-                guard self.sessionLive, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+                guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+                if record, self.recorder.enabled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+                    let name = app.localizedName ?? app.bundleIdentifier ?? "An app"
+                    let source = "app:" + (app.bundleIdentifier ?? "\(pid)")
+                    self.recorder.observe(.embedded, pages.filter(\.isWebsite).map {
+                        ActivityRecorder.Seen(source: source, browser: name, url: $0.url, title: $0.title, blocked: $0.url == hit?.0)
+                    })
+                }
+                guard live, self.sessionLive else { return }
                 guard let (url, rule) = hit else {
-                    self.embeddedMiss(app, pageCount: urls.count)
+                    self.embeddedMiss(app, pageCount: pages.count)
                     return
                 }
                 self.handleEmbeddedHit(app, url: url, rule: rule)

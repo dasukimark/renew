@@ -84,7 +84,7 @@ final class SocketServer {
 
         let response: Response
         do {
-            let line = try readLine(client, max: 256 * 1024)
+            let line = try readLine(client, max: 1 << 20)
             let request = try Wire.decoder.decode(Request.self, from: line)
             response = handler(request, uid)
         } catch {

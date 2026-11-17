@@ -91,7 +91,8 @@ public enum DaemonClient {
         var payload = try Wire.encoder.encode(request)
         payload.append(0x0A)
         try writeAll(fd, payload)
-        let line = try readLine(fd)
+        // Activity log replies can run to a few megabytes.
+        let line = try readLine(fd, max: 16 << 20)
         do {
             return try Wire.decoder.decode(Response.self, from: line)
         } catch {

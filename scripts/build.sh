@@ -30,6 +30,7 @@ cp "$BIN/RenewApp" "$APP/Contents/MacOS/Renew"
 cp "$BIN/renewd" "$BIN/renew" "$APP/Contents/Helpers/"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Resources/blocked.html" \
+   "$ROOT/Resources/explicit-domains.txt" \
    "$ROOT/Resources/install-helper.sh" \
    "$ROOT/Resources/com.renew.daemon.plist" \
    "$ROOT/Resources/com.renew.guard.plist" \

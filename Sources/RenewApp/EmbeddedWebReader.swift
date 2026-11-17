@@ -34,23 +34,37 @@ enum EmbeddedWebReader {
         enhanced.insert(pid)
     }
 
-    /// Turns AXEnhancedUserInterface back off wherever Renew turned it on.
-    static func release() {
-        for pid in enhanced {
-            let app = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(app, 0.5)
-            AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
-        }
-        enhanced.removeAll()
+    /// Turns AXEnhancedUserInterface back off wherever Renew turned it on,
+    /// except for `keep`.
+    static func release(except keep: pid_t? = nil) {
+        for pid in enhanced where pid != keep { release(pid: pid) }
+    }
+
+    /// Turns AXEnhancedUserInterface back off for one app, if Renew turned it on.
+    static func release(pid: pid_t) {
+        guard enhanced.remove(pid) != nil else { return }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+    }
+
+    struct Page: Equatable {
+        let url: String
+        let title: String
+        var isWebsite: Bool { url.lowercased().hasPrefix("http://") || url.lowercased().hasPrefix("https://") }
     }
 
     /// Every distinct page URL in the app's windows, main UI included.
+    static func pageURLs(pid: pid_t) -> [String] { pages(pid: pid).map(\.url) }
+
+    /// Every distinct page in the app's windows, main UI included, with its
+    /// document title ("" if the page doesn't expose one).
     ///
     /// An app's own UI is often a web page with the built-in browser nested
     /// inside it, so the walk enters web areas, except real websites (http,
     /// https): their content is large and never contains another page that
     /// matters.
-    static func pageURLs(pid: pid_t) -> [String] {
+    static func pages(pid: pid_t) -> [Page] {
         prime(pid: pid)
         let app = AXUIElementCreateApplication(pid)
         var ax = AXReader(timeout: 0.5)
@@ -58,18 +72,25 @@ enum EmbeddedWebReader {
         let windows = ax.copy(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
         var queue: [(el: AXUIElement, depth: Int)] = windows.map { ($0, 0) }
         var head = 0
-        var urls: [String] = []
+        var pages: [Page] = []
         while head < queue.count && head < maxNodes {
             let (el, depth) = queue[head]
             head += 1
             if ax.string(el, kAXRoleAttribute) == "AXWebArea", let u = ax.url(el) {
-                if !urls.contains(u) { urls.append(u) }
+                if !pages.contains(where: { $0.url == u }) {
+                    // Chromium puts the document title in AXTitle or AXDescription.
+                    var title = ""
+                    for attr in [kAXTitleAttribute, kAXDescriptionAttribute] where title.isEmpty {
+                        title = ax.string(el, attr)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    }
+                    pages.append(Page(url: u, title: title))
+                }
                 if u.lowercased().hasPrefix("http") { continue }
             }
             if depth < maxDepth, let kids = ax.children(el) {
                 for k in kids { queue.append((k, depth + 1)) }
             }
         }
-        return urls
+        return pages
     }
 }
