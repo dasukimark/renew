@@ -470,6 +470,20 @@ final class AppModel: ObservableObject {
         send(Request(cmd: .testAlert))
     }
 
+    var reportsURL: String? { status?.reportsURL }
+    var reportsPartner: String? { status?.reportsPartner }
+    var reportServerBuiltIn: Bool { status?.reportServerBuiltIn == true }
+
+    /// nil turns email reports off. Without `url`, reports use the built-in server.
+    func setReports(partnerEmail: String?, url: String? = nil, token: String? = nil, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setReports, reports: partnerEmail.map { ReportDestination(partnerEmail: $0, url: url, token: token) }),
+             completion: completion)
+    }
+
+    func testReport() {
+        send(Request(cmd: .testReport))
+    }
+
     func requestUninstall() {
         send(Request(cmd: .requestUninstall))
     }

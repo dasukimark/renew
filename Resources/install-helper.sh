@@ -63,6 +63,21 @@ chmod 700 "$DATA_DIR" "$DATA_DIR/backup"
 mkdir -p /usr/local/bin
 ln -sf "$INSTALL_DIR/bin/renew" /usr/local/bin/renew
 
+# The email report server (see server/reports/configure-mac.sh), copied into
+# renewd's root-only folder so the app only needs the partner's address.
+# Without one, an earlier copy stays.
+if [[ "$USER_UID" != "0" ]]; then
+  USER_HOME="$(dscl . -read "/Users/$(id -un "$USER_UID")" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+  REPORT_SERVER="$USER_HOME/.config/renew/report-server.json"
+  if [[ -n "$USER_HOME" && -f "$REPORT_SERVER" && ! -L "$REPORT_SERVER" ]]; then
+    head -c 4096 "$REPORT_SERVER" > "$DATA_DIR/report-server.json.tmp"
+    chown root:wheel "$DATA_DIR/report-server.json.tmp"
+    chmod 600 "$DATA_DIR/report-server.json.tmp"
+    mv "$DATA_DIR/report-server.json.tmp" "$DATA_DIR/report-server.json"
+    echo "==> Installed the email report server from $REPORT_SERVER"
+  fi
+fi
+
 # Seed the backups that self-repair restores from.
 for f in renewd renew; do ditto "$INSTALL_DIR/bin/$f" "$DATA_DIR/backup/$f"; done
 rm -rf "$DATA_DIR/backup/Renew.app"

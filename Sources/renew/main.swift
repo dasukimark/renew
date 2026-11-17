@@ -43,6 +43,11 @@ Usage:
   renew alerts set <URL>                               send tamper alerts to a URL (e.g. https://ntfy.sh/<topic>)
   renew alerts off                                     turn alerts off (between sessions only)
   renew alerts test                                    send a test alert
+  renew reports                                        show where email reports go
+  renew reports set <PARTNER-EMAIL>                    email flag reports to your accountability partner
+  renew reports set <EMAIL> --server <URL> [TOKEN]     ...through a different report server (asks for the token)
+  renew reports off                                    turn email reports off (between sessions only)
+  renew reports test                                   send a test report
   renew protections                                    show which hardening protections are on
   renew protections on|off <NAME>...                   turn protections on, or off (between sessions only)
   renew activity on|off                                record the pages you visit, or stop
@@ -118,6 +123,7 @@ func printStatus(_ s: Status) {
 
 func printExtras(_ s: Status) {
     print("  Alerts: \(s.alertURL ?? "off")")
+    print("  Email reports: \(s.reportsPartner.map { "to \($0)" } ?? "off")")
     if let p = s.protections {
         print("  Protections: \(p.onNames.isEmpty ? "none" : p.onNames.joined(separator: ", "))")
     }
@@ -263,6 +269,44 @@ case "alerts":
         print("Test alert sent.")
     default:
         die("usage: renew alerts [show | set URL | off | test]")
+    }
+
+case "reports":
+    switch args.first ?? "show" {
+    case "show":
+        let st = send(Request(cmd: .status))
+        if let to = st.reportsPartner {
+            print("Email reports: to \(to)\(st.reportsURL.map { ", through \($0)" } ?? "")")
+        } else {
+            print("Email reports: off\(st.reportServerBuiltIn == false ? " (no report server set up on this Mac)" : "")")
+        }
+    case "set":
+        // renew reports set <PARTNER-EMAIL> [--server URL [TOKEN]]
+        var rest = Array(args.dropFirst())
+        var url: String?
+        var token: String?
+        if let i = rest.firstIndex(of: "--server") {
+            guard i + 1 < rest.count else { die("--server needs a URL") }
+            url = rest[i + 1]
+            if i + 2 < rest.count { token = rest[i + 2] }
+            rest.removeSubrange(i..<min(rest.count, i + 3))
+            if token == nil {
+                // Kept out of the shell history.
+                guard let p = getpass("Report token: ") else { die("No token given.") }
+                token = String(cString: p)
+            }
+        }
+        guard rest.count == 1 else { die("usage: renew reports set <PARTNER-EMAIL> [--server URL [TOKEN]]") }
+        let st = send(Request(cmd: .setReports, reports: ReportDestination(partnerEmail: rest[0], url: url, token: token)))
+        print("Email reports go to \(st.reportsPartner ?? "?"). A confirmation email is on its way.")
+    case "off":
+        _ = send(Request(cmd: .setReports, reports: nil))
+        print("Email reports are off.")
+    case "test":
+        _ = send(Request(cmd: .testReport))
+        print("Test report sent. Check renewd's log if no email arrives.")
+    default:
+        die("usage: renew reports [show | set PARTNER-EMAIL [--server URL [TOKEN]] | off | test]")
     }
 
 case "protections":

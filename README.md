@@ -57,7 +57,7 @@ the window:
   or with watched words in their titles (see [Monitor](#monitor)). Off until you
   turn it on, and needs Activity on.
 - **Setup**: service status, permissions, protections, the lock-down profile,
-  accountability alerts, and uninstall (see below).
+  accountability alerts, email reports, and uninstall (see below).
 
 Closing the window or pressing ⌘Q leaves Renew running in the menu bar.
 
@@ -72,7 +72,7 @@ Rule syntax:
 
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
-`renew alerts set <url>`, `renew protections on all`, `renew activity on`,
+`renew alerts set <url>`, `renew reports set <email>`, `renew protections on all`, `renew activity on`,
 `renew stats --site youtube.com`, `renew monitor on`, `renew flags`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
@@ -113,8 +113,8 @@ uninstall is requested, cancelled or done. Your partner installs the free
 `renew alerts set https://ntfy.sh/<topic>`). Discord and Slack webhook URLs work too.
 
 Alerts can be turned on at any time, but changed or turned off only between
-sessions, and the old destination is told when that happens. This is the only
-thing Renew sends off the Mac.
+sessions, and the old destination is told when that happens. Alerts and
+[email reports](#email-reports) are the only things Renew sends off the Mac.
 
 ### Activity
 
@@ -149,7 +149,8 @@ record; it doesn't judge anything (that's the [Monitor](#monitor)).
   year, after the visits themselves are deleted. `renew stats --days 30`,
   `renew stats --from 2026-11-01 --to 2026-11-15` and
   `renew stats --site youtube.com` (that site per day) print the same numbers.
-- **Nothing leaves the Mac.**
+- **Nothing leaves the Mac**, except what [email reports](#email-reports) send
+  about flagged visits.
 
 ### Monitor
 
@@ -170,7 +171,8 @@ Monitor reads the visits Activity records, so it needs Activity on.
   `/var/db/com.renew/monitor/<uid>/`, one root-only file per day, for a year
   (longer than the visits). See them in **Monitor → Flags** or with
   `renew flags [--date YYYY-MM-DD]`.
-- **Nothing leaves the Mac.** Sending reports to an accountability partner comes later.
+- **Reports:** with [email reports](#email-reports) on, your accountability
+  partner is emailed about flags.
 
 Each user on the Mac has their own Activity and Monitor settings and only changes
 their own. For now they can be turned off or changed at any time. Settings from
@@ -188,6 +190,34 @@ Apps like Codex/ChatGPT only expose their built-in browser with macOS's
 screen-reader mode on, which can make their windows animate oddly. Outside block
 sessions Renew turns that on only while the app is in front, and back off as soon
 as it isn't.
+
+### Email reports
+
+Renew can email your accountability partner when the Monitor flags a visit.
+Your partner doesn't need an account or an app; they just get emails. The
+emails come from your own small report server: an AWS Lambda that sends from a
+Gmail account you create for it. Setting it up takes about 15 minutes; see
+[server/reports/README.md](server/reports/README.md). Its URL and token are
+saved by `server/reports/configure-mac.sh` and copied in when you install
+Renew, so in **Setup → Email reports** you only enter your partner's email
+address (or `renew reports set <partner-email>`).
+
+- **What's sent:** the site (e.g. `example.com`), the page title, why it was
+  flagged (explicit site, a watched list, a watched word), when, and for how
+  long. Never the full address. Times are in the Mac's time zone.
+- **Grouped:** flags within a minute of the first one go in one email, so a
+  burst of browsing sends one email, not fifty.
+- **Not lost:** renewd keeps unsent reports in
+  `/var/db/com.renew/reports-outbox.json` (root-only) and retries (after 30 s,
+  1 min, 5 min, then every 15 min) until the server accepts them, so turning
+  off Wi-Fi only delays a report.
+- **Changes are reported too:** turning Activity or the Monitor off, no longer
+  watching a list or explicit words, and removing watched sites or words each
+  send an email. Adding rules, and editing a blocklist's sites, don't.
+- **Locked like alerts:** reports can be turned on at any time, but changed
+  (including the partner's address) or turned off only between block sessions,
+  and the previous partner gets a last email when that happens. `renew reports test` (or **Send test**) sends a test
+  email.
 
 ### Uninstalling
 
@@ -229,6 +259,8 @@ renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/statu
   ├─ counts sessions down on the monotonic clock, so changing the date does nothing
   │    (time the Mac is switched off still counts)
   ├─ sends tamper alerts, if set up
+  ├─ sends email reports of flags and Monitor changes to your report server, if set up,
+  │    keeping unsent ones in /var/db/com.renew/reports-outbox.json
   ├─ keeps the activity log in /var/db/com.renew/activity/<uid>/ (30 days),
   │    and per-site daily totals in .../summary/ (1 year)
   ├─ [monitor] checks each new visit against the user's Monitor rules and keeps
