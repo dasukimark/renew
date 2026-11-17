@@ -52,6 +52,9 @@ final class AppModel: ObservableObject {
 
     let isLocalTest: Bool
     private let queue = DispatchQueue(label: "app.model")
+    /// Activity log and dashboard reads, which can be slow, so they never
+    /// hold up status, start or extend requests on `queue`.
+    private let activityQueue = DispatchQueue(label: "app.model.activity")
     private var clock: Timer?
     private var scheduleSyncInFlight = false
     /// The last schedules that failed to sync, and when. Retried after
@@ -332,13 +335,41 @@ final class AppModel: ObservableObject {
             return
         }
         let query = ActivityQuery(date: day, flaggedOnly: flaggedOnly, fromOffset: fromOffset)
-        queue.async {
+        activityQueue.async {
             let result: Result<ActivityLoad, ActivityLoadError>
             do {
                 let r = try DaemonClient.send(Request(cmd: .activity, activityQuery: query), timeout: 10)
                 result = r.ok ? .success(ActivityLoad(events: r.activity ?? [], offset: r.activityOffset,
                                                       isIncremental: r.activityIncremental ?? false))
                               : .failure(ActivityLoadError(message: r.error ?? "The Renew service refused the request."))
+            } catch {
+                result = .failure(ActivityLoadError(message: "Couldn't reach the Renew service: \(error)"))
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Reads your per-site daily totals for a range of days. `completion`
+    /// runs on the main thread with the days that have any (oldest first),
+    /// or an error message.
+    func loadActivityStats(_ query: ActivityStatsQuery,
+                           completion: @escaping (Result<[DaySummary], ActivityLoadError>) -> Void) {
+        guard !isLocalTest else {
+            completion(.failure(ActivityLoadError(message: "This is a local test run without the Renew service, so there's no activity log to sum up.")))
+            return
+        }
+        activityQueue.async {
+            let result: Result<[DaySummary], ActivityLoadError>
+            do {
+                let r = try DaemonClient.send(Request(cmd: .activityStats, statsQuery: query), timeout: 15)
+                if r.ok, let stats = r.stats {
+                    result = .success(stats)
+                } else if r.ok || (r.error ?? "").hasPrefix("bad request") {
+                    // An older service doesn't know the command.
+                    result = .failure(ActivityLoadError(message: "The running background service predates the dashboard. Update Renew to see time per site."))
+                } else {
+                    result = .failure(ActivityLoadError(message: r.error ?? "The Renew service refused the request."))
+                }
             } catch {
                 result = .failure(ActivityLoadError(message: "Couldn't reach the Renew service: \(error)"))
             }

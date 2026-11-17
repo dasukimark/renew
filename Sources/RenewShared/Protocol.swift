@@ -22,6 +22,8 @@ public enum Command: String, Codable, Sendable {
     case recordActivity
     /// Reads the caller's activity log (see `ActivityQuery`).
     case activity
+    /// Reads the caller's per-site daily totals (see `ActivityStatsQuery`).
+    case activityStats
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -50,10 +52,13 @@ public struct Request: Codable, Sendable {
     public var events: [ActivityEvent]?
     /// For `activity`: which part of the log to read.
     public var activityQuery: ActivityQuery?
+    /// For `activityStats`: which days to sum.
+    public var statsQuery: ActivityStatsQuery?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
                 alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil,
-                monitoring: MonitoringSettings? = nil, events: [ActivityEvent]? = nil, activityQuery: ActivityQuery? = nil) {
+                monitoring: MonitoringSettings? = nil, events: [ActivityEvent]? = nil, activityQuery: ActivityQuery? = nil,
+                statsQuery: ActivityStatsQuery? = nil) {
         self.cmd = cmd
         self.durationSeconds = durationSeconds
         self.rules = rules
@@ -64,6 +69,7 @@ public struct Request: Codable, Sendable {
         self.monitoring = monitoring
         self.events = events
         self.activityQuery = activityQuery
+        self.statsQuery = statsQuery
     }
 }
 
@@ -184,14 +190,18 @@ public struct Response: Codable, Sendable {
     /// For `activity`: whether `activity` only holds visits added since the
     /// query's `fromOffset` (false: it's the whole day).
     public var activityIncremental: Bool?
+    /// For `activityStats`: the days in the range that have totals.
+    public var stats: [DaySummary]?
 
-    public init(ok: Bool, error: String? = nil, status: Status? = nil, activity: ActivityPage? = nil) {
+    public init(ok: Bool, error: String? = nil, status: Status? = nil, activity: ActivityPage? = nil,
+                stats: [DaySummary]? = nil) {
         self.ok = ok
         self.error = error
         self.status = status
         self.activity = activity?.events
         self.activityOffset = activity?.offset
         self.activityIncremental = activity?.isIncremental
+        self.stats = stats
     }
 }
 
