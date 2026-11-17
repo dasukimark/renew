@@ -11,6 +11,9 @@ import Foundation
 public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
     case setAlerts, testAlert
+    /// Sets where email reports go (see `Report`), or turns them off. Like
+    /// alerts, only changed or turned off between sessions.
+    case setReports, testReport
     case requestUninstall, cancelUninstall
     /// Replaces the recurring block sessions the daemon starts on its own.
     case setSchedules
@@ -52,6 +55,8 @@ public struct Request: Codable, Sendable {
     public var alertURL: String?
     /// For `setSchedules`: the full new set.
     public var schedules: [Schedule]?
+    /// For `setReports`: the report server's URL and token, or nil to turn reports off.
+    public var reports: ReportDestination?
     /// For `setProtections`: the full new set.
     public var protections: Protections?
     /// For `setActivity`: the new setting.
@@ -70,8 +75,10 @@ public struct Request: Codable, Sendable {
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
                 alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil,
                 activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, events: [ActivityEvent]? = nil,
-                activityQuery: ActivityQuery? = nil, statsQuery: ActivityStatsQuery? = nil, monitorQuery: MonitorQuery? = nil) {
+                activityQuery: ActivityQuery? = nil, statsQuery: ActivityStatsQuery? = nil, monitorQuery: MonitorQuery? = nil,
+                reports: ReportDestination? = nil) {
         self.cmd = cmd
+        self.reports = reports
         self.durationSeconds = durationSeconds
         self.rules = rules
         self.report = report
@@ -153,6 +160,14 @@ public struct Status: Codable, Sendable {
     public var serverTime: Date
     public var agents: [AgentStatus]
     public var alertURL: String?
+    /// The report server, when reports use one other than the built-in
+    /// server (never the token).
+    public var reportsURL: String?
+    /// Who email reports go to. nil when off, or from daemons that predate reports.
+    public var reportsPartner: String?
+    /// Whether a built-in report server is installed, so only the partner's
+    /// address is needed.
+    public var reportServerBuiltIn: Bool?
     public var uninstall: UninstallStatus?
     /// The schedules the daemon enforces. nil from daemons that predate them.
     public var schedules: [Schedule]?
@@ -190,8 +205,11 @@ public struct Status: Codable, Sendable {
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
                 alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
                 protections: Protections? = nil, coolingOffRemovalAt: Date? = nil,
-                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil) {
+                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil, reportsPartner: String? = nil, reportServerBuiltIn: Bool? = nil) {
         self.session = session
+        self.reportServerBuiltIn = reportServerBuiltIn
+        self.reportsURL = reportsURL
+        self.reportsPartner = reportsPartner
         self.serverTime = serverTime
         self.agents = agents
         self.alertURL = alertURL

@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Renew report server. Emails flag reports from renewd to an accountability partner through a Gmail account.
+
+Parameters:
+  GmailAddress:
+    Type: String
+    Description: The Gmail account reports are sent from (used only for this).
+  AllowedRecipients:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated addresses the server may email. Empty allows any (the partner is set in the Renew app).
+  TimeZone:
+    Type: String
+    Default: UTC
+    Description: Fallback time zone for times in the emails; reports normally carry the Mac's.
+  TokenParameter:
+    Type: String
+    Default: /renew/report-token
+    Description: SSM SecureString parameter holding the token renewd sends.
+  AppPasswordParameter:
+    Type: String
+    Default: /renew/gmail-app-password
+    Description: SSM SecureString parameter holding the Gmail app password.
+
+Resources:
+  ReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      # Renaming the function replaces it and changes its URL.
+      FunctionName: renew-report-server
+      Runtime: python3.13
+      Handler: app.handler
+      CodeUri: .
+      Timeout: 50
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          ALLOWED_RECIPIENTS: !Ref AllowedRecipients
+          GMAIL_ADDRESS: !Ref GmailAddress
+          TIME_ZONE: !Ref TimeZone
+          TOKEN_PARAM: !Ref TokenParameter
+          APP_PASSWORD_PARAM: !Ref AppPasswordParameter
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParameter}"
+                - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AppPasswordParameter}"
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  ReportFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ReportFunction}"
+      RetentionInDays: 30
+
+Outputs:
+  ReportURL:
+    Description: The report server's URL (configure-mac.sh saves it for Renew's installer).
+    Value: !GetAtt ReportFunctionUrl.FunctionUrl

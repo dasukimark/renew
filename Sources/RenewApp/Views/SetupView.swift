@@ -7,6 +7,9 @@ struct SetupView: View {
     @State private var showingUninstall = false
     @State private var confirmingRequest = false
     @State private var alertDraft = ""
+    @State private var reportURLDraft = ""
+    @State private var reportPartnerDraft = ""
+    @State private var reportTokenDraft = ""
 
     var body: some View {
         Form {
@@ -15,6 +18,7 @@ struct SetupView: View {
             protectionsSection
             profileSection
             alertsSection
+            reportsSection
             uninstallSection
         }
         .formStyle(.grouped)
@@ -22,8 +26,12 @@ struct SetupView: View {
         .onAppear {
             model.refreshPermissions()
             alertDraft = model.alertURL ?? ""
+            reportURLDraft = model.reportsURL ?? ""
+            reportPartnerDraft = model.reportsPartner ?? ""
         }
         .onChange(of: model.alertURL) { alertDraft = $0 ?? "" }
+        .onChange(of: model.reportsURL) { reportURLDraft = $0 ?? "" }
+        .onChange(of: model.reportsPartner) { reportPartnerDraft = $0 ?? "" }
         .sheet(isPresented: $showingProfile) { ProfileSheet() }
         .sheet(isPresented: $showingUninstall) { UninstallSheet(model: model) }
     }
@@ -274,6 +282,84 @@ struct SetupView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: email reports
+
+    private var reportsOn: Bool { model.reportsPartner != nil }
+    /// Same rule as alerts (renewd enforces this too).
+    private var reportsLocked: Bool { model.session != nil && reportsOn }
+    /// The server fields show only without a built-in server, or when
+    /// reports already use a different one.
+    private var showServerFields: Bool { !model.reportServerBuiltIn || model.reportsURL != nil }
+
+    private var reportsSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Renew emails your accountability partner when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Emails name the site, the page title, why it was flagged and when, never the full address.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("Partner's email address", text: $reportPartnerDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(reportsLocked || !model.daemonReachable)
+                if showServerFields {
+                    TextField("Report server URL", text: $reportURLDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .disabled(reportsLocked || !model.daemonReachable)
+                    SecureField("Report token", text: $reportTokenDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(reportsLocked || !model.daemonReachable)
+                }
+                HStack {
+                    Button(reportsOn ? "Save" : "Turn on reports") {
+                        let custom = showServerFields && !reportURLDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                        model.setReports(partnerEmail: reportPartnerDraft,
+                                         url: custom ? reportURLDraft : nil,
+                                         token: custom ? reportTokenDraft : nil) { ok in
+                            if ok { reportTokenDraft = "" }
+                        }
+                    }
+                    .disabled(reportsLocked || model.busy || !model.daemonReachable || !canSaveReports)
+                    if reportsOn {
+                        Button("Send test") { model.testReport() }
+                            .disabled(model.busy)
+                        Button("Turn off") { model.setReports(partnerEmail: nil) }
+                            .disabled(reportsLocked || model.busy)
+                    }
+                    Spacer()
+                    if reportsOn { status("On", .green) } else { status("Off", .secondary) }
+                }
+                if reportsLocked {
+                    Text("Email reports can be changed after the current session ends.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+        } header: {
+            Text("Email reports")
+        } footer: {
+            Text(model.reportServerBuiltIn
+                 ? "Your partner doesn't need an account; they just get emails. Reports wait on this Mac until they're sent. When the partner changes or reports are turned off, the previous partner gets a last email."
+                 : "No report server is set up on this Mac yet: deploy one (see server/reports/README.md), run configure-mac.sh and reinstall Renew, or enter a server's URL and token here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var canSaveReports: Bool {
+        let partner = reportPartnerDraft.trimmingCharacters(in: .whitespaces)
+        guard !partner.isEmpty else { return false }
+        if showServerFields {
+            let url = reportURLDraft.trimmingCharacters(in: .whitespaces)
+            // An empty URL means the built-in server: allowed when one is
+            // installed and something changes (the partner, or leaving a
+            // different server).
+            if url.isEmpty { return model.reportServerBuiltIn && (partner != model.reportsPartner || model.reportsURL != nil) }
+            return !reportTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        return partner != model.reportsPartner
     }
 
     // MARK: uninstall

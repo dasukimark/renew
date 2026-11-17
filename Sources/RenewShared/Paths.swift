@@ -42,6 +42,9 @@ public enum Paths {
     public static var activityDir: String { dataDir + "/activity" }
     /// The Monitor's flags, per user (see `MonitorLogStore`).
     public static var monitorDir: String { dataDir + "/monitor" }
+    /// The built-in email report server's URL and token (see `ReportServer`),
+    /// copied here by the installer.
+    public static var reportServerFile: String { dataDir + "/report-server.json" }
     /// The bundled explicit-site list, installed next to renewd so it can flag
     /// visits to the explicit preset.
     public static let explicitListFile = installDir + "/explicit-domains.txt"

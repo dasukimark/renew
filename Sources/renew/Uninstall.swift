@@ -74,6 +74,7 @@ enum Uninstall {
         // Guard first, so it can't bring the daemon back.
         Launchctl.bootout("system/\(Paths.guardLabel)")
         Launchctl.bootout("system/\(Paths.daemonLabel)")
+        sendFinalReports()
 
         let fm = FileManager.default
         for path in [Paths.daemonPlist, Paths.guardPlist, Paths.legacyGuardPlist, Paths.cliSymlink, Paths.socketPath,
@@ -104,6 +105,33 @@ enum Uninstall {
         for uid in uids { Launchctl.bootout("gui/\(uid)/\(Paths.agentLabel)") }
         shell("/usr/bin/pkill", ["-f", Paths.agentExecutable])
         exit(0)
+    }
+
+    /// With email reports on, sends what's still waiting in the outbox and a
+    /// last report saying Renew was removed, before its files are deleted.
+    /// Runs after renewd has stopped, so nothing else touches the outbox.
+    private static func sendFinalReports() {
+        guard let state = StateStore.load(), let dest = state.reports else { return }
+        guard let server = dest.server(builtIn: ReportServer.builtIn()) else {
+            print("  (no report server found; your accountability partner wasn't emailed)")
+            return
+        }
+        let current = ReportTarget(partnerEmail: dest.partnerEmail, server: server)
+        let console = shell("/usr/bin/stat", ["-f", "%Su", "/dev/console"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        let user = ProcessInfo.processInfo.environment["SUDO_USER"] ?? (console.isEmpty || console == "root" ? NSUserName() : console)
+        var groups: [(ReportTarget, [Report])] = []
+        for entry in ReportOutbox().load() {
+            let target = entry.target ?? current
+            if let i = groups.firstIndex(where: { $0.0 == target }) { groups[i].1.append(entry.report) } else { groups.append((target, [entry.report])) }
+        }
+        let last = Report(mac: Alerts.macName, user: user, kind: .change, sentAt: Date(),
+                          changes: ["Renew was uninstalled from this Mac. It no longer blocks or monitors anything, and this is the last report you'll get from it."])
+        if let i = groups.firstIndex(where: { $0.0 == current }) { groups[i].1.append(last) } else { groups.append((current, [last])) }
+        print("Emailing your accountability partner…")
+        for (target, reports) in groups {
+            let sent = ReportClient.sendAndWait(reports, to: target)
+            if sent < reports.count { print("  couldn't send \(reports.count - sent) report(s) to \(target.partnerEmail)") }
+        }
     }
 
     private static func fileRequest(reachable: Bool) -> Never {

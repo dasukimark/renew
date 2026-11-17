@@ -9,6 +9,9 @@ public struct PersistedState: Codable, Equatable, Sendable {
     public var sessionClock: Countdown?
     /// Where tamper alerts go (see `Alerts`). nil means off.
     public var alertURL: String?
+    /// Where email reports go (see `Report`). nil means off. The token is
+    /// safe here: the state file is readable only by root.
+    public var reports: ReportDestination?
     public var uninstall: UninstallRequest?
     /// Recurring block sessions renewd starts on its own (see `Schedule`).
     public var schedules: [Schedule]?
