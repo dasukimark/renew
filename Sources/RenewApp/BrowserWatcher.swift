@@ -32,14 +32,14 @@ private enum Inspection {
     }
 }
 
-/// The monitoring loop: during a session, every 500 ms look at the frontmost
+/// The browser-watching loop: during a session, every 500 ms look at the frontmost
 /// browser's active tab (and every 2 s at other running browsers) and swap
-/// blocked pages for the block page. With activity monitoring on, the front
+/// blocked pages for the block page. With Activity on, the front
 /// browser's tab (once a second) and the websites in the front app's built-in
 /// browser (every 2 s) are also recorded, session or not. Reports permission
 /// health to renewd every 2 s and hands each status reply to the UI through
 /// `onStatus`.
-final class Monitor: NSObject {
+final class BrowserWatcher: NSObject {
     /// Called on the main thread after every sync. nil means renewd was unreachable.
     var onStatus: ((Status?) -> Void)?
 
@@ -116,14 +116,14 @@ final class Monitor: NSObject {
     private var lastSettingsOverlay = Date.distantPast
     private var settingsNoticeHide: DispatchWorkItem?
 
-    /// What activity monitoring watches, as renewd last reported it. Kept
+    /// Whether Activity records visits, as renewd last reported it. Kept
     /// while renewd is unreachable.
-    private(set) var monitoring: MonitoringSettings = .off {
+    private(set) var activity: ActivitySettings = .off {
         didSet {
-            guard monitoring != oldValue else { return }
-            if monitoring.enabled != oldValue.enabled { log("activity monitoring \(monitoring.enabled ? "on" : "off")") }
-            if localSession == nil { MonitoringCache.save(monitoring) }
-            recorder.settings = monitoring
+            guard activity != oldValue else { return }
+            log("Activity recording \(activity.enabled ? "on" : "off")")
+            if localSession == nil { ActivityCache.save(activity) }
+            recorder.settings = activity
         }
     }
     private lazy var recorder = ActivityRecorder(link: link, localOnly: localSession != nil)
@@ -149,12 +149,12 @@ final class Monitor: NSObject {
         started = true
         server = BlockPageServer(port: port)
         server.start()
-        log("Renew monitor started; block page on 127.0.0.1:\(port)\(localSession != nil ? " (local test session)" : "")")
+        log("Renew browser watcher started; block page on 127.0.0.1:\(port)\(localSession != nil ? " (local test session)" : "")")
 
         // Until renewd answers, enforce what it last said, alongside the cached session.
         protections = localSession != nil ? Self.localProtections() : ProtectionsCache.load()
-        monitoring = localSession != nil ? Self.localMonitoring() : MonitoringCache.load()
-        recorder.settings = monitoring
+        activity = localSession != nil ? Self.localActivity() : ActivityCache.load()
+        recorder.settings = activity
         recorder.start()
         setSession(localSession ?? SessionCache.load())
 
@@ -183,12 +183,12 @@ final class Monitor: NSObject {
         return p
     }
 
-    /// For `--local-session` runs: `RENEW_MONITORING=on` records visits to
-    /// the log (stdout) with the default watch settings.
-    private static func localMonitoring() -> MonitoringSettings {
-        var m = MonitoringSettings.off
-        m.enabled = ["on", "1", "true"].contains(ProcessInfo.processInfo.environment["RENEW_MONITORING"]?.lowercased() ?? "")
-        return m
+    /// For `--local-session` runs: `RENEW_ACTIVITY=on` (or the older
+    /// `RENEW_MONITORING=on`) records visits to the log (stdout).
+    private static func localActivity() -> ActivitySettings {
+        let env = ProcessInfo.processInfo.environment
+        let raw = (env["RENEW_ACTIVITY"] ?? env["RENEW_MONITORING"] ?? "").lowercased()
+        return ActivitySettings(enabled: ["on", "1", "true"].contains(raw))
     }
 
     /// Renew is quitting: save visits that haven't reached renewd yet.
@@ -240,7 +240,7 @@ final class Monitor: NSObject {
             guard let self else { return }
             if let status {
                 self.protections = status.protections ?? .off
-                self.monitoring = status.monitoring ?? .off
+                self.activity = status.effectiveActivity
                 self.setSession(status.session, serverTime: status.serverTime)
                 SessionCache.save(status.session)
             } else if self.session != nil, !self.sessionLive {
@@ -251,7 +251,7 @@ final class Monitor: NSObject {
         }
     }
 
-    // MARK: monitoring
+    // MARK: watching
 
     private func check() {
         switchBlocker.stopIfUntrusted()
@@ -563,7 +563,7 @@ final class Monitor: NSObject {
     /// that the app is hidden again (without the overlay, which only shows the
     /// first time).
     ///
-    /// With activity monitoring on, the websites in the front app's built-in
+    /// With Activity on, the websites in the front app's built-in
     /// browser are also recorded, session or not. Outside sessions only the
     /// front app is asked to expose its tree, and Renew switches
     /// AXEnhancedUserInterface (see `EmbeddedWebReader`) back off for an app

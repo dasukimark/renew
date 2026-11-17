@@ -45,14 +45,16 @@ Usage:
   renew alerts test                                    send a test alert
   renew protections                                    show which hardening protections are on
   renew protections on|off <NAME>...                   turn protections on, or off (between sessions only)
-  renew monitor                                        show activity monitoring settings
-  renew monitor on|off                                 turn activity monitoring on or off
+  renew activity on|off                                record the pages you visit, or stop
+  renew activity [--date YYYY-MM-DD]                   show the pages you visited (default: today)
+  renew stats [--days N] [--from D] [--to D] [--site S]  time per site: totals and daily averages (default: 7 days)
+  renew monitor                                        show what the Monitor flags
+  renew monitor on|off                                 turn the Monitor on or off (needs Activity on)
   renew monitor watch <LIST>...                        flag visits to these lists' sites ("explicit" = preset)
   renew monitor sites add|remove <SITE>...             flag visits to other sites
   renew monitor words add|remove <WORD>...             flag page titles containing a word or phrase
   renew monitor words preset on|off                    flag page titles containing common explicit words
-  renew activity [--date YYYY-MM-DD] [--flagged]       show the pages you visited (default: today)
-  renew stats [--days N] [--from D] [--to D] [--site S]  time per site: totals and daily averages (default: 7 days)
+  renew flags [--date YYYY-MM-DD]                      show the visits the Monitor flagged (default: today)
   sudo renew uninstall                                 uninstall Renew (only between sessions)
   renew uninstall                                      with the cooling-off on: request uninstall (unlocks after 24 hours)
   renew uninstall --cancel                             cancel an uninstall request
@@ -142,6 +144,43 @@ func syncSchedules() {
     } catch {
         print("⚠︎ Couldn't update scheduled block sessions: \(error)")
     }
+}
+
+/// Updates the Monitor's copy of a watched blocklist after the lists change.
+func syncMonitorLists() {
+    guard let status = (try? DaemonClient.send(Request(cmd: .status)))?.status, let m = status.monitor else { return }
+    let fresh = m.withListRules(from: ListStore.all()).normalized()
+    guard fresh.listRules != m.listRules else { return }
+    do {
+        let r = try DaemonClient.send(Request(cmd: .setMonitorListRules, monitor: fresh))
+        if r.ok {
+            print("Updated the Monitor's copy of the lists it watches.")
+        } else {
+            print("⚠︎ Couldn't update the Monitor: \(r.error ?? "refused")")
+        }
+    } catch {
+        print("⚠︎ Couldn't update the Monitor: \(error)")
+    }
+}
+
+/// The day a `--date YYYY-MM-DD` option names (default: today); dies on anything else.
+func parseDayOption(_ args: [String], usage: String) -> String {
+    var day = ActivityLogStore.dayKey(Date())
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--date", "-d":
+            guard i + 1 < args.count else { die("--date needs YYYY-MM-DD") }
+            day = args[i + 1]
+            i += 1
+        default:
+            if args[i].hasPrefix("--date=") { day = String(args[i].dropFirst("--date=".count)) }
+            else { die(usage) }
+        }
+        i += 1
+    }
+    guard ActivityLogStore.date(ofDay: day) != nil else { die("not a date: \(day) (use YYYY-MM-DD)") }
+    return day
 }
 
 func printAgents(_ s: Status) {
@@ -260,17 +299,18 @@ case "protections":
 
 case "monitor":
     func show(_ st: Status) {
-        guard let m = st.monitoring else { die("This Renew service predates activity monitoring. Reinstall Renew.") }
-        print("Activity monitoring: \(m.enabled ? "on" : "off")")
+        guard let m = st.monitor else { die("This Renew service predates the Monitor. Reinstall Renew.") }
+        print("Monitor: \(m.enabled ? "on" : "off")\(m.enabled && st.activity?.enabled == false ? " (but Activity is off, so nothing is checked: `renew activity on`)" : "")")
         print("  Flagged lists: \(m.watchLists.isEmpty ? "none" : m.watchLists.joined(separator: ", "))")
         print("  Other sites:   \(m.customDomains.isEmpty ? "none" : m.customDomains.joined(separator: ", "))")
         print("  Explicit words in titles: \(m.flagExplicitTerms ? "on" : "off")")
         print("  Other words:   \(m.customTerms.isEmpty ? "none" : m.customTerms.joined(separator: ", "))")
     }
-    func change(_ edit: (inout MonitoringSettings) -> Void) {
-        guard var m = send(Request(cmd: .status)).monitoring else { die("This Renew service predates activity monitoring. Reinstall Renew.") }
+    func change(_ edit: (inout MonitorSettings) -> Void) {
+        guard var m = send(Request(cmd: .status)).monitor else { die("This Renew service predates the Monitor. Reinstall Renew.") }
         edit(&m)
-        show(send(Request(cmd: .setMonitoring, monitoring: m)))
+        // renewd can't read your lists, so it gets a copy of the watched ones.
+        show(send(Request(cmd: .setMonitor, monitor: m.withListRules(from: ListStore.all()))))
     }
     let sub = args.first ?? "show"
     let rest = Array(args.dropFirst())
@@ -280,7 +320,7 @@ case "monitor":
     case "on", "off":
         change { $0.enabled = sub == "on" }
     case "watch":
-        let known = Set(ListStore.all().keys).union([MonitoringSettings.explicitListName])
+        let known = Set(ListStore.all().keys).union([MonitorSettings.explicitListName])
         let names = rest.map { $0.lowercased() }
         for n in names where !known.contains(n) {
             die("no list named '\(n)'. Available: \(known.sorted().joined(separator: ", "))")
@@ -299,7 +339,7 @@ case "monitor":
             change { $0.flagExplicitTerms = rest[1] == "on" }
         } else if rest.count >= 2, ["add", "remove"].contains(rest[0]) {
             // Each argument is one word or phrase (quote phrases).
-            let words = rest.dropFirst().map(MonitoringSettings.cleanTerm).filter { !$0.isEmpty }
+            let words = rest.dropFirst().map(MonitorSettings.cleanTerm).filter { !$0.isEmpty }
             change { m in
                 if rest[0] == "add" { m.customTerms += words.filter { !m.customTerms.contains($0) } }
                 else { m.customTerms.removeAll { words.contains($0) } }
@@ -312,46 +352,65 @@ case "monitor":
     }
 
 case "activity":
-    var day = ActivityLogStore.dayKey(Date())
-    var flagged = false
-    var i = 0
-    while i < args.count {
-        switch args[i] {
-        case "--flagged", "-f": flagged = true
-        case "--date", "-d":
-            guard i + 1 < args.count else { die("--date needs YYYY-MM-DD") }
-            day = args[i + 1]
-            i += 1
-        default:
-            if args[i].hasPrefix("--date=") { day = String(args[i].dropFirst("--date=".count)) }
-            else { die("usage: renew activity [--date YYYY-MM-DD] [--flagged]") }
-        }
-        i += 1
+    if let sub = args.first, ["on", "off"].contains(sub) {
+        let st = send(Request(cmd: .setActivity, activity: ActivitySettings(enabled: sub == "on")))
+        guard let a = st.activity else { die("This Renew service predates `renew activity on|off`. Reinstall Renew.") }
+        print("Activity: \(a.enabled ? "on" : "off")")
+        if !a.enabled, st.monitor?.enabled == true { print("(The Monitor stays on but has nothing to check until Activity is back on.)") }
+        exit(0)
     }
-    guard ActivityLogStore.date(ofDay: day) != nil else { die("not a date: \(day) (use YYYY-MM-DD)") }
+    let day = parseDayOption(args, usage: "usage: renew activity [on | off | --date YYYY-MM-DD]")
     let response: Response
     do {
-        response = try DaemonClient.send(Request(cmd: .activity, activityQuery: ActivityQuery(day: day, flaggedOnly: flagged)), timeout: 10)
+        response = try DaemonClient.send(Request(cmd: .activity, activityQuery: ActivityQuery(day: day)), timeout: 10)
     } catch {
         die(String(describing: error))
     }
     guard response.ok else { die(response.error ?? "renewd refused the request") }
     let events = response.activity ?? []
-    if response.status?.monitoring?.enabled == false { print("(Activity monitoring is off. Turn it on with `renew monitor on`.)") }
+    if response.status?.activity?.enabled == false { print("(Activity is off. Turn it on with `renew activity on`.)") }
     guard !events.isEmpty else {
-        print(flagged ? "No flagged visits on \(day)." : "No visits recorded on \(day).")
+        print("No visits recorded on \(day).")
         exit(0)
     }
     let time = DateFormatter()
     time.dateFormat = "HH:mm:ss"
     for e in events {
-        let marks = (e.blocked ? ["Blocked"] : []) + e.flags.map(\.label)
-        let flag = marks.isEmpty ? "" : "  [\(marks.joined(separator: ", "))]"
+        let flag = e.blocked ? "  [Blocked]" : ""
         print("\(time.string(from: e.start))  \(DurationText.format(Int(e.duration.rounded())).padding(toLength: 8, withPad: " ", startingAt: 0))  \(e.browser): \(e.title)\(flag)")
         print("          \(e.url)")
     }
-    let count = events.filter(\.isFlagged).count
-    print("\n\(events.count) visit(s)\(flagged ? "" : ", \(count) flagged") on \(day).")
+    print("\n\(events.count) visit(s) on \(day).")
+
+case "flags":
+    let day = parseDayOption(args, usage: "usage: renew flags [--date YYYY-MM-DD]")
+    let response: Response
+    do {
+        response = try DaemonClient.send(Request(cmd: .monitorFlags, monitorQuery: MonitorQuery(day: day)), timeout: 10)
+    } catch {
+        die(String(describing: error))
+    }
+    guard response.ok else {
+        if (response.error ?? "").hasPrefix("bad request") { die("This Renew service predates `renew flags`. Reinstall Renew.") }
+        die(response.error ?? "renewd refused the request")
+    }
+    if response.status?.monitor?.enabled == false {
+        print("(The Monitor is off. Turn it on with `renew monitor on`.)")
+    } else if response.status?.activity?.enabled == false {
+        print("(Activity is off, so the Monitor has nothing to check. Turn it on with `renew activity on`.)")
+    }
+    let flags = response.flags ?? []
+    guard !flags.isEmpty else {
+        print("Nothing flagged on \(day).")
+        exit(0)
+    }
+    let time = DateFormatter()
+    time.dateFormat = "HH:mm:ss"
+    for f in flags {
+        print("\(time.string(from: f.start))  \(DurationText.format(Int(f.duration.rounded())).padding(toLength: 8, withPad: " ", startingAt: 0))  \(f.browser): \(f.title)  [\(f.flags.map(\.label).joined(separator: ", "))]")
+        print("          \(f.url)")
+    }
+    print("\n\(flags.count) flagged visit(s) on \(day).")
 
 case "stats":
     var days = 7
@@ -406,7 +465,7 @@ case "stats":
         die(response.error ?? "renewd refused the request")
     }
     guard let summaries = response.stats else { die("This Renew service predates `renew stats`. Reinstall Renew.") }
-    if response.status?.monitoring?.enabled == false { print("(Activity monitoring is off. Turn it on with `renew monitor on`.)") }
+    if response.status?.activity?.enabled == false { print("(Activity is off. Turn it on with `renew activity on`.)") }
     let report = ActivityStatsReport(query: query, summaries: summaries)
     let span = keys.count == 1 ? query.from : "\(query.from) to \(query.to)"
     let hm = DurationText.hoursMinutes
@@ -465,6 +524,7 @@ case "lists":
             print("\(args[1].lowercased()): \(list.joined(separator: ", "))")
         } catch { die("couldn't save lists: \(error)") }
         syncSchedules()
+        syncMonitorLists()
     case "remove", "rm":
         guard args.count >= 2 else { die("usage: renew lists remove <NAME> [SITE]...") }
         do {
@@ -472,6 +532,7 @@ case "lists":
             print("\(args[1].lowercased()): \(remaining?.joined(separator: ", ") ?? "(deleted)")")
         } catch { die("couldn't save lists: \(error)") }
         syncSchedules()
+        syncMonitorLists()
     default:
         die("usage: renew lists [show [NAME] | add NAME SITE... | remove NAME [SITE...]]")
     }

@@ -1,17 +1,53 @@
 import Foundation
 
-// Activity monitoring: Renew records the pages you visit (URL, title, time on
-// page) and flags the ones that match watched sites or explicit words. The
-// app watches and matches; renewd keeps the log (see `ActivityLogStore`).
+// Activity records the pages you visit (URL, title, time on page): the app
+// watches, renewd keeps the log (see `ActivityLogStore`). The Monitor reads
+// that activity as it arrives in renewd and flags visits that match its rules
+// (see `MonitorSettings`, `MonitorLogStore`).
 
-/// What activity monitoring watches for. renewd owns it, like `Protections`.
-/// Off out of the box.
-public struct MonitoringSettings: Codable, Equatable, Sendable {
-    /// Record page visits at all.
+/// Whether Activity records page visits. renewd owns it, per user. Off out of the box.
+public struct ActivitySettings: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    /// When renewd last turned it off, so visits that started while it was
+    /// still on (sent late by the app) are still taken. Set by renewd only;
+    /// nil if it was never on.
+    public var offSince: Date?
+
+    public init(enabled: Bool = false, offSince: Date? = nil) {
+        self.enabled = enabled
+        self.offSince = offSince
+    }
+
+    public static let off = ActivitySettings()
+
+    private enum CodingKeys: String, CodingKey { case enabled, offSince }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        offSince = try c.decodeIfPresent(Date.self, forKey: .offSince)
+    }
+
+    /// Whether renewd should take a visit that started at `start`: any while
+    /// it's on, and ones that started before it was turned off.
+    public func accepts(visitStartingAt start: Date) -> Bool {
+        if enabled { return true }
+        guard let offSince else { return false }
+        return start <= offSince
+    }
+}
+
+/// What the Monitor flags in recorded activity. renewd owns it, per user,
+/// and does the matching itself. Off out of the box, with nothing watched.
+public struct MonitorSettings: Codable, Equatable, Sendable {
+    /// Check new visits at all. Needs Activity on to have anything to check.
     public var enabled: Bool
     /// Lists whose sites get flagged: `explicitListName` (the bundled preset)
     /// or any blocklist name (social, video, your own lists…).
     public var watchLists: [String]
+    /// The rules of each watched blocklist, copied in by the app or CLI:
+    /// blocklists live in the user's home folder, where renewd doesn't look.
+    public var listRules: [String: [String]]
     /// Extra sites to flag, in blocklist rule syntax.
     public var customDomains: [String]
     /// Flag page titles containing a word from `ExplicitTerms.preset`.
@@ -23,14 +59,17 @@ public struct MonitoringSettings: Codable, Equatable, Sendable {
     /// The flag label used for `customDomains`.
     public static let customListName = "custom"
     public static let maxWatchLists = 50
+    /// The most rules kept across all of `listRules`.
+    public static let maxListRules = 5_000
     public static let maxCustomDomains = 500
     public static let maxCustomTerms = 200
     public static let maxTermLength = 64
 
-    public init(enabled: Bool = false, watchLists: [String] = [],
+    public init(enabled: Bool = false, watchLists: [String] = [], listRules: [String: [String]] = [:],
                 customDomains: [String] = [], flagExplicitTerms: Bool = false, customTerms: [String] = []) {
         self.enabled = enabled
         self.watchLists = watchLists
+        self.listRules = listRules
         self.customDomains = customDomains
         self.flagExplicitTerms = flagExplicitTerms
         self.customTerms = customTerms
@@ -38,31 +77,58 @@ public struct MonitoringSettings: Codable, Equatable, Sendable {
 
     /// Off, with nothing watched: no lists, sites or words are flagged
     /// until you pick them.
-    public static let off = MonitoringSettings()
+    public static let off = MonitorSettings()
 
     private enum CodingKeys: String, CodingKey {
-        case enabled, watchLists, customDomains, flagExplicitTerms, customTerms
+        case enabled, watchLists, listRules, customDomains, flagExplicitTerms, customTerms
     }
 
-    /// Missing keys take their defaults, so older and newer files both read.
+    /// Missing keys take their defaults, so older and newer files both read
+    /// (including the combined settings kept before Activity and the Monitor
+    /// were split).
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let d = MonitoringSettings.off
+        let d = MonitorSettings.off
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? d.enabled
         watchLists = try c.decodeIfPresent([String].self, forKey: .watchLists) ?? d.watchLists
+        listRules = try c.decodeIfPresent([String: [String]].self, forKey: .listRules) ?? d.listRules
         customDomains = try c.decodeIfPresent([String].self, forKey: .customDomains) ?? d.customDomains
         flagExplicitTerms = try c.decodeIfPresent(Bool.self, forKey: .flagExplicitTerms) ?? d.flagExplicitTerms
         customTerms = try c.decodeIfPresent([String].self, forKey: .customTerms) ?? d.customTerms
     }
 
-    /// Lowercased, de-duplicated and capped; invalid sites and empty words dropped.
-    public func normalized() -> MonitoringSettings {
+    /// Lowercased, de-duplicated and capped; invalid sites and empty words
+    /// dropped, and rules kept only for watched lists.
+    public func normalized() -> MonitorSettings {
         var s = self
         s.watchLists = Array(Self.dedupe(watchLists.map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
             .prefix(Self.maxWatchLists))
+        var rules: [String: [String]] = [:]
+        var budget = Self.maxListRules
+        for name in s.watchLists where name != Self.explicitListName {
+            guard budget > 0, let r = listRules[name] ?? listRules.first(where: { $0.key.lowercased() == name })?.value
+            else { continue }
+            let kept = Array(Self.dedupe(r.map { $0.trimmingCharacters(in: .whitespaces) }).prefix(budget))
+                .map { String($0.prefix(512)) }
+            budget -= kept.count
+            if !kept.isEmpty { rules[name] = kept }
+        }
+        s.listRules = rules
         s.customDomains = Array(canonicalRules(customDomains).valid.prefix(Self.maxCustomDomains))
         s.customTerms = Array(Self.dedupe(customTerms.map(Self.cleanTerm)).filter { $0.count <= Self.maxTermLength }
             .prefix(Self.maxCustomTerms))
+        return s
+    }
+
+    /// These settings with `listRules` filled in from `lists` (normally
+    /// `ListStore.all()`) for every watched blocklist.
+    public func withListRules(from lists: [String: [String]]) -> MonitorSettings {
+        var s = self
+        var rules: [String: [String]] = [:]
+        for name in watchLists where name != Self.explicitListName {
+            if let r = lists[name.lowercased()] { rules[name.lowercased()] = r }
+        }
+        s.listRules = rules
         return s
     }
 
@@ -74,6 +140,26 @@ public struct MonitoringSettings: Codable, Equatable, Sendable {
     private static func dedupe(_ items: [String]) -> [String] {
         var seen = Set<String>()
         return items.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+}
+
+/// The combined settings kept before Activity and the Monitor were split.
+/// Only read, to move old state files over (and from daemons that predate
+/// the split).
+public struct LegacyMonitoringSettings: Codable, Equatable, Sendable {
+    public var activity: ActivitySettings
+    public var monitor: MonitorSettings
+
+    public init(from decoder: Decoder) throws {
+        activity = try ActivitySettings(from: decoder)
+        monitor = try MonitorSettings(from: decoder)
+    }
+
+    /// Written back as one combined value (only if a migration hasn't run yet).
+    public func encode(to encoder: Encoder) throws {
+        var m = monitor
+        m.enabled = activity.enabled
+        try m.encode(to: encoder)
     }
 }
 
@@ -93,6 +179,8 @@ public struct ActivityFlag: Codable, Hashable, Sendable {
         self.match = match
     }
 
+    public static let maxPerVisit = 20
+
     public static func domain(_ list: String, _ match: String) -> ActivityFlag { ActivityFlag(kind: .domain, list: list, match: match) }
     public static func term(_ match: String) -> ActivityFlag { ActivityFlag(kind: .term, match: match) }
 
@@ -102,8 +190,8 @@ public struct ActivityFlag: Codable, Hashable, Sendable {
         case .term: return "Word: \(match)"
         case .domain:
             switch list {
-            case MonitoringSettings.explicitListName?: return "Explicit site"
-            case MonitoringSettings.customListName?, nil: return "Watched site"
+            case MonitorSettings.explicitListName?: return "Explicit site"
+            case MonitorSettings.customListName?, nil: return "Watched site"
             case let name?: return "\(name.capitalized) list"
             }
         }
@@ -122,12 +210,11 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
     public var url: String
     public var host: String
     public var title: String
-    public var flags: [ActivityFlag]
     /// A running block session replaced the page with the block page.
     public var blocked: Bool
 
     public init(id: UUID? = UUID(), start: Date, end: Date, browser: String, url: String, host: String, title: String,
-                flags: [ActivityFlag] = [], blocked: Bool = false) {
+                blocked: Bool = false) {
         self.id = id
         self.start = start
         self.end = end
@@ -135,17 +222,30 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
         self.url = url
         self.host = host
         self.title = title
-        self.flags = flags
         self.blocked = blocked
     }
 
+    // Old log lines also carry `flags` (from when the app flagged visits);
+    // they're ignored; the Monitor keeps its own log.
+    private enum CodingKeys: String, CodingKey { case id, start, end, browser, url, host, title, blocked }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id)
+        start = try c.decode(Date.self, forKey: .start)
+        end = try c.decode(Date.self, forKey: .end)
+        browser = try c.decode(String.self, forKey: .browser)
+        url = try c.decode(String.self, forKey: .url)
+        host = try c.decode(String.self, forKey: .host)
+        title = try c.decode(String.self, forKey: .title)
+        blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
+    }
+
     public var duration: TimeInterval { end.timeIntervalSince(start) }
-    public var isFlagged: Bool { !flags.isEmpty || blocked }
 
     public static let maxURLLength = 2_048
     public static let maxTitleLength = 512
     public static let maxNameLength = 128
-    public static let maxFlags = 20
     /// Longer visits are cut to this.
     public static let maxDuration: TimeInterval = 24 * 3_600
 
@@ -161,12 +261,6 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
         e.host = String(host.prefix(253))
         guard !e.host.isEmpty else { return nil }
         if e.duration > Self.maxDuration { e.end = e.start.addingTimeInterval(Self.maxDuration) }
-        e.flags = Array(flags.prefix(Self.maxFlags)).map {
-            var f = $0
-            f.match = String(f.match.prefix(256))
-            f.list = f.list.map { String($0.prefix(Self.maxNameLength)) }
-            return f
-        }
         return e
     }
 }
@@ -211,7 +305,7 @@ public struct DomainSet: Sendable {
 }
 
 /// Explicit words and phrases flagged in page titles when
-/// `MonitoringSettings.flagExplicitTerms` is on. Matched as whole words, so
+/// `MonitorSettings.flagExplicitTerms` is on. Matched as whole words, so
 /// "Essex" or "analysis" never match.
 public enum ExplicitTerms {
     public static let preset: [String] = [
@@ -266,36 +360,39 @@ public struct TermMatcher: Sendable {
     }
 }
 
-/// Decides which flags a page gets under the current settings.
+/// Decides which flags a page gets under the Monitor's settings.
 public struct ActivityMatcher: Sendable {
     private let explicit: DomainSet?
     private let watched: [(list: String, rules: RuleSet)]
     private let terms: TermMatcher
 
-    /// `lists` are the blocklists (`ListStore.all()`); `explicitDomains` is
-    /// the bundled preset, or nil if it isn't loaded (yet).
-    public init(settings: MonitoringSettings, lists: [String: [String]], explicitDomains: DomainSet?) {
+    /// Blocklist rules come from `settings.listRules`; `explicitDomains` is
+    /// the bundled preset, or nil if it isn't loaded.
+    public init(settings: MonitorSettings, explicitDomains: DomainSet?) {
         let s = settings.normalized()
-        explicit = s.watchLists.contains(MonitoringSettings.explicitListName) ? explicitDomains : nil
+        explicit = s.watchLists.contains(MonitorSettings.explicitListName) ? explicitDomains : nil
         var watched: [(String, RuleSet)] = []
-        for name in s.watchLists where name != MonitoringSettings.explicitListName {
-            if let rules = lists[name], !rules.isEmpty { watched.append((name, RuleSet(strings: rules))) }
+        for name in s.watchLists where name != MonitorSettings.explicitListName {
+            if let rules = s.listRules[name], !rules.isEmpty { watched.append((name, RuleSet(strings: rules))) }
         }
-        if !s.customDomains.isEmpty { watched.append((MonitoringSettings.customListName, RuleSet(strings: s.customDomains))) }
+        if !s.customDomains.isEmpty { watched.append((MonitorSettings.customListName, RuleSet(strings: s.customDomains))) }
         self.watched = watched
         terms = TermMatcher((s.flagExplicitTerms ? ExplicitTerms.preset : []) + s.customTerms)
     }
 
+    /// Whether nothing at all is watched.
+    public var isEmpty: Bool { explicit == nil && watched.isEmpty && terms.isEmpty }
+
     public func flags(url: String, title: String) -> [ActivityFlag] {
         var out: [ActivityFlag] = []
         if let n = NormalizedURL(url) {
-            if let hit = explicit?.match(host: n.host) { out.append(.domain(MonitoringSettings.explicitListName, hit)) }
+            if let hit = explicit?.match(host: n.host) { out.append(.domain(MonitorSettings.explicitListName, hit)) }
             for (list, rules) in watched {
                 if let rule = rules.match(url) { out.append(.domain(list, rule.description)) }
             }
         }
         for t in terms.matches(in: title) { out.append(.term(t)) }
-        return out
+        return Array(out.prefix(ActivityFlag.maxPerVisit))
     }
 }
 
@@ -308,16 +405,13 @@ public struct PageObservation: Equatable, Sendable {
     public var browser: String
     public var url: String
     public var title: String
-    public var flags: [ActivityFlag]
     public var blocked: Bool
 
-    public init(source: String, browser: String, url: String, title: String,
-                flags: [ActivityFlag] = [], blocked: Bool = false) {
+    public init(source: String, browser: String, url: String, title: String, blocked: Bool = false) {
         self.source = source
         self.browser = browser
         self.url = url
         self.title = title
-        self.flags = flags
         self.blocked = blocked
     }
 }
@@ -327,16 +421,15 @@ public struct PageObservation: Equatable, Sendable {
 /// Each channel (the front browser, the built-in browser of the front app…)
 /// reports everything it sees on every look. A page still there extends its
 /// visit; a page that's gone ends it. A new title on the same URL (single-page
-/// sites) updates the visit and adds any new flags, rather than starting a
-/// new one.
+/// sites) updates the visit rather than starting a new one.
 public struct VisitTracker: Sendable {
     private struct Key: Hashable { var channel: String; var source: String; var url: String }
     private struct Open { var event: ActivityEvent; var order: Int }
 
     private var open: [Key: Open] = [:]
     private var counter = 0
-    /// Unflagged visits shorter than this are dropped (redirects, pages
-    /// flicked past).
+    /// Visits shorter than this are dropped (redirects, pages flicked past),
+    /// unless the page was blocked.
     public var minDuration: TimeInterval
 
     public init(minDuration: TimeInterval = 1) {
@@ -354,7 +447,6 @@ public struct VisitTracker: Sendable {
             guard seen.insert(key).inserted else { continue }
             if var o = open[key] {
                 if !p.title.isEmpty { o.event.title = p.title }
-                for f in p.flags where !o.event.flags.contains(f) { o.event.flags.append(f) }
                 o.event.blocked = o.event.blocked || p.blocked
                 o.event.end = now
                 open[key] = o
@@ -362,7 +454,7 @@ public struct VisitTracker: Sendable {
                 counter += 1
                 open[key] = Open(event: ActivityEvent(start: now, end: now, browser: p.browser, url: p.url, host: host,
                                                       title: p.title.isEmpty ? host : p.title,
-                                                      flags: p.flags, blocked: p.blocked),
+                                                      blocked: p.blocked),
                                  order: counter)
             }
         }
@@ -370,7 +462,7 @@ public struct VisitTracker: Sendable {
         return finish(gone, at: now)
     }
 
-    /// Ends every open visit (monitoring turned off, the user went idle, Renew quitting).
+    /// Ends every open visit (Activity turned off, the user went idle, Renew quitting).
     public mutating func closeAll(at now: Date) -> [ActivityEvent] {
         finish(Array(open.keys), at: now)
     }
@@ -380,7 +472,7 @@ public struct VisitTracker: Sendable {
         for k in keys {
             guard var o = open.removeValue(forKey: k) else { continue }
             o.event.end = max(o.event.start, now)
-            if o.event.duration >= minDuration || o.event.isFlagged { done.append((o.order, o.event)) }
+            if o.event.duration >= minDuration || o.event.blocked { done.append((o.order, o.event)) }
         }
         return done.sorted { $0.0 < $1.0 }.map(\.1)
     }

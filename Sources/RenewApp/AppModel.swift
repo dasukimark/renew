@@ -9,6 +9,7 @@ final class AppModel: ObservableObject {
         case quick = "Quick Block"
         case lists = "Blocklists"
         case activity = "Activity"
+        case monitor = "Monitor"
         case setup = "Setup"
         var id: String { rawValue }
         var symbol: String {
@@ -16,13 +17,18 @@ final class AppModel: ObservableObject {
             case .sessions: return "calendar.badge.clock"
             case .quick: return "bolt"
             case .lists: return "list.bullet.rectangle"
-            case .activity: return "eye"
+            case .activity: return "chart.bar.xaxis"
+            case .monitor: return "flag"
             case .setup: return "gearshape"
             }
         }
     }
 
     @Published var section: Section = .sessions
+    /// The tab shown on the Activity and Monitor pages, here so one page can
+    /// open the other's settings.
+    @Published var activityTab: ActivityView.Tab = .dashboard
+    @Published var monitorTab: MonitorView.Tab = .flags
     @Published private(set) var status: Status?
     @Published private(set) var daemonReachable = false
     @Published private(set) var now = Date()
@@ -134,6 +140,7 @@ final class AppModel: ObservableObject {
             daemonReachable = true
             reloadIfFilesChanged()
             syncSchedules()
+            syncMonitorLists()
         } else {
             daemonReachable = false
         }
@@ -313,28 +320,91 @@ final class AppModel: ObservableObject {
         send(Request(cmd: .setProtections, protections: p), completion: completion)
     }
 
-    // MARK: activity monitoring
+    // MARK: activity
 
-    /// What activity monitoring watches (off unless turned on).
-    var monitoring: MonitoringSettings { status?.monitoring ?? .off }
+    /// Whether Activity records visits (off unless turned on).
+    var activity: ActivitySettings { status?.activity ?? .off }
 
-    /// False if the running service predates activity monitoring.
-    var monitoringSupported: Bool { status?.monitoring != nil }
+    /// False if the running service predates the Activity/Monitor split.
+    var activitySupported: Bool { status?.activity != nil }
 
-    func setMonitoring(_ m: MonitoringSettings, completion: ((Bool) -> Void)? = nil) {
-        send(Request(cmd: .setMonitoring, monitoring: m), completion: completion)
+    func setActivity(_ a: ActivitySettings, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setActivity, activity: a), completion: completion)
+    }
+
+    // MARK: monitor
+
+    /// What the Monitor flags (off unless turned on).
+    var monitor: MonitorSettings { status?.monitor ?? .off }
+
+    /// False if the running service predates the Monitor.
+    var monitorSupported: Bool { status?.monitor != nil }
+
+    /// Sends `m` with the current rules of each watched blocklist, since
+    /// renewd can't read your lists itself.
+    func setMonitor(_ m: MonitorSettings, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setMonitor, monitor: m.withListRules(from: lists)), completion: completion)
+    }
+
+    private var monitorListSyncInFlight = false
+
+    /// Re-sends the Monitor's copy of the watched blocklists when one has
+    /// changed since renewd got it. Only the list rules are sent, so this
+    /// can't undo a settings change made in the meantime.
+    private func syncMonitorLists() {
+        guard monitorSupported, !monitorListSyncInFlight else { return }
+        let current = monitor
+        guard current.watchLists.contains(where: { $0 != MonitorSettings.explicitListName }) else { return }
+        let fresh = current.withListRules(from: lists).normalized()
+        guard fresh.listRules != current.listRules else { return }
+        monitorListSyncInFlight = true
+        log("a watched blocklist changed; updating the Monitor's copy")
+        queue.async { [weak self] in
+            _ = try? DaemonClient.send(Request(cmd: .setMonitorListRules, monitor: fresh), timeout: 5)
+            DispatchQueue.main.async {
+                self?.monitorListSyncInFlight = false
+                self?.requestSync?()
+            }
+        }
+    }
+
+    /// Reads the Monitor's flags for `day`, like `loadActivity`.
+    func loadMonitorFlags(day: Date, fromOffset: Int? = nil,
+                          completion: @escaping (Result<MonitorLoad, ActivityLoadError>) -> Void) {
+        guard !isLocalTest else {
+            completion(.failure(ActivityLoadError(message: "This is a local test run without the Renew service, so nothing is flagged.")))
+            return
+        }
+        let query = MonitorQuery(date: day, fromOffset: fromOffset)
+        activityQueue.async {
+            let result: Result<MonitorLoad, ActivityLoadError>
+            do {
+                let r = try DaemonClient.send(Request(cmd: .monitorFlags, monitorQuery: query), timeout: 10)
+                if r.ok {
+                    result = .success(MonitorLoad(flags: r.flags ?? [], offset: r.flagsOffset,
+                                                  isIncremental: r.flagsIncremental ?? false))
+                } else if (r.error ?? "").hasPrefix("bad request") {
+                    result = .failure(ActivityLoadError(message: "The running background service predates the Monitor. Update Renew to see flags."))
+                } else {
+                    result = .failure(ActivityLoadError(message: r.error ?? "The Renew service refused the request."))
+                }
+            } catch {
+                result = .failure(ActivityLoadError(message: "Couldn't reach the Renew service: \(error)"))
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     /// Reads your activity log for `day`: the whole day, or with `fromOffset`
     /// (the `offset` of an earlier load) only what's new. `completion` runs on
     /// the main thread with the visits (oldest first), or an error message.
-    func loadActivity(day: Date, flaggedOnly: Bool, fromOffset: Int? = nil,
+    func loadActivity(day: Date, fromOffset: Int? = nil,
                       completion: @escaping (Result<ActivityLoad, ActivityLoadError>) -> Void) {
         guard !isLocalTest else {
             completion(.failure(ActivityLoadError(message: "This is a local test run without the Renew service, so there's no activity log. Visits are written to the app's log instead.")))
             return
         }
-        let query = ActivityQuery(date: day, flaggedOnly: flaggedOnly, fromOffset: fromOffset)
+        let query = ActivityQuery(date: day, fromOffset: fromOffset)
         activityQueue.async {
             let result: Result<ActivityLoad, ActivityLoadError>
             do {
@@ -511,5 +581,12 @@ struct ActivityLoad {
     /// Pass back as `fromOffset` to load only newer visits.
     let offset: Int?
     /// `events` only holds visits added since the `fromOffset` asked for.
+    let isIncremental: Bool
+}
+
+struct MonitorLoad {
+    let flags: [MonitorFlag]
+    /// Pass back as `fromOffset` to load only newer flags.
+    let offset: Int?
     let isIncremental: Bool
 }

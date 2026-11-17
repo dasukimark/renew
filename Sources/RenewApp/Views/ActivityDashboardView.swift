@@ -5,7 +5,6 @@ import RenewShared
 /// Time per site: daily totals and averages over a range of days.
 struct ActivityDashboardView: View {
     @ObservedObject var model: AppModel
-    let openSettings: () -> Void
 
     enum Range: Int, CaseIterable, Identifiable {
         case today = 1, week = 7, month = 30, year = 365
@@ -35,7 +34,7 @@ struct ActivityDashboardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !model.monitoring.enabled { MonitoringOffBanner(openSettings: openSettings) }
+            ActivityNotices(model: model)
             header
             content
         }

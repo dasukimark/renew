@@ -40,6 +40,11 @@ public enum Paths {
     public static var backupDir: String { dataDir + "/backup" }
     /// The activity log, per user (see `ActivityLogStore`).
     public static var activityDir: String { dataDir + "/activity" }
+    /// The Monitor's flags, per user (see `MonitorLogStore`).
+    public static var monitorDir: String { dataDir + "/monitor" }
+    /// The bundled explicit-site list, installed next to renewd so it can flag
+    /// visits to the explicit preset.
+    public static let explicitListFile = installDir + "/explicit-domains.txt"
     public static let socketPath = env["RENEW_SOCKET"] ?? "/var/run/renew.sock"
 
     public static let daemonLabel = "com.renew.daemon"

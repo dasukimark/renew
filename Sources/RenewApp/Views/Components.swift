@@ -288,3 +288,206 @@ struct BlocklistPicker: View {
                 })
     }
 }
+
+/// A notice above a page's content, with one button.
+// Not `Banner`: its fixed-size text breaks layout outside a scroll view,
+// which blanked the whole window, sidebar included.
+struct InfoBanner: View {
+    let title: String
+    let message: String
+    var button: String?
+    var tint: Color = .accentColor
+    var icon = "info.circle.fill"
+    var action: () -> Void = {}
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let button { Button(button, action: action) }
+        }
+        .padding(12)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(tint.opacity(0.25)))
+    }
+}
+
+/// What Activity records, for the off banner and the switch's tooltip.
+enum ActivityCopy {
+    static let what = "Records the address and title of each page you look at and how long it was in front: the active tab in Safari, Chrome, Edge, Brave, Arc, Vivaldi and Firefox, and websites in apps like T3 Code, Claude and Codex. Time away from the Mac isn't counted."
+    static var kept: String {
+        "Visits are kept for \(ActivityLogStore.retentionDays) days and time per site for a year, by Renew's background service. Nothing is sent off this Mac."
+    }
+}
+
+/// The Activity on/off switch, for the Activity page's toolbar.
+struct ActivityToggle: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Toggle("Record browsing", isOn: Binding(get: { model.activity.enabled },
+                                                set: { model.setActivity(ActivitySettings(enabled: $0)) }))
+            .toggleStyle(.switch)
+            .disabled(!model.daemonReachable || !model.activitySupported || model.busy)
+            .help(ActivityCopy.what + "\n\n" + ActivityCopy.kept)
+    }
+}
+
+/// Shown above Activity's dashboard and log: that it's off (with a button
+/// to turn it on), that the service is too old, or which pages can't be read.
+struct ActivityNotices: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if model.isInstalled && model.daemonReachable && !model.activitySupported {
+            InfoBanner(title: "Update Renew to use Activity",
+                       message: "The running background service is out of date.",
+                       tint: .orange, icon: "exclamationmark.triangle.fill")
+        } else if !model.activity.enabled {
+            InfoBanner(title: "Activity is off", message: ActivityCopy.what + " " + ActivityCopy.kept,
+                       button: model.daemonReachable ? "Turn On" : nil) {
+                model.setActivity(ActivitySettings(enabled: true))
+            }
+        } else if !model.permissionWarnings.isEmpty {
+            InfoBanner(title: "Some pages can't be read",
+                       message: model.permissionWarnings.joined(separator: "; "),
+                       button: "Setup…", tint: .orange, icon: "exclamationmark.triangle.fill") {
+                model.section = .setup
+            }
+        }
+    }
+}
+
+/// A small coloured label, like “Blocked” or “Explicit site”.
+struct FlagBadge: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.14), in: Capsule())
+            .foregroundStyle(color)
+    }
+}
+
+/// A site or word with a remove button.
+struct RemovableChip: View {
+    let text: String
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(text).font(.callout)
+            Button(action: remove) {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove")
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 4)
+        .padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+    }
+}
+
+// Generic types can't have static stored properties.
+private let visitTimeFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateStyle = .none
+    f.timeStyle = .short
+    return f
+}()
+
+/// One visited page: time and duration, title, address and browser, with
+/// badges on the right.
+struct VisitRow<Badges: View>: View {
+    let start: Date
+    let duration: TimeInterval
+    let title: String
+    let url: String
+    let browser: String
+    @ViewBuilder let badges: () -> Badges
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(visitTimeFormatter.string(from: start))
+                    .monospacedDigit()
+                Text(DurationText.format(Int(duration.rounded())))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .frame(width: 74, alignment: .trailing)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                Text(url)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Text(browser)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 4) { badges() }
+        }
+        .padding(.vertical, 3)
+        .contextMenu {
+            Button("Copy Address") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url, forType: .string)
+            }
+            Button("Copy Title") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(title, forType: .string)
+            }
+        }
+    }
+}
+
+/// Day navigation shared by the activity log and the Monitor's flags.
+struct DayPickerBar: View {
+    @Binding var day: Date
+
+    private var isToday: Bool { Calendar.current.isDateInToday(day) }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button { shift(-1) } label: { Image(systemName: "chevron.left") }
+                .help("Previous day")
+            DatePicker("Day", selection: $day, in: ...Date(), displayedComponents: .date)
+                .labelsHidden()
+                .datePickerStyle(.field)
+                .frame(maxWidth: 130)
+            Button { shift(1) } label: { Image(systemName: "chevron.right") }
+                .help("Next day")
+                .disabled(isToday)
+            if !isToday {
+                Button("Today") { day = Date() }
+            }
+        }
+    }
+
+    private func shift(_ by: Int) {
+        guard let d = Calendar.current.date(byAdding: .day, value: by, to: day), d <= Date() else { return }
+        day = d
+    }
+}

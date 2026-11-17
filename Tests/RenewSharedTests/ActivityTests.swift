@@ -5,8 +5,8 @@ import Testing
 private func at(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970: 1_800_000_000 + seconds) }
 
 private func page(_ url: String, _ title: String = "", source: String = "com.apple.Safari",
-                  flags: [ActivityFlag] = [], blocked: Bool = false) -> PageObservation {
-    PageObservation(source: source, browser: "Safari", url: url, title: title, flags: flags, blocked: blocked)
+                  blocked: Bool = false) -> PageObservation {
+    PageObservation(source: source, browser: "Safari", url: url, title: title, blocked: blocked)
 }
 
 @Suite("Activity matching")
@@ -49,9 +49,10 @@ struct ActivityMatchingTests {
 
     @Test func matcherCombinesListsSitesAndWords() {
         let lists = ["social": ["reddit.com", "!old.reddit.com"], "video": ["youtube.com/shorts"]]
-        let settings = MonitoringSettings(enabled: true, watchLists: ["explicit", "social", "video", "missing"],
-                                          customDomains: ["Example.org"], flagExplicitTerms: true, customTerms: ["Gambling"])
-        let m = ActivityMatcher(settings: settings, lists: lists, explicitDomains: DomainSet(["adult.test"]))
+        let settings = MonitorSettings(enabled: true, watchLists: ["explicit", "social", "video", "missing"],
+                                       customDomains: ["Example.org"], flagExplicitTerms: true, customTerms: ["Gambling"])
+            .withListRules(from: lists)
+        let m = ActivityMatcher(settings: settings, explicitDomains: DomainSet(["adult.test"]))
 
         #expect(m.flags(url: "https://cdn.adult.test/x", title: "Home") == [.domain("explicit", "adult.test")])
         #expect(m.flags(url: "https://www.reddit.com/r/swift", title: "Swift") == [.domain("social", "reddit.com")])
@@ -66,9 +67,10 @@ struct ActivityMatchingTests {
     }
 
     @Test func matcherRespectsSwitches() {
-        let off = MonitoringSettings(enabled: true, watchLists: [], customDomains: [], flagExplicitTerms: false)
-        let m = ActivityMatcher(settings: off, lists: [:], explicitDomains: DomainSet(["adult.test"]))
+        let off = MonitorSettings(enabled: true, watchLists: [], customDomains: [], flagExplicitTerms: false)
+        let m = ActivityMatcher(settings: off, explicitDomains: DomainSet(["adult.test"]))
         #expect(m.flags(url: "https://adult.test/", title: "porn").isEmpty)
+        #expect(m.isEmpty)
     }
 
     @Test func flagLabels() {
@@ -79,34 +81,49 @@ struct ActivityMatchingTests {
     }
 }
 
-@Suite("Activity settings")
-struct MonitoringSettingsTests {
+@Suite("Activity and Monitor settings")
+struct MonitorSettingsTests {
     @Test func offByDefaultAndOldStateDecodes() throws {
-        #expect(PersistedState().monitoring(for: 501) == .off)
-        #expect(!MonitoringSettings.off.enabled)
+        #expect(PersistedState().activity(for: 501) == .off)
+        #expect(PersistedState().monitor(for: 501) == .off)
+        #expect(!MonitorSettings.off.enabled)
+        #expect(!ActivitySettings.off.enabled)
         let old = try Wire.decoder.decode(PersistedState.self, from: Data(#"{"alertURL":"https://ntfy.sh/x"}"#.utf8))
         #expect(old.monitoring == nil)
-        #expect(old.monitoring(for: 501) == .off)
-        let partial = try Wire.decoder.decode(MonitoringSettings.self, from: Data(#"{"enabled":true}"#.utf8))
+        #expect(old.activity(for: 501) == .off)
+        #expect(old.monitor(for: 501) == .off)
+        let partial = try Wire.decoder.decode(MonitorSettings.self, from: Data(#"{"enabled":true}"#.utf8))
         #expect(partial.enabled)
         // Nothing is watched unless chosen.
         #expect(partial.watchLists.isEmpty)
         #expect(partial.customDomains.isEmpty)
         #expect(!partial.flagExplicitTerms)
         #expect(partial.customTerms.isEmpty)
+        #expect(partial.listRules.isEmpty)
     }
 
     @Test func roundTrips() throws {
-        let m = MonitoringSettings(enabled: true, watchLists: ["social"], customDomains: ["a.test"],
-                                   flagExplicitTerms: false, customTerms: ["x y"])
-        #expect(try Wire.decoder.decode(MonitoringSettings.self, from: Wire.encoder.encode(m)) == m)
+        let m = MonitorSettings(enabled: true, watchLists: ["social"], listRules: ["social": ["a.test"]],
+                                customDomains: ["a.test"], flagExplicitTerms: false, customTerms: ["x y"])
+        #expect(try Wire.decoder.decode(MonitorSettings.self, from: Wire.encoder.encode(m)) == m)
+        let a = ActivitySettings(enabled: true)
+        #expect(try Wire.decoder.decode(ActivitySettings.self, from: Wire.encoder.encode(a)) == a)
         let e = ActivityEvent(start: at(0), end: at(30), browser: "Safari", url: "https://a.test/", host: "a.test",
-                              title: "A", flags: [.term("x")], blocked: true)
+                              title: "A", blocked: true)
         #expect(try Wire.decoder.decode(ActivityEvent.self, from: Wire.encoder.encode(e)) == e)
     }
 
+    @Test func oldEventsWithFlagsStillDecode() throws {
+        let line = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","start":1800000000,"end":1800000030,"browser":"Safari","url":"https://a.test/","host":"a.test","title":"A","flags":[{"kind":"term","match":"x"}],"blocked":false}"#
+        let e = try Wire.decoder.decode(ActivityEvent.self, from: Data(line.utf8))
+        #expect(e.url == "https://a.test/")
+        #expect(e.duration == 30)
+        // Flags are no longer part of a visit.
+        #expect(!String(decoding: try Wire.encoder.encode(e), as: UTF8.self).contains("flags"))
+    }
+
     @Test func normalizes() {
-        let m = MonitoringSettings(enabled: true, watchLists: [" Social", "social", "", "EXPLICIT"],
+        let m = MonitorSettings(enabled: true, watchLists: [" Social", "social", "", "EXPLICIT"],
                                    customDomains: ["https://www.Example.com/", "not a site", "example.com"],
                                    customTerms: ["  Two   Words ", "two words", "", String(repeating: "a", count: 65)])
             .normalized()
@@ -133,28 +150,27 @@ struct VisitTrackerTests {
         #expect(t.openCount == 0)
     }
 
-    @Test func titleChangeMergesAndAddsFlags() {
+    @Test func titleChangeMergesAndKeepsBlocked() {
         var t = VisitTracker()
         _ = t.observe([page("https://v.test/watch", "Loading…")], channel: "browser", at: at(0))
-        _ = t.observe([page("https://v.test/watch", "Some video", flags: [.term("porn")])], channel: "browser", at: at(3))
-        _ = t.observe([page("https://v.test/watch", "", flags: [.term("porn")], blocked: true)], channel: "browser", at: at(4))
+        _ = t.observe([page("https://v.test/watch", "Some video")], channel: "browser", at: at(3))
+        _ = t.observe([page("https://v.test/watch", "", blocked: true)], channel: "browser", at: at(4))
         let done = t.closeAll(at: at(8))
         #expect(done.count == 1)
         #expect(done[0].title == "Some video") // an empty title doesn't replace a real one
-        #expect(done[0].flags == [.term("porn")])
         #expect(done[0].blocked)
         #expect(done[0].duration == 8)
     }
 
-    @Test func shortUnflaggedVisitsAreDropped() {
+    @Test func shortVisitsAreDroppedUnlessBlocked() {
         var t = VisitTracker(minDuration: 1)
         _ = t.observe([page("https://redirect.test/")], channel: "browser", at: at(0))
         #expect(t.observe([page("https://final.test/")], channel: "browser", at: at(0.4)).isEmpty)
-        let finalDone = t.observe([page("https://flagged.test/", flags: [.term("x")])], channel: "browser", at: at(2))
+        let finalDone = t.observe([page("https://blocked.test/", blocked: true)], channel: "browser", at: at(2))
         #expect(finalDone.map(\.url) == ["https://final.test/"])
-        // Flagged visits are kept however short.
+        // Blocked visits are kept however short.
         let done = t.observe([], channel: "browser", at: at(2.2))
-        #expect(done.map(\.url) == ["https://flagged.test/"])
+        #expect(done.map(\.url) == ["https://blocked.test/"])
     }
 
     @Test func channelsAreIndependent() {
@@ -236,7 +252,7 @@ struct ActivityLogTests {
         let a = ActivityEvent(start: now.addingTimeInterval(-60), end: now.addingTimeInterval(-30), browser: "Safari",
                               url: "https://a.test/", host: "a.test", title: "A")
         let b = ActivityEvent(start: now.addingTimeInterval(-20), end: now.addingTimeInterval(-10), browser: "Chrome",
-                              url: "https://b.test/", host: "b.test", title: "B", flags: [.term("porn")])
+                              url: "https://b.test/", host: "b.test", title: "B")
         var bad = a; bad.end = bad.start.addingTimeInterval(-1)
         #expect(store.append([b, a, bad], uid: 501, now: now) == 2)
 
@@ -244,7 +260,6 @@ struct ActivityLogTests {
         // Same day for both unless the test runs right at midnight.
         if ActivityLogStore.dayKey(a.start) == ActivityLogStore.dayKey(b.start) {
             #expect(store.read(today, uid: 501).events.map(\.url) == ["https://a.test/", "https://b.test/"])
-            #expect(store.read(ActivityQuery(date: a.start, flaggedOnly: true), uid: 501).events.map(\.url) == ["https://b.test/"])
         }
         // Other users see nothing.
         #expect(store.read(today, uid: 502).events.isEmpty)
@@ -370,21 +385,26 @@ struct ActivityLogTests {
     }
 }
 
-@Suite("Per-user monitoring settings")
-struct PerUserMonitoringTests {
+@Suite("Per-user Activity and Monitor settings")
+struct PerUserSettingsTests {
     @Test func eachUserHasTheirOwn() {
         var state = PersistedState()
-        var mine = MonitoringSettings.off
+        state.setActivity(ActivitySettings(enabled: true), for: 501)
+        var mine = MonitorSettings.off
         mine.enabled = true
-        state.setMonitoring(mine, for: 501)
-        #expect(state.monitoring(for: 501).enabled)
-        #expect(!state.monitoring(for: 502).enabled)
+        state.setMonitor(mine, for: 501)
+        #expect(state.activity(for: 501).enabled)
+        #expect(state.monitor(for: 501).enabled)
+        #expect(!state.activity(for: 502).enabled)
+        #expect(!state.monitor(for: 502).enabled)
         // Back to the default: the entry goes.
-        state.setMonitoring(.off, for: 501)
-        #expect(state.monitoringByUser == nil)
+        state.setActivity(.off, for: 501)
+        state.setMonitor(.off, for: 501)
+        #expect(state.activityByUser == nil)
+        #expect(state.monitorByUser == nil)
     }
 
-    @Test func oldSingleSettingMovesToTheConsoleUser() throws {
+    @Test func oldSingleSettingSplitsForTheConsoleUser() throws {
         var state = try Wire.decoder.decode(PersistedState.self, from: Data(#"{"monitoring":{"enabled":true,"watchLists":["test"]}}"#.utf8))
         let early = state.migrateMonitoring(to: nil) // nobody logged in yet: wait
         #expect(!early)
@@ -392,8 +412,10 @@ struct PerUserMonitoringTests {
         let moved = state.migrateMonitoring(to: 501)
         #expect(moved)
         #expect(state.monitoring == nil)
-        #expect(state.monitoring(for: 501).watchLists == ["test"])
-        #expect(!state.monitoring(for: 502).enabled)
+        #expect(state.activity(for: 501).enabled)
+        #expect(state.monitor(for: 501).enabled)
+        #expect(state.monitor(for: 501).watchLists == ["test"])
+        #expect(!state.activity(for: 502).enabled)
         let again = state.migrateMonitoring(to: 501)
         #expect(!again)
     }

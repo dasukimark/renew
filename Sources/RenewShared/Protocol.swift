@@ -6,7 +6,7 @@ import Foundation
 /// can shorten, stop or loosen a running session. Alerts can only be changed
 /// between sessions (or turned on during one), and an uninstall request only
 /// unlocks `sudo renew uninstall` after a cooling-off period. Each user has
-/// their own activity monitoring settings and log, and only ever reads and
+/// their own Activity and Monitor settings and logs, and only ever reads and
 /// changes their own.
 public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
@@ -16,14 +16,22 @@ public enum Command: String, Codable, Sendable {
     case setSchedules
     /// Changes the optional hardening features (see `Protections`).
     case setProtections
-    /// Changes what activity monitoring watches (see `MonitoringSettings`).
-    case setMonitoring
-    /// Stores finished page visits in the caller's activity log.
+    /// Turns Activity's recording on or off (see `ActivitySettings`).
+    case setActivity
+    /// Changes what the Monitor flags (see `MonitorSettings`).
+    case setMonitor
+    /// Stores finished page visits in the caller's activity log, where the
+    /// Monitor checks them.
     case recordActivity
     /// Reads the caller's activity log (see `ActivityQuery`).
     case activity
     /// Reads the caller's per-site daily totals (see `ActivityStatsQuery`).
     case activityStats
+    /// Reads the Monitor's flags for the caller (see `MonitorQuery`).
+    case monitorFlags
+    /// Replaces only the Monitor's copy of the watched blocklists' rules
+    /// (`monitor.listRules`), leaving the rest of its settings as they are.
+    case setMonitorListRules
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -46,19 +54,23 @@ public struct Request: Codable, Sendable {
     public var schedules: [Schedule]?
     /// For `setProtections`: the full new set.
     public var protections: Protections?
-    /// For `setMonitoring`: the full new settings.
-    public var monitoring: MonitoringSettings?
+    /// For `setActivity`: the new setting.
+    public var activity: ActivitySettings?
+    /// For `setMonitor`: the full new settings.
+    public var monitor: MonitorSettings?
     /// For `recordActivity`: finished visits.
     public var events: [ActivityEvent]?
     /// For `activity`: which part of the log to read.
     public var activityQuery: ActivityQuery?
     /// For `activityStats`: which days to sum.
     public var statsQuery: ActivityStatsQuery?
+    /// For `monitorFlags`: which day to read.
+    public var monitorQuery: MonitorQuery?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
                 alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil,
-                monitoring: MonitoringSettings? = nil, events: [ActivityEvent]? = nil, activityQuery: ActivityQuery? = nil,
-                statsQuery: ActivityStatsQuery? = nil) {
+                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, events: [ActivityEvent]? = nil,
+                activityQuery: ActivityQuery? = nil, statsQuery: ActivityStatsQuery? = nil, monitorQuery: MonitorQuery? = nil) {
         self.cmd = cmd
         self.durationSeconds = durationSeconds
         self.rules = rules
@@ -66,10 +78,12 @@ public struct Request: Codable, Sendable {
         self.alertURL = alertURL
         self.schedules = schedules
         self.protections = protections
-        self.monitoring = monitoring
+        self.activity = activity
+        self.monitor = monitor
         self.events = events
         self.activityQuery = activityQuery
         self.statsQuery = statsQuery
+        self.monitorQuery = monitorQuery
     }
 }
 
@@ -146,9 +160,18 @@ public struct Status: Codable, Sendable {
     public var protections: Protections?
     /// When the uninstall cooling-off turns off, if someone asked for that.
     public var coolingOffRemovalAt: Date?
-    /// What activity monitoring watches for the user asking (each user has
-    /// their own). nil from daemons that predate it.
-    public var monitoring: MonitoringSettings?
+    /// Whether Activity records visits for the user asking (each user has
+    /// their own). nil from daemons that predate the split from the Monitor.
+    public var activity: ActivitySettings?
+    /// What the Monitor flags for the user asking. nil from daemons that
+    /// predate it.
+    public var monitor: MonitorSettings?
+    /// The combined settings daemons sent before the split. Only read.
+    public var monitoring: LegacyMonitoringSettings?
+
+    /// Whether Activity is on, falling back to an older daemon's combined
+    /// setting, so recording carries on until renewd is updated too.
+    public var effectiveActivity: ActivitySettings { activity ?? monitoring?.activity ?? .off }
 
     /// The protections as the user wants them: like `protections`, but with
     /// the cooling-off off once its removal has been asked for. Clients build
@@ -166,7 +189,8 @@ public struct Status: Codable, Sendable {
 
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
                 alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
-                protections: Protections? = nil, coolingOffRemovalAt: Date? = nil, monitoring: MonitoringSettings? = nil) {
+                protections: Protections? = nil, coolingOffRemovalAt: Date? = nil,
+                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil) {
         self.session = session
         self.serverTime = serverTime
         self.agents = agents
@@ -175,7 +199,8 @@ public struct Status: Codable, Sendable {
         self.schedules = schedules
         self.protections = protections
         self.coolingOffRemovalAt = coolingOffRemovalAt
-        self.monitoring = monitoring
+        self.activity = activity
+        self.monitor = monitor
     }
 }
 
@@ -192,9 +217,16 @@ public struct Response: Codable, Sendable {
     public var activityIncremental: Bool?
     /// For `activityStats`: the days in the range that have totals.
     public var stats: [DaySummary]?
+    /// For `monitorFlags`: the flags found.
+    public var flags: [MonitorFlag]?
+    /// For `monitorFlags`: pass as `MonitorQuery.fromOffset` to get only newer flags.
+    public var flagsOffset: Int?
+    /// For `monitorFlags`: whether `flags` only holds flags added since the
+    /// query's `fromOffset`.
+    public var flagsIncremental: Bool?
 
     public init(ok: Bool, error: String? = nil, status: Status? = nil, activity: ActivityPage? = nil,
-                stats: [DaySummary]? = nil) {
+                stats: [DaySummary]? = nil, flags: MonitorPage? = nil) {
         self.ok = ok
         self.error = error
         self.status = status
@@ -202,6 +234,9 @@ public struct Response: Codable, Sendable {
         self.activityOffset = activity?.offset
         self.activityIncremental = activity?.isIncremental
         self.stats = stats
+        self.flags = flags?.flags
+        self.flagsOffset = flags?.offset
+        self.flagsIncremental = flags?.isIncremental
     }
 }
 

@@ -19,30 +19,72 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// Counts down to when the uninstall cooling-off turns off, once someone
     /// has asked. Turning it back on cancels this.
     public var coolingOffRemoval: Countdown?
-    /// What activity monitoring watches, per user (keyed by uid). Users
+    /// Whether Activity records visits, per user (keyed by uid). Users
     /// missing here (and older files) have it off.
-    public var monitoringByUser: [String: MonitoringSettings]?
-    /// The single setting kept before settings were per user. Read once and
-    /// moved to the console user's entry (see `migrateMonitoring`).
-    public var monitoring: MonitoringSettings?
+    public var activityByUser: [String: ActivitySettings]?
+    /// What the Monitor flags, per user (keyed by uid). Users missing here
+    /// have it off.
+    public var monitorByUser: [String: MonitorSettings]?
+    /// The combined per-user settings kept before Activity and the Monitor
+    /// were split. Read once and split (see `migrateMonitoring`).
+    public var monitoringByUser: [String: LegacyMonitoringSettings]?
+    /// The single combined setting kept before settings were per user. Read
+    /// once and moved to the console user (see `migrateMonitoring`).
+    public var monitoring: LegacyMonitoringSettings?
 
-    public func monitoring(for uid: uid_t) -> MonitoringSettings {
-        monitoringByUser?[String(uid)] ?? .off
+    public func activity(for uid: uid_t) -> ActivitySettings {
+        activityByUser?[String(uid)] ?? .off
     }
 
-    /// Stores `uid`'s settings; settings equal to the default are dropped.
-    public mutating func setMonitoring(_ m: MonitoringSettings, for uid: uid_t) {
-        var all = monitoringByUser ?? [:]
+    public func monitor(for uid: uid_t) -> MonitorSettings {
+        monitorByUser?[String(uid)] ?? .off
+    }
+
+    /// Stores `uid`'s Activity setting; the default is dropped.
+    public mutating func setActivity(_ a: ActivitySettings, for uid: uid_t) {
+        var all = activityByUser ?? [:]
+        all[String(uid)] = a == .off ? nil : a
+        activityByUser = all.isEmpty ? nil : all
+    }
+
+    /// Stores `uid`'s Monitor settings; the default is dropped.
+    public mutating func setMonitor(_ m: MonitorSettings, for uid: uid_t) {
+        var all = monitorByUser ?? [:]
         all[String(uid)] = m == .off ? nil : m
-        monitoringByUser = all.isEmpty ? nil : all
+        monitorByUser = all.isEmpty ? nil : all
     }
 
-    /// Moves the old single setting to `uid`. Returns whether anything changed.
+    /// Splits the old combined settings into Activity and Monitor ones: the
+    /// per-user entries always, and the older single setting once there's a
+    /// `uid` (the console user) to give it to. Recording on meant flagging
+    /// on, so both start out as recording was. Users who already have new
+    /// settings keep them. Returns whether anything changed.
     public mutating func migrateMonitoring(to uid: uid_t?) -> Bool {
-        guard let old = monitoring, let uid else { return false }
-        monitoring = nil
-        if monitoringByUser?[String(uid)] == nil { setMonitoring(old, for: uid) }
-        return true
+        var changed = false
+        if let old = monitoringByUser {
+            monitoringByUser = nil
+            for (key, legacy) in old {
+                guard let u = uid_t(key) else { continue }
+                adopt(legacy, for: u)
+            }
+            changed = true
+        }
+        if let old = monitoring, let uid {
+            monitoring = nil
+            adopt(old, for: uid)
+            changed = true
+        }
+        return changed
+    }
+
+    private mutating func adopt(_ legacy: LegacyMonitoringSettings, for uid: uid_t) {
+        let key = String(uid)
+        if activityByUser?[key] == nil { setActivity(legacy.activity, for: uid) }
+        if monitorByUser?[key] == nil {
+            var m = legacy.monitor
+            m.enabled = legacy.activity.enabled
+            setMonitor(m, for: uid)
+        }
     }
 
     public var effectiveProtections: Protections { protections ?? .off }

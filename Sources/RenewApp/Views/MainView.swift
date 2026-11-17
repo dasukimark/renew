@@ -27,6 +27,7 @@ struct MainView: View {
             case .quick: QuickBlockView(model: model)
             case .lists: ListsView(model: model)
             case .activity: ActivityView(model: model)
+            case .monitor: MonitorView(model: model)
             case .setup: SetupView(model: model)
             }
         }
