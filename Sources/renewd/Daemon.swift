@@ -42,9 +42,19 @@ final class Daemon {
     private var termSource: DispatchSourceSignal?
     /// The per-user activity log (see `ActivityLogStore`).
     private let activityLog = ActivityLogStore(directory: Paths.activityDir)
+    /// The Monitor's flags, per user (see `MonitorLogStore`).
+    private let monitorLog = MonitorLogStore(directory: Paths.monitorDir)
+    private lazy var monitorEngine: MonitorEngine = {
+        let engine = MonitorEngine(dev: dev, queue: queue)
+        engine.deliver = { [weak self] uid, flags in
+            guard let self else { return }
+            self.monitorLog.append(flags, uid: uid)
+        }
+        return engine
+    }()
     private var lastActivityPrune = Date.distantPast
     /// The uid of the request being handled, so replies carry that user's
-    /// monitoring settings.
+    /// Activity and Monitor settings.
     private var requestUID: uid_t?
 
     /// Date changes smaller than this are ordinary clock corrections.
@@ -72,8 +82,12 @@ final class Daemon {
             }
             state.checkpoint(at: r)
             if state.migrateMonitoring(to: consoleUser()?.uid) {
-                log("moved the activity monitoring settings to the console user")
+                log("split the activity monitoring settings into Activity and Monitor settings")
             }
+            monitorEngine.prepare(watchingExplicit: (state.monitorByUser ?? [:]).values.contains {
+                $0.enabled && $0.watchLists.contains(MonitorSettings.explicitListName)
+            })
+            importLegacyFlags()
             // Keep this boot's anchor across renewd restarts, so restarting
             // renewd after changing the date doesn't launder the change.
             if state.wallAnchor?.trustedWall(at: r) == nil { state.wallAnchor = WallAnchor(at: r) }
@@ -195,16 +209,36 @@ final class Daemon {
             guard let p = req.protections else { return fail("Missing protections.") }
             if let error = setProtections(p, by: uid, at: r) { return fail(error) }
 
-        case .setMonitoring:
-            guard let m = req.monitoring else { return fail("Missing monitoring settings.") }
-            setMonitoring(m, by: uid)
+        case .setActivity:
+            guard let a = req.activity else { return fail("Missing Activity setting.") }
+            setActivity(a, by: uid)
+
+        case .setMonitor:
+            guard let m = req.monitor else { return fail("Missing Monitor settings.") }
+            setMonitor(m, by: uid)
+
+        case .setMonitorListRules:
+            guard let rules = req.monitor?.listRules else { return fail("Missing list rules.") }
+            var m = state.monitor(for: uid)
+            m.listRules = rules
+            setMonitor(m, by: uid)
 
         case .recordActivity:
             let events = req.events ?? []
             guard events.count <= ActivityLogStore.maxEventsPerRequest else {
                 return fail("At most \(ActivityLogStore.maxEventsPerRequest) visits per request.")
             }
-            activityLog.append(events, uid: uid, now: now)
+            // Visits that started before Activity was turned off still count:
+            // the app hears about the change a moment later, and may hold
+            // visits from while renewd was unreachable.
+            let activity = state.activity(for: uid)
+            let accepted = events.filter { activity.accepts(visitStartingAt: $0.start) }
+            let result = activityLog.store(accepted, uid: uid, now: now)
+            // The Monitor checks each new visit once (even ones too short to
+            // log, or over the log's quota); flags are never rewritten when
+            // its rules change.
+            let flags = monitorEngine.evaluate(result.new, settings: state.monitor(for: uid), uid: uid, now: now)
+            if !flags.isEmpty { monitorLog.append(flags, uid: uid, now: now) }
 
         case .activity:
             guard let q = req.activityQuery, ActivityLogStore.date(ofDay: q.day) != nil else {
@@ -217,6 +251,12 @@ final class Daemon {
                 return fail("Give a range of at most \(ActivityStatsQuery.maxDays) days, YYYY-MM-DD to YYYY-MM-DD.")
             }
             return Response(ok: true, status: makeStatus(now, r), stats: stats)
+
+        case .monitorFlags:
+            guard let q = req.monitorQuery, ActivityLogStore.date(ofDay: q.day) != nil else {
+                return fail("Give a day as YYYY-MM-DD.")
+            }
+            return Response(ok: true, status: makeStatus(now, r), flags: monitorLog.read(q, uid: uid))
 
 
         case .cancelUninstall:
@@ -356,20 +396,50 @@ final class Daemon {
         return nil
     }
 
-    /// Each user changes only their own settings. They can be changed at any
-    /// time for now; rules about turning monitoring off belong with the
-    /// accountability features.
-    private func setMonitoring(_ requested: MonitoringSettings, by uid: uid_t) {
-        let new = requested.normalized()
-        let old = state.monitoring(for: uid)
-        guard new != old else { return }
-        let wasOn = old.enabled
-        state.setMonitoring(new, for: uid)
+    /// Each user changes only their own settings, at any time.
+    private func setActivity(_ requested: ActivitySettings, by uid: uid_t) {
+        let old = state.activity(for: uid)
+        guard requested.enabled != old.enabled else { return }
+        // renewd keeps the time it went off itself; a client's value is ignored.
+        let new = ActivitySettings(enabled: requested.enabled, offSince: requested.enabled ? nil : Date())
+        state.setActivity(new, for: uid)
         StateStore.save(state)
-        if wasOn != new.enabled {
-            log("activity monitoring turned \(new.enabled ? "on" : "off") by uid \(uid)")
-        } else {
-            log("activity monitoring settings changed by uid \(uid): lists \(new.watchLists), \(new.customDomains.count) sites, explicit words \(new.flagExplicitTerms ? "on" : "off"), \(new.customTerms.count) words")
+        log("Activity recording turned \(new.enabled ? "on" : "off") by uid \(uid)")
+    }
+
+    /// Copies flags the app saved inside visits before the Monitor had its
+    /// own log into the Monitor's log, once. The reading happens off the
+    /// state queue.
+    private func importLegacyFlags() {
+        guard !monitorLog.legacyFlagsImported else { return }
+        let activityDir = activityLog.directory
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = MonitorLogStore.legacyFlags(inActivityDir: activityDir)
+            self?.queue.async {
+                guard let self else { return }
+                let n = self.monitorLog.importLegacyFlags(found)
+                log("monitor: carried over \(n) flagged visit(s) from the activity log")
+            }
+        }
+    }
+
+    /// Each user changes only their own settings. They can be changed at any
+    /// time for now; rules about turning the Monitor off (telling an
+    /// accountability partner, a cooling-off) belong here once those exist.
+    private func setMonitor(_ requested: MonitorSettings, by uid: uid_t) {
+        let new = requested.normalized()
+        let old = state.monitor(for: uid)
+        guard new != old else { return }
+        state.setMonitor(new, for: uid)
+        monitorEngine.invalidate(uid)
+        StateStore.save(state)
+        if old.enabled != new.enabled {
+            log("Monitor turned \(new.enabled ? "on" : "off") by uid \(uid)")
+        }
+        if old.watchLists != new.watchLists || old.listRules != new.listRules || old.customDomains != new.customDomains
+            || old.flagExplicitTerms != new.flagExplicitTerms || old.customTerms != new.customTerms {
+            let rules = new.listRules.values.reduce(0) { $0 + $1.count }
+            log("Monitor rules changed by uid \(uid): lists \(new.watchLists) (\(rules) rules), \(new.customDomains.count) sites, explicit words \(new.flagExplicitTerms ? "on" : "off"), \(new.customTerms.count) words")
         }
     }
 
@@ -453,7 +523,8 @@ final class Daemon {
             schedules: state.schedules,
             protections: state.effectiveProtections,
             coolingOffRemovalAt: state.coolingOffRemovalDate(at: r),
-            monitoring: requestUID.map { state.monitoring(for: $0) } ?? .off
+            activity: requestUID.map { state.activity(for: $0) } ?? .off,
+            monitor: requestUID.map { state.monitor(for: $0) } ?? .off
         )
     }
 
@@ -480,7 +551,8 @@ final class Daemon {
 
         let active = state.activeSession(at: r)
         if (active != nil || state.alertURL != nil || state.uninstall != nil || state.schedules != nil
-            || state.protections != nil || state.coolingOffRemoval != nil || state.monitoringByUser != nil)
+            || state.protections != nil || state.coolingOffRemoval != nil
+            || state.activityByUser != nil || state.monitorByUser != nil)
             && !FileManager.default.fileExists(atPath: Paths.stateFile) {
             log("state file was removed; rewriting")
             StateStore.save(state)
@@ -491,12 +563,14 @@ final class Daemon {
         // No one was logged in at startup: move old monitoring settings once someone is.
         if state.monitoring != nil, state.migrateMonitoring(to: consoleUID) {
             StateStore.save(state)
-            log("moved the activity monitoring settings to the console user")
+            log("moved the old activity monitoring settings to the console user")
         }
         if now.timeIntervalSince(lastActivityPrune) >= 3_600 {
             lastActivityPrune = now
             let removed = activityLog.prune(now: now)
             if removed > 0 { log("activity log: deleted \(removed) day file(s) older than \(ActivityLogStore.retentionDays) days") }
+            let flagsRemoved = monitorLog.prune(now: now)
+            if flagsRemoved > 0 { log("monitor log: deleted \(flagsRemoved) day file(s) older than \(MonitorLogStore.retentionDays) days") }
         }
 
         // The rest is the optional "keep Renew running" protection.
@@ -562,8 +636,9 @@ final class Daemon {
             // The anchor's date may not survive the JSON round trip bit for bit.
             || file.wallAnchor?.bootID != state.wallAnchor?.bootID || file.wallAnchor?.mono != state.wallAnchor?.mono
             || file.protections != state.protections || !sameCoolingOffRemoval(file, r)
+            || file.activityByUser != state.activityByUser || file.monitorByUser != state.monitorByUser
             || file.monitoringByUser != state.monitoringByUser {
-            log("state file disagrees about alerts/uninstall/schedules/protections/monitoring; rewriting")
+            log("state file disagrees about alerts/uninstall/schedules/protections/activity/monitor; rewriting")
             StateStore.save(state)
         }
         guard var disk = file.activeSession(at: r) else { return }

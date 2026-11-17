@@ -39,21 +39,22 @@ final class DaemonLink {
     }
 }
 
-/// The monitoring settings renewd last reported, so a relaunched app keeps
-/// recording while renewd is unreachable.
-enum MonitoringCache {
+/// The Activity setting renewd last reported, so a relaunched app keeps
+/// recording while renewd is unreachable. (The file name predates the split
+/// from the Monitor; the old combined settings read fine as this.)
+enum ActivityCache {
     private static var url: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Renew/agent-monitoring.json")
     }
 
-    static func load() -> MonitoringSettings {
+    static func load() -> ActivitySettings {
         guard let data = try? Data(contentsOf: url),
-              let m = try? Wire.decoder.decode(MonitoringSettings.self, from: data) else { return .off }
-        return m
+              let a = try? Wire.decoder.decode(ActivitySettings.self, from: data) else { return .off }
+        return a
     }
 
-    static func save(_ m: MonitoringSettings) {
+    static func save(_ m: ActivitySettings) {
         guard let data = try? Wire.encoder.encode(m) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)

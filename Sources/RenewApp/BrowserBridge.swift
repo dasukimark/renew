@@ -29,7 +29,7 @@ enum RedirectResult {
 }
 
 /// Reads and sets the active tab URL of scriptable browsers.
-/// Only ever called from the Monitor's single serial browser queue.
+/// Only ever called from the BrowserWatcher's single serial browser queue.
 enum BrowserBridge {
     private static var getScripts: [String: NSAppleScript] = [:]
 

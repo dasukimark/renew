@@ -10,7 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let localSession: SessionInfo?
     private let launchedInBackground: Bool
     let model: AppModel
-    private let monitor: Monitor
+    private let watcher: BrowserWatcher
     private var statusItem: StatusItemController!
     private var window: NSWindow?
     private var statusPoll: Timer?
@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.localSession = localSession
         self.launchedInBackground = launchedInBackground
         self.model = AppModel(isLocalTest: localSession != nil)
-        self.monitor = Monitor(localSession: localSession)
+        self.watcher = BrowserWatcher(localSession: localSession)
         super.init()
     }
 
@@ -30,15 +30,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { _ in allowQuit = true }
 
-        monitor.onStatus = { [weak self] status in self?.model.update(status: status) }
-        model.requestSync = { [weak self] in self?.monitor.sync() }
+        watcher.onStatus = { [weak self] status in self?.model.update(status: status) }
+        model.requestSync = { [weak self] in self?.watcher.sync() }
 
         // Only the installed copy (or a local test run) watches browsers. Any other
         // copy, such as a freshly built one, is just the installer/settings UI.
         let watches = model.isRunningInstalledCopy || localSession != nil
         if watches && localSession == nil && !takeOverFromOtherCopies() { return }
         if watches {
-            monitor.start()
+            watcher.start()
             statusItem = StatusItemController(model: model) { [weak self] in self?.showWindow() }
             statusItem.install()
         } else {
@@ -118,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        monitor.shutdown()
+        watcher.shutdown()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -145,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
-        monitor.sync()
+        watcher.sync()
     }
 
     func windowWillClose(_ notification: Notification) {

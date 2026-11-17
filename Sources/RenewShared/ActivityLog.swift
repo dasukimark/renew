@@ -4,19 +4,17 @@ import Foundation
 public struct ActivityQuery: Codable, Equatable, Sendable {
     /// Local day, `yyyy-MM-dd`.
     public var day: String
-    public var flaggedOnly: Bool
     /// Read only what was added after this point in the day's file (the
     /// `offset` of an earlier read), so refreshing doesn't re-read the day.
     public var fromOffset: Int?
 
-    public init(day: String, flaggedOnly: Bool = false, fromOffset: Int? = nil) {
+    public init(day: String, fromOffset: Int? = nil) {
         self.day = day
-        self.flaggedOnly = flaggedOnly
         self.fromOffset = fromOffset
     }
 
-    public init(date: Date, flaggedOnly: Bool = false, fromOffset: Int? = nil) {
-        self.init(day: ActivityLogStore.dayKey(date), flaggedOnly: flaggedOnly, fromOffset: fromOffset)
+    public init(date: Date, fromOffset: Int? = nil) {
+        self.init(day: ActivityLogStore.dayKey(date), fromOffset: fromOffset)
     }
 }
 
@@ -41,6 +39,9 @@ public final class ActivityLogStore {
     /// How long per-site daily totals (`DaySummary`) are kept.
     public static let summaryRetentionDays = 365
     public static let maxEventsPerRequest = 100
+    /// Shorter visits (redirects, pages flicked past) aren't written to the
+    /// log, unless they were blocked. They're still handed to the Monitor.
+    public static let minLoggedDuration: TimeInterval = 1
     /// The most events one read returns (the latest ones).
     public static let maxQueryResults = 3_000
     /// A user's log stops growing past these, so nobody can fill the disk.
@@ -136,6 +137,21 @@ public final class ActivityLogStore {
     /// and anything over the user's quota. Returns how many were stored.
     @discardableResult
     public func append(_ events: [ActivityEvent], uid: uid_t, now: Date = Date()) -> Int {
+        store(events, uid: uid, now: now).written.count
+    }
+
+    /// What `store` did with a batch.
+    public struct StoreResult: Sendable {
+        /// Every valid visit not seen before (sanitized), whether or not it
+        /// was written: the Monitor checks these, so a visit too short to log
+        /// or over the quota is still checked, and a re-sent one isn't again.
+        public var new: [ActivityEvent]
+        /// The ones written to the log.
+        public var written: [ActivityEvent]
+    }
+
+    /// Like `append`, but says which visits were new and which were written.
+    public func store(_ events: [ActivityEvent], uid: uid_t, now: Date = Date()) -> StoreResult {
         let tz = Self.systemTimeZone
         var seen = rememberedIDs(uid, now: now, timeZone: tz)
         var clean: [ActivityEvent] = []
@@ -154,7 +170,8 @@ public final class ActivityLogStore {
             seen.order.removeFirst(drop.count)
         }
         recent[uid] = seen
-        guard !clean.isEmpty else { return 0 }
+        let toWrite = clean.filter { $0.duration >= Self.minLoggedDuration || $0.blocked }
+        guard !toWrite.isEmpty else { return StoreResult(new: clean, written: []) }
 
         let fm = FileManager.default
         do {
@@ -162,19 +179,19 @@ public final class ActivityLogStore {
             try fm.createDirectory(atPath: userDir(uid), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         } catch {
             log("activity log: couldn't create \(userDir(uid)): \(error)")
-            return 0
+            return StoreResult(new: clean, written: [])
         }
         let encoder = Wire.encoder
-        var byDay: [String: (data: Data, count: Int)] = [:]
-        for e in clean {
+        var byDay: [String: (data: Data, events: [ActivityEvent])] = [:]
+        for e in toWrite {
             guard var line = try? encoder.encode(e) else { continue }
             line.append(0x0A)
             let key = Self.dayKey(e.start, timeZone: tz)
-            byDay[key, default: (Data(), 0)].data.append(line)
-            byDay[key, default: (Data(), 0)].count += 1
+            byDay[key, default: (Data(), [])].data.append(line)
+            byDay[key, default: (Data(), [])].events.append(e)
         }
         var total = userBytes(uid)
-        var stored = 0
+        var stored: [ActivityEvent] = []
         for (day, chunk) in byDay.sorted(by: { $0.key < $1.key }) {
             let path = file(uid, day: day)
             let daySize = Self.size(path)
@@ -193,13 +210,13 @@ public final class ActivityLogStore {
             defer { close(fd) }
             do {
                 try writeAll(fd, chunk.data)
-                stored += chunk.count
+                stored += chunk.events
                 total += chunk.data.count
             } catch {
                 log("activity log: write to \(path) failed: \(error)")
             }
         }
-        return stored
+        return StoreResult(new: clean, written: stored)
     }
 
     /// The ids stored for `uid` lately: remembered since renewd started,
@@ -245,7 +262,6 @@ public final class ActivityLogStore {
         // Only whole lines; a half-written one is read next time.
         let end = (data.lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex)
         var events = decode(data[data.startIndex..<end])
-        if query.flaggedOnly { events = events.filter(\.isFlagged) }
         events.sort { $0.start < $1.start }
         return ActivityPage(events: Array(events.suffix(Self.maxQueryResults)),
                             offset: start + (end - data.startIndex), isIncremental: incremental)
