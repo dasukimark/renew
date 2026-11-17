@@ -50,7 +50,8 @@ the window:
   it shows a countdown ring and the blocked sites, and lets you add time or block
   another site. There's no stop button.
 - **Blocklists**: edit the built-in lists (social, video, news, test) or make your own.
-- **Activity**: the log of pages you've visited, and what gets flagged (see
+- **Activity**: a dashboard of time per site with daily totals and averages, the
+  log of pages you've visited, and what gets flagged (see
   [Activity monitoring](#activity-monitoring)). Off until you turn it on.
 - **Setup**: service status, permissions, protections, the lock-down profile,
   accountability alerts, and uninstall (see below).
@@ -69,7 +70,7 @@ Rule syntax:
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
 `renew alerts set <url>`, `renew protections on all`, `renew monitor on`,
-`renew activity --flagged`, `renew uninstall`).
+`renew activity --flagged`, `renew stats --site youtube.com`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
 time on a clock that ignores date changes (since the Mac last started), and a
@@ -137,6 +138,17 @@ on, Renew records each page you look at, session or not:
   fill the disk.
   If renewd can't be reached, the app holds visits in
   `~/Library/Application Support/Renew/activity-pending.json` until it can.
+- **Time per site:** **Activity → Dashboard** (or `renew stats`) adds up the
+  time on each site for today, the last 7 or 30 days, or the last year: a daily
+  total, a daily average, and a bar chart per day. Subdomains count as their
+  main site (`m.youtube.com` and `music.youtube.com` are `youtube.com`), and
+  time a site was on screen twice at once (two windows) counts once. Click a
+  site to chart only that site, with its average. Averages count every day
+  from the first one with any activity in the range, including today. renewd
+  keeps these per-site daily totals in `.../activity/<uid>/summary/` for a
+  year, after the visits themselves are deleted. `renew stats --days 30`,
+  `renew stats --from 2026-11-01 --to 2026-11-15` and
+  `renew stats --site youtube.com` (that site per day) print the same numbers.
 - **Nothing leaves the Mac.** Sending reports to an accountability partner comes later.
 
 Each user on the Mac has their own monitoring settings and only changes their own.
@@ -193,7 +205,8 @@ renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/statu
   ├─ counts sessions down on the monotonic clock, so changing the date does nothing
   │    (time the Mac is switched off still counts)
   ├─ sends tamper alerts, if set up
-  ├─ keeps the activity log in /var/db/com.renew/activity/<uid>/ (30 days)
+  ├─ keeps the activity log in /var/db/com.renew/activity/<uid>/ (30 days),
+  │    and per-site daily totals in .../summary/ (1 year)
   ├─ [keep-running] re-loads the agent if it's unloaded, restarts it if silent
   ├─ [keep-running] restores its files from /var/db/com.renew/backup if deleted or altered
   └─ [keep-running] keeps the guard loaded

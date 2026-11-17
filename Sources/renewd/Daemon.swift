@@ -212,6 +212,12 @@ final class Daemon {
             }
             return Response(ok: true, status: makeStatus(now, r), activity: activityLog.read(q, uid: uid))
 
+        case .activityStats:
+            guard let q = req.statsQuery, let stats = activityLog.summaries(q, uid: uid) else {
+                return fail("Give a range of at most \(ActivityStatsQuery.maxDays) days, YYYY-MM-DD to YYYY-MM-DD.")
+            }
+            return Response(ok: true, status: makeStatus(now, r), stats: stats)
+
 
         case .cancelUninstall:
             if state.uninstall != nil {

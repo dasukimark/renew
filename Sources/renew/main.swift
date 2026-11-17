@@ -52,6 +52,7 @@ Usage:
   renew monitor words add|remove <WORD>...             flag page titles containing a word or phrase
   renew monitor words preset on|off                    flag page titles containing common explicit words
   renew activity [--date YYYY-MM-DD] [--flagged]       show the pages you visited (default: today)
+  renew stats [--days N] [--from D] [--to D] [--site S]  time per site: totals and daily averages (default: 7 days)
   sudo renew uninstall                                 uninstall Renew (only between sessions)
   renew uninstall                                      with the cooling-off on: request uninstall (unlocks after 24 hours)
   renew uninstall --cancel                             cancel an uninstall request
@@ -351,6 +352,96 @@ case "activity":
     }
     let count = events.filter(\.isFlagged).count
     print("\n\(events.count) visit(s)\(flagged ? "" : ", \(count) flagged") on \(day).")
+
+case "stats":
+    var days = 7
+    var daysGiven = false
+    var from: String?, to: String?, site: String?
+    var i = 0
+    func value(_ flag: String) -> String {
+        guard i + 1 < args.count else { die("\(flag) needs a value") }
+        i += 1
+        return args[i]
+    }
+    while i < args.count {
+        switch args[i] {
+        case "--days", "-n":
+            guard let n = Int(value("--days")), (1...ActivityStatsQuery.maxDays).contains(n) else {
+                die("--days takes 1 to \(ActivityStatsQuery.maxDays)")
+            }
+            days = n
+            daysGiven = true
+        case "--from": from = value("--from")
+        case "--to": to = value("--to")
+        case "--site", "-s":
+            let raw = value("--site")
+            site = SiteKey.site(forHost: NormalizedURL(raw)?.host ?? raw)
+        default: die("usage: renew stats [--days N [--to YYYY-MM-DD] | --from YYYY-MM-DD [--to YYYY-MM-DD]] [--site SITE]")
+        }
+        i += 1
+    }
+    if daysGiven && from != nil { die("use --days or --from, not both (--days N --to D is the N days ending on D)") }
+    let query: ActivityStatsQuery
+    if let from {
+        // From a day through `--to`, or through today.
+        query = ActivityStatsQuery(from: from, to: to ?? ActivityLogStore.dayKey(Date()), site: site)
+    } else if let to {
+        // The `--days` days (7 by default) ending on `--to`.
+        guard let end = ActivityLogStore.date(ofDay: to) else { die("not a date: \(to) (use YYYY-MM-DD)") }
+        query = ActivityStatsQuery(lastDays: days, endingAt: end, site: site)
+    } else {
+        query = ActivityStatsQuery(lastDays: days, site: site)
+    }
+    guard let keys = query.dayKeys() else {
+        die("not a valid range: \(query.from) to \(query.to) (YYYY-MM-DD, at most \(ActivityStatsQuery.maxDays) days)")
+    }
+    let response: Response
+    do {
+        response = try DaemonClient.send(Request(cmd: .activityStats, statsQuery: query), timeout: 20)
+    } catch {
+        die(String(describing: error))
+    }
+    guard response.ok else {
+        if (response.error ?? "").hasPrefix("bad request") { die("This Renew service predates `renew stats`. Reinstall Renew.") }
+        die(response.error ?? "renewd refused the request")
+    }
+    guard let summaries = response.stats else { die("This Renew service predates `renew stats`. Reinstall Renew.") }
+    if response.status?.monitoring?.enabled == false { print("(Activity monitoring is off. Turn it on with `renew monitor on`.)") }
+    let report = ActivityStatsReport(query: query, summaries: summaries)
+    let span = keys.count == 1 ? query.from : "\(query.from) to \(query.to)"
+    let hm = DurationText.hoursMinutes
+    func pad(_ s: String, _ n: Int) -> String { String(repeating: " ", count: max(0, n - s.count)) + s }
+    let name = { (s: String) in s == DaySummary.otherSite ? "(other sites)" : s }
+
+    if let site {
+        let series = report.days(for: site)
+        let total = series.reduce(0) { $0 + $1.seconds }
+        guard total > 0 else {
+            print("No time on \(site) recorded, \(span).")
+            exit(0)
+        }
+        print("\(site), \(span)\n")
+        for d in series where report.averageDays > 0 && d.day >= keys[keys.count - report.averageDays] {
+            print("  \(d.day)  \(pad(hm(d.seconds), 9))")
+        }
+        let avg = report.site(site)?.dailyAverage ?? 0
+        print("\nTotal \(hm(total)) · average \(hm(Int(avg.rounded()))) a day over \(report.averageDays) day(s)")
+        exit(0)
+    }
+    guard !report.isEmpty else {
+        print("No time on websites recorded, \(span).")
+        exit(0)
+    }
+    print("Time on websites, \(span): \(hm(report.totalSeconds))", terminator: "")
+    print(keys.count > 1 ? " · average \(hm(Int(report.dailyAverage.rounded()))) a day over \(report.averageDays) day(s)\n" : "\n")
+    let width = min(40, max(4, report.sites.prefix(25).map { name($0.site).count }.max() ?? 4))
+    print("  \("SITE".padding(toLength: width, withPad: " ", startingAt: 0))  \(pad("TOTAL", 10))  \(pad("AVG/DAY", 9))  \(pad("SHARE", 5))")
+    for s in report.sites.prefix(25) {
+        let label = String(name(s.site).prefix(width)).padding(toLength: width, withPad: " ", startingAt: 0)
+        let share = "\(Int((s.share * 100).rounded()))%"
+        print("  \(label)  \(pad(hm(s.totalSeconds), 10))  \(pad(hm(Int(s.dailyAverage.rounded())), 9))  \(pad(share, 5))")
+    }
+    if report.sites.count > 25 { print("  … and \(report.sites.count - 25) more") }
 
 case "lists":
     let sub = args.first ?? "show"

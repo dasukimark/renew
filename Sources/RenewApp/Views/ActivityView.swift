@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 import RenewShared
 
@@ -6,12 +7,13 @@ struct ActivityView: View {
     @ObservedObject var model: AppModel
 
     enum Tab: String, CaseIterable, Identifiable {
+        case dashboard = "Dashboard"
         case log = "Log"
         case settings = "Settings"
         var id: String { rawValue }
     }
 
-    @State private var tab: Tab = .log
+    @State private var tab: Tab = .dashboard
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,10 +22,11 @@ struct ActivityView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 260)
+            .frame(maxWidth: 340)
             .padding(.vertical, 10)
             Divider()
             switch tab {
+            case .dashboard: ActivityDashboardView(model: model, openSettings: { tab = .settings })
             case .log: ActivityLogView(model: model, openSettings: { tab = .settings })
             case .settings: ActivitySettingsView(model: model)
             }
@@ -55,26 +58,7 @@ private struct ActivityLogView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Not `Banner`: its fixed-size text breaks layout outside a
-            // scroll view, which blanked the whole window, sidebar included.
-            if !model.monitoring.enabled {
-                HStack(spacing: 10) {
-                    Image(systemName: "info.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(Color.accentColor)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Activity monitoring is off").font(.headline)
-                        Text("Turn it on to record the pages you visit (address, title and time on page) and flag explicit or watched sites. It stays on this Mac.")
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Settings…", action: openSettings)
-                }
-                .padding(12)
-                .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor.opacity(0.25)))
-            }
+            if !model.monitoring.enabled { MonitoringOffBanner(openSettings: openSettings) }
             header
             content
         }
@@ -175,6 +159,32 @@ private struct ActivityLogView: View {
                 loadError = model.isInstalled || model.isLocalTest ? e.message : "Install Renew to keep an activity log."
             }
         }
+    }
+}
+
+/// Shown above the log and dashboard while monitoring is off.
+// Not `Banner`: its fixed-size text breaks layout outside a scroll view,
+// which blanked the whole window, sidebar included.
+struct MonitoringOffBanner: View {
+    let openSettings: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "info.circle.fill")
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Activity monitoring is off").font(.headline)
+                Text("Turn it on to record the pages you visit (address, title and time on page) and flag explicit or watched sites. It stays on this Mac.")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Settings…", action: openSettings)
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor.opacity(0.25)))
     }
 }
 

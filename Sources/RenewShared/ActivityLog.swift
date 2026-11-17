@@ -38,6 +38,8 @@ public struct ActivityPage: Sendable {
 /// Not thread-safe: renewd calls it from its one state queue.
 public final class ActivityLogStore {
     public static let retentionDays = 30
+    /// How long per-site daily totals (`DaySummary`) are kept.
+    public static let summaryRetentionDays = 365
     public static let maxEventsPerRequest = 100
     /// The most events one read returns (the latest ones).
     public static let maxQueryResults = 3_000
@@ -98,11 +100,12 @@ public final class ActivityLogStore {
     }
 
     /// Whether a day's file is past the retention period at `now`.
-    public static func isExpired(day key: String, now: Date, timeZone: TimeZone = systemTimeZone) -> Bool {
+    public static func isExpired(day key: String, now: Date, timeZone: TimeZone = systemTimeZone,
+                                 retention: Int = retentionDays) -> Bool {
         guard let day = date(ofDay: key, timeZone: timeZone) else { return false }
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = timeZone
-        guard let cutoff = cal.date(byAdding: .day, value: -retentionDays, to: cal.startOfDay(for: now)) else { return false }
+        guard let cutoff = cal.date(byAdding: .day, value: -retention, to: cal.startOfDay(for: now)) else { return false }
         return day < cutoff
     }
 
@@ -110,13 +113,19 @@ public final class ActivityLogStore {
 
     private func file(_ uid: uid_t, day: String) -> String { userDir(uid) + "/\(day).jsonl" }
 
+    private func summaryDir(_ uid: uid_t) -> String { userDir(uid) + "/summary" }
+
+    private func summaryFile(_ uid: uid_t, day: String) -> String { summaryDir(uid) + "/\(day).json" }
+
     private static func size(_ path: String) -> Int {
         ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.intValue ?? 0
     }
 
     private func userBytes(_ uid: uid_t) -> Int {
         let dir = userDir(uid)
+        // Only the visit logs; the summaries are small and capped by design.
         return ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
+            .filter { $0.hasSuffix(".jsonl") }
             .reduce(0) { $0 + Self.size(dir + "/" + $1) }
     }
 
@@ -242,6 +251,95 @@ public final class ActivityLogStore {
                             offset: start + (end - data.startIndex), isIncremental: incremental)
     }
 
+    // MARK: summaries
+
+    /// A saved `DaySummary`, with the size of the log it was built from.
+    /// Logs only grow, so a different size means it's out of date.
+    private struct StoredSummary: Codable {
+        var logBytes: Int
+        var summary: DaySummary
+    }
+
+    /// The day being added to most recently, per user (normally today):
+    /// its totals so far and how far into its log they go, so a refresh only
+    /// reads what was added since.
+    private struct Running {
+        var day: String
+        var offset: Int
+        var builder: DaySummary.Builder
+    }
+    private var running: [uid_t: Running] = [:]
+
+    /// `uid`'s per-site totals for each day in the range that has any, oldest
+    /// first. The same sites are kept every day (at most
+    /// `ActivityStatsQuery.sitesPerDay`, plus the query's `site`); the rest
+    /// are added up under `DaySummary.otherSite`. Summaries are brought up to
+    /// date with the day's log first. nil if the range isn't valid.
+    public func summaries(_ query: ActivityStatsQuery, uid: uid_t) -> [DaySummary]? {
+        guard let keys = query.dayKeys() else { return nil }
+        let days = keys.compactMap { summary(uid, day: $0) }
+        return DaySummary.cappedTogether(days, limit: ActivityStatsQuery.sitesPerDay(forDays: keys.count), keep: query.site)
+    }
+
+    /// One day's totals: the saved summary if it's current, else brought up
+    /// to date from the day's log and saved. nil if there's neither.
+    func summary(_ uid: uid_t, day: String) -> DaySummary? {
+        let logPath = file(uid, day: day)
+        let path = summaryFile(uid, day: day)
+        let saved = FileManager.default.contents(atPath: path).flatMap { try? Wire.decoder.decode(StoredSummary.self, from: $0) }
+        guard let handle = FileHandle(forReadingAtPath: logPath) else { return saved?.summary }
+        defer { try? handle.close() }
+        let logBytes = Int((try? handle.seekToEnd()) ?? 0)
+        if let saved, saved.logBytes == logBytes { return saved.summary }
+
+        // Carry on from where the last update of this day stopped, if it's
+        // the one in memory; otherwise read the day from the start.
+        var r = running[uid]
+        if r == nil || r!.day != day || r!.offset > logBytes {
+            r = Running(day: day, offset: 0, builder: DaySummary.Builder())
+        }
+        var current = r!
+        try? handle.seek(toOffset: UInt64(current.offset))
+        let data = handle.readData(ofLength: logBytes - current.offset)
+        // Whole lines only, as in `read`; a half-written one is read next time.
+        let end = data.lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex
+        current.builder.add(decode(data[data.startIndex..<end]))
+        current.offset += end - data.startIndex
+        running[uid] = current
+
+        let built = current.builder.summary(day: day)
+        save(StoredSummary(logBytes: current.offset == logBytes ? logBytes : -1, summary: built), to: path, uid: uid)
+        return built
+    }
+
+    private func save(_ stored: StoredSummary, to path: String, uid: uid_t) {
+        guard let data = try? Wire.encoder.encode(stored) else { return }
+        do {
+            try FileManager.default.createDirectory(atPath: summaryDir(uid), withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch {
+            log("activity log: couldn't create \(summaryDir(uid)): \(error)")
+            return
+        }
+        // Written aside and renamed into place, so a reader never sees half a file.
+        let tmp = path + ".tmp"
+        unlink(tmp)
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else {
+            log("activity log: couldn't open \(tmp): \(String(cString: strerror(errno)))")
+            return
+        }
+        do {
+            try writeAll(fd, data)
+            close(fd)
+            if rename(tmp, path) != 0 { unlink(tmp) }
+        } catch {
+            close(fd)
+            unlink(tmp)
+            log("activity log: write to \(tmp) failed: \(error)")
+        }
+    }
+
     // MARK: retention
 
     /// Deletes day files past the retention period. Returns how many went.
@@ -251,12 +349,23 @@ public final class ActivityLogStore {
         guard let users = try? fm.contentsOfDirectory(atPath: directory) else { return 0 }
         let tz = Self.systemTimeZone
         var removed = 0
-        for user in users where uid_t(user) != nil {
+        for user in users {
+            guard let uid = uid_t(user) else { continue }
             let dir = directory + "/" + user
             for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".jsonl") {
                 let day = String(name.dropLast(".jsonl".count))
                 guard Self.isExpired(day: day, now: now, timeZone: tz) else { continue }
+                // Keep the day's totals after its visits go.
+                if !Self.isExpired(day: day, now: now, timeZone: tz, retention: Self.summaryRetentionDays) {
+                    _ = summary(uid, day: day)
+                }
                 if (try? fm.removeItem(atPath: dir + "/" + name)) != nil { removed += 1 }
+            }
+            let sdir = summaryDir(uid)
+            for name in (try? fm.contentsOfDirectory(atPath: sdir)) ?? [] where name.hasSuffix(".json") {
+                let day = String(name.dropLast(".json".count))
+                guard Self.isExpired(day: day, now: now, timeZone: tz, retention: Self.summaryRetentionDays) else { continue }
+                try? fm.removeItem(atPath: sdir + "/" + name)
             }
         }
         return removed

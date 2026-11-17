@@ -59,4 +59,13 @@ public enum DurationText {
         if m > 0 { return String(format: "%dm %02ds", m, sec) }
         return "\(sec)s"
     }
+
+    /// Time spent, to the minute: "45s", "12m", "3h 05m", "150h 00m".
+    /// Hours aren't rolled into days, so totals stay easy to compare.
+    public static func hoursMinutes(_ seconds: Int) -> String {
+        let s = max(0, seconds)
+        if s < 60 { return "\(s)s" }
+        let h = s / 3_600, m = (s % 3_600) / 60
+        return h > 0 ? String(format: "%dh %02dm", h, m) : "\(m)m"
+    }
 }
