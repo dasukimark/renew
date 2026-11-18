@@ -45,6 +45,14 @@ public enum Paths {
     /// The built-in email report server's URL and token (see `ReportServer`),
     /// copied here by the installer.
     public static var reportServerFile: String { dataDir + "/report-server.json" }
+    /// What the accountability partner was told (see `PartnerLog`).
+    public static var partnerLogFile: String { dataDir + "/partner-log.json" }
+    /// renewd's internal heartbeat (see `AliveRecord`).
+    public static var aliveFile: String { dataDir + "/alive.json" }
+    /// Downtime found by the internal heartbeat, waiting to be sent (see `DowntimeGap`).
+    public static var downtimeGapsFile: String { dataDir + "/downtime-gaps.json" }
+    /// Previous report servers still to be told to stop expecting check-ins.
+    public static var pendingRemovalsFile: String { dataDir + "/pending-removals.json" }
     /// The bundled explicit-site list, installed next to renewd so it can flag
     /// visits to the explicit preset.
     public static let explicitListFile = installDir + "/explicit-domains.txt"

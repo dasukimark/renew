@@ -491,3 +491,11 @@ struct DayPickerBar: View {
         day = d
     }
 }
+
+/// A colored dot and a word, for "On", "Running", "Not allowed"…
+func statusDot(_ text: String, _ color: Color) -> some View {
+    HStack(spacing: 5) {
+        Circle().fill(color).frame(width: 7, height: 7)
+        Text(text).foregroundStyle(.secondary)
+    }
+}

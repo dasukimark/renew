@@ -315,43 +315,9 @@ public struct ReportOutbox {
         withLock { _ in [] }
     }
 
-    /// Reads, changes and writes the file under an exclusive lock (on a
-    /// separate lock file, since writes replace the file). A file that can't
-    /// be read is kept aside, not silently emptied.
     @discardableResult
     private func withLock(_ change: ([OutboxEntry]) -> [OutboxEntry]) -> [OutboxEntry] {
-        let fm = FileManager.default
-        let dir = (path as NSString).deletingLastPathComponent
-        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let lock = open(path + ".lock", O_CREAT | O_RDWR, 0o600)
-        guard lock >= 0 else {
-            log("report outbox: can't open \(path).lock: \(String(cString: strerror(errno)))")
-            return change([])
-        }
-        defer { close(lock) }
-        flock(lock, LOCK_EX)
-        defer { flock(lock, LOCK_UN) }
-
-        var current: [OutboxEntry] = []
-        if let data = fm.contents(atPath: path), !data.isEmpty {
-            if let entries = try? Report.decoder.decode([OutboxEntry].self, from: data) {
-                current = entries
-            } else {
-                let aside = path + ".unreadable-\(Int(Date().timeIntervalSince1970))"
-                try? fm.moveItem(atPath: path, toPath: aside)
-                log("report outbox: couldn't read \(path); kept it as \(aside) and started a new one")
-            }
-        }
-        let updated = change(current)
-        guard updated != current else { return updated }
-        guard let out = try? Report.encoder.encode(updated) else { return current }
-        let tmp = path + ".tmp"
-        guard fm.createFile(atPath: tmp, contents: out, attributes: [.posixPermissions: 0o600]),
-              rename(tmp, path) == 0 else {
-            log("report outbox: couldn't save \(path): \(String(cString: strerror(errno)))")
-            return current
-        }
-        return updated
+        LockedJSONFile(path: path, label: "report outbox", empty: []).update(change)
     }
 }
 
@@ -396,21 +362,34 @@ public enum ReportClient {
         return try? Report.encoder.encode(report)
     }
 
-    public static func post(_ report: Report, to target: ReportTarget, done: @escaping @Sendable (Outcome) -> Void) {
-        guard let url = URL(string: target.server.url), let body = body(report, to: target) else { return done(.rejected(0)) }
+    /// POSTs `body` (JSON) to `server` with its token. `done` gets the
+    /// outcome and, when delivered, the response body; `error` is set when
+    /// the request didn't get an HTTP response at all.
+    public static func post(json body: Data, to server: ReportServer, timeout: TimeInterval? = nil,
+                            done: @escaping @Sendable (_ outcome: Outcome, _ code: Int, _ response: Data?, _ error: Error?) -> Void) {
+        guard let url = URL(string: server.url) else { return done(.rejected(0), 0, nil, nil) }
         var r = URLRequest(url: url)
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        r.setValue("Bearer \(target.server.token)", forHTTPHeaderField: "Authorization")
+        r.setValue("Bearer \(server.token)", forHTTPHeaderField: "Authorization")
+        if let timeout { r.timeoutInterval = timeout }
         r.httpBody = body
+        session.dataTask(with: r) { data, response, error in
+            if let error { return done(.retry, 0, nil, error) }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let result = outcome(status: code)
+            done(result, code, result == .delivered ? data : nil, nil)
+        }.resume()
+    }
+
+    public static func post(_ report: Report, to target: ReportTarget, done: @escaping @Sendable (Outcome) -> Void) {
+        guard let body = body(report, to: target) else { return done(.rejected(0)) }
         let kind = report.kind.rawValue, id = report.id
-        session.dataTask(with: r) { _, response, error in
+        post(json: body, to: target.server) { result, code, _, error in
             if let error {
                 log("reports: sending '\(kind)' report failed: \(error.localizedDescription)")
                 return done(.retry)
             }
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let result = outcome(status: code)
             switch result {
             case .delivered: log("reports: delivered '\(kind)' report \(id)")
             case .refused(401): log("reports: the report server refused the token (HTTP 401)")
@@ -419,7 +398,7 @@ public enum ReportClient {
             case .retry: log("reports: sending '\(kind)' report failed: HTTP \(code)")
             }
             done(result)
-        }.resume()
+        }
     }
 
     /// Sends `reports` one at a time, waiting for each, and stops at the

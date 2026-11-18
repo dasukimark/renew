@@ -28,7 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let icon = NSImage(named: "AppIcon") { NSApp.applicationIconImage = icon }
 
         NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { _ in allowQuit = true }
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { [weak self] _ in
+                allowQuit = true
+                // So renewd's exit counts as a shutdown, not the service being
+                // stopped, when it tells the report server.
+                if self?.model.isLocalTest == false {
+                    DispatchQueue.global().async { _ = try? DaemonClient.send(Request(cmd: .poweringOff), timeout: 3) }
+                }
+            }
 
         watcher.onStatus = { [weak self] status in self?.model.update(status: status) }
         model.requestSync = { [weak self] in self?.watcher.sync() }

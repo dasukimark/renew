@@ -132,6 +132,14 @@ enum Uninstall {
             let sent = ReportClient.sendAndWait(reports, to: target)
             if sent < reports.count { print("  couldn't send \(reports.count - sent) report(s) to \(target.partnerEmail)") }
         }
+        // So the report server stops expecting check-ins and doesn't email
+        // that Renew went quiet.
+        if let install = state.installID {
+            let beat = Heartbeat.make(.removed, install: install, details: nil, lastAccepted: nil)
+            if !HeartbeatClient.sendAndWait(beat, to: server, timeout: 15) {
+                print("  couldn't tell the report server to stop expecting check-ins; your partner may get a \"stopped checking in\" email")
+            }
+        }
     }
 
     private static func fileRequest(reachable: Bool) -> Never {

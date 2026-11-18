@@ -5,6 +5,11 @@ accountability partner. renewd POSTs each report here; the Lambda emails it
 from a Gmail account you create just for this. Your partner doesn't need an
 account, they only get emails.
 
+It also keeps track of renewd's **check-ins** (about every 4 minutes while
+reports are on, plus one before the Mac sleeps or renewd exits) in a small
+DynamoDB table, and every minute emails the partner about any Mac that went
+quiet without warning. See [Check-ins](#check-ins).
+
 Your partner's address is set in the Renew app and sent with each report. It
 can only be changed between block sessions, and the previous partner gets a
 last email when it is. The token is what stops strangers using the server; to
@@ -39,7 +44,13 @@ You need an AWS account, the [AWS CLI](https://aws.amazon.com/cli/) and the
    sam build && sam deploy --guided
    ```
 
-   Answer `GmailAddress`. Leave `AllowedRecipients` empty, or list your
+   Answer `GmailAddress`. `SilenceMinutes` (10), `StoppingMinutes` (3) and
+   `QuietCapHours` (168) set when check-in emails go out (see
+   [Check-ins](#check-ins)); the defaults are fine.
+
+   Redeploying keeps the values the stack already has, not the template's
+   defaults. To change them later, pass them explicitly:
+   `sam deploy --parameter-overrides GmailAddress=<address> SilenceMinutes=10 StoppingMinutes=3 QuietCapHours=168`. Leave `AllowedRecipients` empty, or list your
    partner's address to make the server refuse anyone else. `TimeZone` is only
    a fallback: reports carry the Mac's time zone. Say yes when SAM asks whether it's OK that the
    function URL has no authentication: the Lambda checks the token itself.
@@ -50,9 +61,41 @@ You need an AWS account, the [AWS CLI](https://aws.amazon.com/cli/) and the
    URL and token to `~/.config/renew/report-server.json` (readable only by
    you). Reinstall Renew (`sudo scripts/install.sh`); the installer copies it
    into renewd's root-only folder.
-6. **Turn reports on:** in **Setup → Email reports**, enter your partner's
+6. **Turn reports on:** in **Accountability → Partner**, enter your partner's
    email and click **Turn on reports** (or `renew reports set <partner-email>`). Your partner gets a "reports are on" email. **Send
    test** sends another.
+
+## Check-ins
+
+Each check-in says whether the Mac is `awake`, going to sleep (`sleeping`),
+shutting down (`shutdown`), or that renewd stopped without a shutdown
+(`stopping`), along with when the Mac booted. It names the partner, Mac and
+user only when renewd starts or those change; the table keeps them. A
+check-in without them from a Mac the server doesn't know gets
+`{"needDetails": true}`, and renewd sends them next time. `removed` (reports
+turned off or moved, or `renew uninstall`) deletes the Mac's entry. The table
+(`renew-heartbeats`) is created by `sam deploy`; no new secrets are needed.
+
+Every minute the Lambda emails the partner about a Mac that:
+
+- was `awake` and hasn't checked in for `SilenceMinutes` (10);
+- was `stopping` and hasn't checked in for `StoppingMinutes` (3);
+- was `sleeping` or `shutdown` and hasn't checked in for `QuietCapHours` (168, 7 days).
+
+When a check-in arrives it may also send one email:
+
+- "checking in again" after one of those, saying whether the Mac restarted,
+  listing downtime, or calling it a false alarm when renewd says it was
+  running the whole time (`coveredSince`);
+- "Renew was stopped" when the Mac said it was shutting down but comes back
+  without having restarted;
+- "Renew wasn't running" for downtime renewd's internal heartbeat found
+  (`gaps`: time the Mac was awake while renewd wasn't running).
+
+Each silence and each gap is emailed once; email ids depend on what they're
+about, so a retry is never a second email. The reply to a check-in lists what
+the partner was emailed, which the Renew app shows under **Accountability →
+Sent to your partner**.
 
 ## Check it
 
@@ -61,6 +104,13 @@ URL=<ReportURL>
 curl -i -X POST "$URL" -H "Authorization: Bearer wrong" -d '{}'          # 401
 curl -i -X POST "$URL" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"id":"00000000-0000-0000-0000-000000000001","kind":"test","mac":"curl","user":"","sentAt":"2026-01-01T00:00:00Z","flags":[],"changes":["Test from curl"],"to":"you@example.com"}'   # 200, email arrives
+```
+
+A check-in (stored, no email; delete it again with `"state":"removed"`):
+
+```sh
+curl -i -X POST "$URL" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"heartbeat","id":"00000000-0000-0000-0000-000000000002","install":"00000000-0000-0000-0000-0000000000aa","to":"you@example.com","mac":"curl","user":"","timeZone":"UTC","sentAt":"2026-01-01T00:00:00Z","state":"awake","boot":"2026-01-01T00:00:00Z","interval":240}'   # 200 {"notices": []}
 ```
 
 Logs are in CloudWatch under `/aws/lambda/<function name>` (kept 30 days).
@@ -74,7 +124,9 @@ Logs are in CloudWatch under `/aws/lambda/<function name>` (kept 30 days).
 - **Limits.** Gmail sends about 500 emails a day; Renew groups flags into one
   report a minute at most, so you won't come near it. The Lambda runs at most
   two at once.
-- **Cost.** Well inside the AWS free tier at this volume. Gmail is free.
+- **Cost.** Well inside the AWS free tier at this volume (a check-in every 4
+  minutes and a check every minute is about 55,000 requests a month, against
+  a million free; the table holds one small item per Mac). Gmail is free.
 - **A 403 from the URL** (rather than 401) means AWS isn't letting the public
   call the function URL; check the function's resource-based policy allows
   `lambda:InvokeFunctionUrl` (and, on newer accounts, `lambda:InvokeFunction`)

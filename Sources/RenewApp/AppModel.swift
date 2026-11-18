@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
         case lists = "Blocklists"
         case activity = "Activity"
         case monitor = "Monitor"
+        case accountability = "Accountability"
         case setup = "Setup"
         var id: String { rawValue }
         var symbol: String {
@@ -19,6 +20,7 @@ final class AppModel: ObservableObject {
             case .lists: return "list.bullet.rectangle"
             case .activity: return "chart.bar.xaxis"
             case .monitor: return "flag"
+            case .accountability: return "person.2"
             case .setup: return "gearshape"
             }
         }
@@ -482,6 +484,37 @@ final class AppModel: ObservableObject {
 
     func testReport() {
         send(Request(cmd: .testReport))
+    }
+
+    /// What your accountability partner was told, newest first.
+    @Published private(set) var partnerHistory: [PartnerLogEntry] = []
+    @Published private(set) var partnerHistoryError: String?
+    @Published private(set) var loadingPartnerHistory = false
+
+    func loadPartnerHistory() {
+        guard !isLocalTest else {
+            partnerHistoryError = "This is a local test run without the Renew service, so there's no history."
+            return
+        }
+        loadingPartnerHistory = true
+        queue.async { [weak self] in
+            let result = Result { try DaemonClient.send(Request(cmd: .partnerHistory), timeout: 10) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.loadingPartnerHistory = false
+                switch result {
+                case .success(let r) where r.ok && r.partnerHistory != nil:
+                    self.partnerHistory = r.partnerHistory ?? []
+                    self.partnerHistoryError = nil
+                case .success(let r) where r.ok || (r.error ?? "").hasPrefix("bad request"):
+                    self.partnerHistoryError = "The running background service predates this history. Update Renew to see it."
+                case .success(let r):
+                    self.partnerHistoryError = r.error ?? "The Renew service refused the request."
+                case .failure(let e):
+                    self.partnerHistoryError = "Couldn't reach the Renew service: \(e)"
+                }
+            }
+        }
     }
 
     func requestUninstall() {

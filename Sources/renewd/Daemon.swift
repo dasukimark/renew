@@ -54,6 +54,31 @@ final class Daemon {
         return engine
     }()
     private lazy var reporter = Reporter(queue: queue, dev: dev) { [unowned self] in self.target(self.state.reports) }
+    private lazy var heartbeater: Heartbeater = {
+        let h = Heartbeater(queue: queue, dev: dev,
+                            destination: { [unowned self] in self.target(self.state.reports) },
+                            installID: { [unowned self] in self.ensureInstallID() },
+                            userName: { consoleUser()?.name ?? "" })
+        h.coveredSince = { [unowned self] in self.alive.coveredSince }
+        h.onNotices = { [unowned self] notices in
+            self.reporter.partnerLog.append(notices.map {
+                PartnerLogEntry(date: $0.at, channel: .checkin, status: .sent, title: $0.title, lines: $0.lines)
+            })
+        }
+        return h
+    }()
+
+    /// The internal heartbeat (see `AliveRecord`).
+    private lazy var alive = AliveTracker(gaps: heartbeater.gaps) { [unowned self] in self.state.reports != nil }
+
+    /// This install's id, made and saved the first time it's needed.
+    private func ensureInstallID() -> UUID {
+        if let id = state.installID { return id }
+        let id = UUID()
+        state.installID = id
+        StateStore.save(state)
+        return id
+    }
     /// The built-in report server, read again only when its file changes
     /// (it's replaced at install).
     private var builtInServerCache: (stamp: [Int], server: ReportServer?)?
@@ -113,10 +138,13 @@ final class Daemon {
             // renewd after changing the date doesn't launder the change.
             if state.wallAnchor?.trustedWall(at: r) == nil { state.wallAnchor = WallAnchor(at: r) }
             lastClockDivergence = clockDivergence(r)
+            _ = ensureInstallID()
             StateStore.save(state)
             lastCheckpointSave = r.mono
             log("renewd started\(dev ? " (dev mode)" : ""); session: \(describe(state.activeSession(at: r)))")
             syncGuard()
+            alive.start()
+            heartbeater.startPowerNotifications()
             if rebooted, let s = state.activeSession(at: r) {
                 alert("The Mac restarted during a block session. Renew is running again (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left).",
                       kind: "rebooted", every: 300)
@@ -130,8 +158,8 @@ final class Daemon {
         term.resume()
         termSource = term
 
-        server = SocketServer(path: Paths.socketPath) { [unowned self] request, uid in
-            self.queue.sync { self.handle(request, from: uid) }
+        server = SocketServer(path: Paths.socketPath) { [unowned self] request, uid, token in
+            self.queue.sync { self.handle(request, from: uid, token: token) }
         }
         do {
             try server.start()
@@ -149,7 +177,7 @@ final class Daemon {
 
     // MARK: requests
 
-    private func handle(_ req: Request, from uid: uid_t) -> Response {
+    private func handle(_ req: Request, from uid: uid_t, token: Data? = nil) -> Response {
         let r = ClockReading.now()
         let now = r.wall
         requestUID = uid
@@ -292,6 +320,22 @@ final class Daemon {
             }
             return Response(ok: true, status: makeStatus(now, r), flags: monitorLog.read(q, uid: uid))
 
+
+        case .poweringOff:
+            // Only the Renew app may say this, or a script could make
+            // stopping renewd look like a shutdown.
+            guard dev || PeerCheck.isRenewApp(token, appPath: Paths.agentApp) else {
+                log("ignored a 'powering off' notice from uid \(uid): not from the Renew app")
+                return fail("Only the Renew app can send this.")
+            }
+            heartbeater.notePoweringOff()
+
+        case .partnerHistory:
+            // Each user sees only emails about themselves (and the Mac-wide
+            // alerts and check-ins), like their own Monitor flags.
+            let history = PartnerLogEntry.history(log: reporter.partnerLog.load(), waiting: reporter.waiting(),
+                                                  viewer: uid == 0 ? nil : Reporter.userName(uid))
+            return Response(ok: true, status: makeStatus(now, r), partnerHistory: history)
 
         case .cancelUninstall:
             if state.uninstall != nil {
@@ -503,6 +547,7 @@ final class Daemon {
         if old != nil, state.activeSession(at: r) != nil {
             return "Email reports can't be changed or turned off during a block session."
         }
+        let oldTarget = target(old)
         if let old {
             reporter.handOff(from: target(old), farewell: new == nil
                              ? "Email reports from Renew were turned off. This is the last report you'll get from this Mac."
@@ -511,12 +556,18 @@ final class Daemon {
                                  : "Email reports from Renew were moved to a different report server. This is the last report you'll get through this one.",
                              uid: uid)
         }
+        // Downtime from before reports were on isn't the new partner's business.
+        if old == nil { heartbeater.gaps.removeAll() }
         state.reports = new
         StateStore.save(state)
+        if old == nil, new != nil { alive.resume() }
         log("email reports \(new == nil ? "turned off" : "set to \(new!.partnerEmail) via \(new!.url ?? "the built-in server")") by uid \(uid)")
         if new != nil {
-            reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less."], uid: uid)
+            reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Renew also checks in about every 4 minutes; if it goes quiet while the Mac is awake, or isn't running for a while, you'll be emailed."], uid: uid)
         }
+        // Tell the old destination to stop expecting check-ins, then check
+        // in with the new one.
+        heartbeater.handOff(from: old != nil ? oldTarget : nil)
         return nil
     }
 
@@ -554,7 +605,11 @@ final class Daemon {
             log("(dev) alert: \(message)")
             return
         }
-        Alerts.send(to: url ?? state.alertURL, message, kind: kind, minInterval: every, wait: wait)
+        let partnerLog = reporter.partnerLog
+        let date = Date()
+        Alerts.send(to: url ?? state.alertURL, message, kind: kind, minInterval: every, wait: wait) { ok in
+            partnerLog.append(PartnerLogEntry(date: date, channel: .alert, status: ok ? .sent : .failed, title: message))
+        }
     }
 
     static func dateText(_ d: Date) -> String {
@@ -571,6 +626,9 @@ final class Daemon {
         state.checkpoint(at: r)
         StateStore.save(state)
         reporter.flushBatches()
+        let exitState = heartbeater.exitState()
+        alive.exit(exitState == .shutdown ? .shutdown : .stopping)
+        heartbeater.sendExit(exitState)
         if let s = state.activeSession(at: r) {
             log("SIGTERM during a session")
             alert("Renew's background service was stopped during a block session (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
@@ -628,6 +686,8 @@ final class Daemon {
         }
         runSchedules(r)
         reporter.tick()
+        alive.tick()
+        heartbeater.tick()
 
         checkpoint(r)
 
@@ -713,7 +773,7 @@ final class Daemon {
     /// file disagrees (edited or deleted), renewd's copy is written back.
     private func adoptDiskState(_ r: ClockReading) {
         guard let file = StateStore.load() else { return }
-        if file.alertURL != state.alertURL || file.reports != state.reports || file.uninstall?.requestedAt != state.uninstall?.requestedAt
+        if file.alertURL != state.alertURL || file.reports != state.reports || file.installID != state.installID || file.uninstall?.requestedAt != state.uninstall?.requestedAt
             || file.schedules != state.schedules
             // The anchor's date may not survive the JSON round trip bit for bit.
             || file.wallAnchor?.bootID != state.wallAnchor?.bootID || file.wallAnchor?.mono != state.wallAnchor?.mono

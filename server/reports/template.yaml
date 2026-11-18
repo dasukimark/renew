@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Renew report server. Emails flag reports from renewd to an accountability partner through a Gmail account.
+Description: Renew report server. Emails flag reports from renewd to an accountability partner through a Gmail account, and emails them when a Mac stops checking in.
 
 Parameters:
   GmailAddress:
@@ -18,6 +18,18 @@ Parameters:
     Type: String
     Default: /renew/report-token
     Description: SSM SecureString parameter holding the token renewd sends.
+  SilenceMinutes:
+    Type: Number
+    Default: 10
+    Description: Email the partner when a Mac that's awake hasn't checked in for this many minutes.
+  StoppingMinutes:
+    Type: Number
+    Default: 3
+    Description: Email the partner when Renew said its service stopped (without a shutdown) and it hasn't checked in for this many minutes.
+  QuietCapHours:
+    Type: Number
+    Default: 168
+    Description: Email the partner when a Mac that said it was sleeping or shutting down hasn't checked in for this many hours.
   AppPasswordParameter:
     Type: String
     Default: /renew/gmail-app-password
@@ -42,7 +54,19 @@ Resources:
           TIME_ZONE: !Ref TimeZone
           TOKEN_PARAM: !Ref TokenParameter
           APP_PASSWORD_PARAM: !Ref AppPasswordParameter
+          HEARTBEAT_TABLE: !Ref HeartbeatTable
+          SILENCE_MINUTES: !Ref SilenceMinutes
+          QUIET_CAP_HOURS: !Ref QuietCapHours
+          STOPPING_MINUTES: !Ref StoppingMinutes
+      Events:
+        CheckIns:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Description: Emails partners about Macs that stopped checking in.
       Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HeartbeatTable
         - Statement:
             - Effect: Allow
               Action: ssm:GetParameter
@@ -51,6 +75,18 @@ Resources:
                 - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AppPasswordParameter}"
       FunctionUrlConfig:
         AuthType: NONE
+
+  HeartbeatTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: renew-heartbeats
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: install
+          AttributeType: S
+      KeySchema:
+        - AttributeName: install
+          KeyType: HASH
 
   ReportFunctionLogs:
     Type: AWS::Logs::LogGroup
