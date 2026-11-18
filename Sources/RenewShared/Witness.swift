@@ -3,10 +3,9 @@ import Foundation
 /// The guard's second witness to renewd's internal heartbeat. While email
 /// reports are on and the guard runs ("keep Renew running"), it reads
 /// renewd's `AliveRecord` every few seconds and keeps its own copy of the
-/// latest one it saw. When renewd's record moves on after standing still
-/// for longer than `AliveRecord.tolerance` of awake time, the guard reports
-/// the gap itself, so editing renewd's record isn't enough to hide one: the
-/// guard (and its file) would have to be stopped and edited too.
+/// latest one it saw. When renewd's record stands still for longer than
+/// `AliveRecord.tolerance` of awake time, the guard can report the stall
+/// while renewd is still unresponsive.
 ///
 /// Gaps get the same id whoever finds them (see `DowntimeGap.id`), so a gap
 /// renewd also found is emailed once.
@@ -17,12 +16,15 @@ public struct WitnessRecord: Codable, Equatable, Sendable {
     public var wall: Date
     /// renewd's latest record the guard has seen this boot.
     public var seen: AliveRecord?
+    /// Whether the guard has already reported a stall after `seen`.
+    public var reportedStall: Bool?
 
-    public init(bootID: String, awake: TimeInterval, wall: Date, seen: AliveRecord?) {
+    public init(bootID: String, awake: TimeInterval, wall: Date, seen: AliveRecord?, reportedStall: Bool? = nil) {
         self.bootID = bootID
         self.awake = awake
         self.wall = wall
         self.seen = seen
+        self.reportedStall = reportedStall
     }
 
     /// One look at renewd's record (`daemon`). Returns the guard's new
@@ -33,9 +35,8 @@ public struct WitnessRecord: Codable, Equatable, Sendable {
     ///   (stopped, held up, or the witness file is from long ago): it starts
     ///   watching afresh, since it can't say what happened meanwhile (reports
     ///   may have been off and on).
-    /// - renewd's record moved on, more than `tolerance` of awake time after
-    ///   the one seen before: renewd wasn't running (or was frozen) in
-    ///   between.
+    /// - renewd's record stood still or advanced after more than `tolerance`
+    ///   of awake time: report the observation once for that record.
     /// - A new boot: if the guard had watched renewd's record stand still
     ///   for longer than `tolerance` before the Mac went down, that's a gap,
     ///   unless renewd's record said the Mac was shutting down.
@@ -57,7 +58,7 @@ public struct WitnessRecord: Codable, Equatable, Sendable {
         }
         if p.bootID != bootID {
             let watched = p.awake - seen.awake
-            let gap = watched > tolerance && seen.exit != .shutdown
+            let gap = watched > tolerance && seen.exit != .shutdown && p.reportedStall != true
                 ? DowntimeGap(id: DowntimeGap.id(after: seen.bootID, awake: seen.awake), from: seen.wall, to: p.wall,
                               awakeSeconds: Int(watched.rounded()), restarted: true)
                 : nil
@@ -68,11 +69,19 @@ public struct WitnessRecord: Codable, Equatable, Sendable {
             return (WitnessRecord(bootID: bootID, awake: awake, wall: wall, seen: fresh), nil)
         }
         guard let d = current, d.awake > seen.awake else {
-            // Standing still (or gone): keep the last one seen.
-            return (WitnessRecord(bootID: bootID, awake: awake, wall: wall, seen: seen), nil)
+            var record = WitnessRecord(bootID: bootID, awake: awake, wall: wall, seen: seen, reportedStall: p.reportedStall)
+            let missing = awake - seen.awake
+            guard missing > tolerance, seen.exit != .shutdown, p.reportedStall != true else {
+                return (record, nil)
+            }
+            record.reportedStall = true
+            let id = DowntimeGap.id(after: seen.bootID, awake: seen.awake)
+            return (record, DowntimeGap(id: id, from: seen.wall, to: wall, awakeSeconds: Int(missing.rounded()),
+                                       restarted: false, kind: .heartbeatStalled))
         }
         let missing = d.awake - seen.awake
-        let gap = missing > tolerance ? DowntimeGap(after: seen, to: d.wall, awakeSeconds: missing, restarted: false) : nil
+        let gap = missing > tolerance && p.reportedStall != true
+            ? DowntimeGap(after: seen, to: d.wall, awakeSeconds: missing, restarted: false) : nil
         return (WitnessRecord(bootID: bootID, awake: awake, wall: wall, seen: d), gap)
     }
 }

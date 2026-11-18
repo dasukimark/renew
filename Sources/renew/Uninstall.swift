@@ -100,37 +100,51 @@ enum Uninstall {
         exit(0)
     }
 
-    /// With email reports on, sends what's still waiting in the outbox and a
-    /// last report saying Renew was removed, before its files are deleted.
-    /// Runs after renewd has stopped, so nothing else touches the outbox.
+    /// Sends the outbox, tells monitored partners about uninstall and asks
+    /// each report server to end its enrollment before local files are deleted.
     private static func sendFinalReports() {
-        guard let state = StateStore.load(), let dest = state.reports else { return }
-        guard let server = dest.server(builtIn: ReportServer.builtIn()) else {
-            print("  (no report server found; your accountability partners weren't emailed)")
-            return
+        guard let state = StateStore.load() else { return }
+        let current = state.reports.flatMap { dest in
+            dest.server(builtIn: ReportServer.builtIn()).map { ReportTarget(partnerEmails: dest.partnerEmails, server: $0) }
         }
-        let current = ReportTarget(partnerEmails: dest.partnerEmails, server: server)
+        var targets = (state.pendingPartnerRemovals ?? []) + (state.retainedMonitoring ?? [])
+        if let current { targets.append(current) }
+        var byURL: [String: ReportTarget] = [:]
+        for target in targets {
+            let former = byURL[target.server.url]?.partnerEmails ?? []
+            byURL[target.server.url] = ReportTarget(partnerEmails: Array(Set(former + target.partnerEmails)).sorted(),
+                                                    server: target.server)
+        }
+        let monitored = byURL.values.sorted { $0.server.url < $1.server.url }
         let console = shell("/usr/bin/stat", ["-f", "%Su", "/dev/console"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
         let user = ProcessInfo.processInfo.environment["SUDO_USER"] ?? (console.isEmpty || console == "root" ? NSUserName() : console)
         var groups: [(ReportTarget, [Report])] = []
-        for entry in ReportOutbox().load() {
-            let target = entry.target ?? current
-            if let i = groups.firstIndex(where: { $0.0 == target }) { groups[i].1.append(entry.report) } else { groups.append((target, [entry.report])) }
+        func append(_ report: Report, to target: ReportTarget) {
+            if let i = groups.firstIndex(where: { $0.0 == target }) {
+                groups[i].1.append(report)
+            } else {
+                groups.append((target, [report]))
+            }
         }
-        let last = Report(mac: Report.macName, user: user, kind: .change, sentAt: Date(),
-                          changes: ["Renew was uninstalled from this Mac. It no longer blocks or monitors anything, and this is the last report you'll get from it."])
-        if let i = groups.firstIndex(where: { $0.0 == current }) { groups[i].1.append(last) } else { groups.append((current, [last])) }
-        print("Emailing your accountability partners…")
+        for entry in ReportOutbox().load() {
+            if let target = entry.target ?? current { append(entry.report, to: target) }
+        }
+        for target in monitored {
+            let last = Report(mac: Report.macName, user: user, kind: .change, sentAt: Date(),
+                              changes: ["Renew was uninstalled from this Mac. Check-ins have stopped. Server monitoring needs a partner's approval to end."])
+            append(last, to: target)
+        }
+        if !groups.isEmpty { print("Emailing your accountability partners…") }
         for (target, reports) in groups {
             let sent = ReportClient.sendAndWait(reports, to: target)
             if sent < reports.count { print("  couldn't send \(reports.count - sent) report(s) to \(target.partnerEmails.joined(separator: ", "))") }
         }
-        // So the report server stops expecting check-ins and doesn't email
-        // that Renew went quiet.
         if let install = state.installID {
-            let beat = Heartbeat.make(.removed, install: install, details: nil, lastAccepted: nil)
-            if !HeartbeatClient.sendAndWait(beat, to: server, timeout: 15) {
-                print("  couldn't tell the report server to stop expecting check-ins; your partner may get a \"stopped checking in\" email")
+            for target in monitored {
+                let beat = Heartbeat.make(.requestRemoval, install: install, details: nil, lastAccepted: nil)
+                if !HeartbeatClient.sendAndWait(beat, to: target.server, timeout: 15) {
+                    print("  couldn't confirm the monitoring change with a report server; your partner may get a \"stopped checking in\" email")
+                }
             }
         }
     }

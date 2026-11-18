@@ -14,7 +14,7 @@ if !devMode && getuid() != 0 {
 let guardInstance: Guard?
 let daemonInstance: Daemon?
 if arguments.contains("--guard") {
-    guardInstance = Guard()
+    guardInstance = Guard(dev: devMode)
     daemonInstance = nil
     guardInstance?.run()
 } else {

@@ -18,6 +18,8 @@ import RenewShared
 final class Heartbeater: @unchecked Sendable {
     /// Where check-ins go now: the email reports' destination.
     var destination: () -> ReportTarget?
+    /// Enrollments whose partner approval is pending or was declined.
+    var monitoringTargets: () -> [ReportTarget] = { [] }
     /// This install's id (made once and kept in the state file).
     var installID: () -> UUID
     /// The user named in check-ins.
@@ -28,13 +30,14 @@ final class Heartbeater: @unchecked Sendable {
     var coveredSince: () -> Date? = { nil }
     /// Downtime waiting to be sent.
     let gaps = DowntimeGapStore()
-    /// Previous destinations still to be told to stop expecting check-ins,
+    /// Previous destinations still owed a request to end monitoring,
     /// retried until they answer (a root-only file, since it holds tokens).
     private let removals = LockedJSONFile<[ReportTarget]>(path: Paths.pendingRemovalsFile, label: "pending removals", empty: [])
     private var removing = false
     private var nextRemoval: TimeInterval = 0
 
     private let queue: DispatchQueue
+    private let runID = UUID()
     private let logOnly: Bool
     /// Uptime (seconds) at or after which the next check-in is due.
     private var nextBeat: TimeInterval = 0
@@ -78,7 +81,7 @@ final class Heartbeater: @unchecked Sendable {
     // MARK: schedule
 
     /// Called on every tick: sends `awake` when it's due, and retries
-    /// telling previous destinations to stop expecting check-ins.
+    /// asking previous destinations to end monitoring.
     func tick() {
         retryRemovals()
         if asleep, Heartbeat.inUseSinceSleep(awakeSinceSleep: AliveRecord.awakeNow() - sleptAt, sleepWait: Self.sleepWait,
@@ -92,7 +95,7 @@ final class Heartbeater: @unchecked Sendable {
         // Not while a check-in is on its way: its reply sets the next one,
         // and the file is looked at again afterwards.
         if !sending, newGapsWaiting() { nextBeat = 0 }
-        guard !sending, !asleep, Self.uptime >= nextBeat, let target = destination() else { return }
+        guard !sending, !asleep, Self.uptime >= nextBeat, let target = checkInTarget else { return }
         send(.awake, to: target)
     }
 
@@ -107,41 +110,17 @@ final class Heartbeater: @unchecked Sendable {
         log("heartbeat: the Mac is about to log out, restart or shut down")
     }
 
-    /// Reports are moving or being turned off: tells the old destination to
-    /// stop expecting check-ins, then checks in with the new one (if any).
-    /// The order matters when both use the same server.
-    func handOff(from old: ReportTarget?) {
-        guard let old else { return beatNow() }
-        if logOnly {
-            logDev(.removed, to: old)
-            return beatNow()
-        }
-        sending = true
-        let beat = Heartbeat.make(.removed, install: installID(), details: nil, lastAccepted: lastAccepted)
-        HeartbeatClient.post(beat, to: old.server) { [weak self] outcome, _ in
-            self?.queue.async {
-                guard let self else { return }
-                self.sending = false
-                if outcome == .retry {
-                    // Keep trying, or the old server emails the previous
-                    // partner that Renew went quiet.
-                    log("heartbeat: couldn't tell the previous report server to stop expecting check-ins; will retry")
-                    self.removals.update { $0.contains(old) ? $0 : $0 + [old] }
-                    self.nextRemoval = Self.uptime + Heartbeat.retryDelay
-                }
-                self.lastAccepted = nil
-                self.acceptedDetails = nil
-                self.beatNow()
-            }
-        }
+    func configurationChanged() {
+        lastAccepted = nil
+        acceptedDetails = nil
+        beatNow()
     }
 
     private func retryRemovals() {
         guard !removing, !logOnly, Self.uptime >= nextRemoval else { return }
         let pending = removals.load()
         guard let old = pending.first else { return }
-        // The current destination on the same server replaces the old entry
-        // with its own check-ins; a late "removed" would delete it.
+        // A late request to end monitoring would apply to the current destination.
         if let current = destination(), current.server.url == old.server.url {
             removals.update { $0.filter { $0 != old } }
             return
@@ -157,7 +136,7 @@ final class Heartbeater: @unchecked Sendable {
                 } else {
                     // Taken, or refused for good (that server won't email anyone).
                     self.removals.update { $0.filter { $0 != old } }
-                    log("heartbeat: told a previous report server to stop expecting check-ins")
+                    log("heartbeat: finished retrying a previous monitoring request")
                 }
             }
         }
@@ -170,9 +149,16 @@ final class Heartbeater: @unchecked Sendable {
 
     /// renewd is exiting: tells the server `state`. Waits up to `timeout`.
     func sendExit(_ state: Heartbeat.State, timeout: TimeInterval = 5) {
-        guard let target = destination() else { return }
+        guard let target = checkInTarget else { return }
         if logOnly { return logDev(state, to: target) }
+        let deadline = DispatchTime.now() + timeout
+        let finished = DispatchGroup()
+        for extra in otherMonitoringTargets(than: target) {
+            finished.enter()
+            HeartbeatClient.post(make(state, for: extra), to: extra.server, timeout: timeout) { _, _ in finished.leave() }
+        }
         let ok = HeartbeatClient.sendAndWait(make(state, for: target), to: target.server, timeout: timeout)
+        _ = finished.wait(timeout: deadline)
         log("heartbeat: told the report server '\(state.rawValue)'\(ok ? "" : " (not confirmed)")")
     }
 
@@ -182,10 +168,23 @@ final class Heartbeater: @unchecked Sendable {
         Heartbeat.Details(to: target.partnerEmails, mac: Report.macName, user: userName())
     }
 
+    private var checkInTarget: ReportTarget? { destination() ?? monitoringTargets().first }
+
+    private func otherMonitoringTargets(than target: ReportTarget) -> [ReportTarget] {
+        monitoringTargets().filter { $0.server.url != target.server.url }
+    }
+
     private func make(_ state: Heartbeat.State, for target: ReportTarget) -> Heartbeat {
+        if destination()?.server.url != target.server.url {
+            var beat = Heartbeat.make(state, install: installID(), details: nil, lastAccepted: nil, runID: runID)
+            beat.monitoringOnly = true
+            return beat
+        }
         let d = details(for: target)
-        return Heartbeat.make(state, install: installID(), details: d == acceptedDetails ? nil : d,
-                              lastAccepted: lastAccepted, gaps: gaps.load(), coveredSince: coveredSince())
+        var beat = Heartbeat.make(state, install: installID(), details: d == acceptedDetails ? nil : d,
+                                  lastAccepted: lastAccepted, gaps: gaps.load(), coveredSince: coveredSince(), runID: runID)
+        beat.explicitPartnerRemovals = true
+        return beat
     }
 
     private func send(_ state: Heartbeat.State, to target: ReportTarget, then: (() -> Void)? = nil) {
@@ -199,10 +198,17 @@ final class Heartbeater: @unchecked Sendable {
         }
         sending = true
         let beat = make(state, for: target)
-        gapsTried = Set((beat.gaps ?? []).map(\.id))
+        if beat.monitoringOnly != true { gapsTried = Set((beat.gaps ?? []).map(\.id)) }
+        let finished = DispatchGroup()
+        for extra in otherMonitoringTargets(than: target) {
+            finished.enter()
+            HeartbeatClient.post(make(state, for: extra), to: extra.server) { _, _ in finished.leave() }
+        }
+        finished.enter()
         HeartbeatClient.post(beat, to: target.server) { [weak self] outcome, reply in
-            self?.queue.async {
-                guard let self else { return }
+            guard let self else { finished.leave(); return }
+            self.queue.async {
+                defer { finished.leave() }
                 self.sending = false
                 if outcome == .delivered, reply?.needDetails == true {
                     // The server doesn't know this Mac: send everything, soon.
@@ -210,7 +216,7 @@ final class Heartbeater: @unchecked Sendable {
                     self.nextBeat = Self.uptime + 5
                     if let notices = reply?.notices, !notices.isEmpty { self.onNotices(notices) }
                 } else if outcome == .delivered {
-                    self.lastAccepted = beat.sentAt
+                    if beat.monitoringOnly != true { self.lastAccepted = beat.sentAt }
                     self.nextBeat = Self.uptime + delay
                     if let to = beat.to, let mac = beat.mac, let user = beat.user, let zone = beat.timeZone {
                         self.acceptedDetails = Heartbeat.Details(to: to.emails, mac: mac, user: user, timeZone: zone)
@@ -223,9 +229,9 @@ final class Heartbeater: @unchecked Sendable {
                 } else {
                     self.nextBeat = Self.uptime + Heartbeat.retryDelay
                 }
-                then?()
             }
         }
+        if let then { finished.notify(queue: queue, execute: then) }
     }
 
     /// Whether the gaps file holds a gap no check-in has tried to send yet.
@@ -280,7 +286,7 @@ final class Heartbeater: @unchecked Sendable {
             asleep = true
             sleptAt = AliveRecord.awakeNow()
             pendingSleep = argument
-            guard let target = destination() else { return allowSleep(argument) }
+            guard let target = checkInTarget else { return allowSleep(argument) }
             // Even if a check-in is on its way, the server must hear this one.
             sending = false
             send(.sleeping, to: target) { [weak self] in self?.allowSleep(argument) }

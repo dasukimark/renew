@@ -6,6 +6,11 @@ Parameters:
   GmailAddress:
     Type: String
     Description: The Gmail account reports are sent from (used only for this).
+  ApprovalBaseURL:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^https://[a-zA-Z0-9.-]+/?$'
+    Description: Optional branded HTTPS origin that routes Renew approval requests to this function.
   AllowedRecipients:
     Type: String
     Default: ""
@@ -30,6 +35,16 @@ Parameters:
     Type: Number
     Default: 168
     Description: Email the partners when a Mac that said it was sleeping or shutting down hasn't checked in for this many hours.
+  CheckinGraceMinutes:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    Description: Extra time beyond the expected interval before a recovered awake check-in is flagged as late.
+  RestartWindowMinutes:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    Description: Window for notifying partners of repeated same-boot Renew restarts.
   AppPasswordParameter:
     Type: String
     Default: /renew/gmail-app-password
@@ -51,6 +66,7 @@ Resources:
         Variables:
           ALLOWED_RECIPIENTS: !Ref AllowedRecipients
           GMAIL_ADDRESS: !Ref GmailAddress
+          APPROVAL_BASE_URL: !Ref ApprovalBaseURL
           TIME_ZONE: !Ref TimeZone
           TOKEN_PARAM: !Ref TokenParameter
           APP_PASSWORD_PARAM: !Ref AppPasswordParameter
@@ -58,6 +74,8 @@ Resources:
           SILENCE_MINUTES: !Ref SilenceMinutes
           QUIET_CAP_HOURS: !Ref QuietCapHours
           STOPPING_MINUTES: !Ref StoppingMinutes
+          CHECKIN_GRACE_MINUTES: !Ref CheckinGraceMinutes
+          RESTART_WINDOW_MINUTES: !Ref RestartWindowMinutes
       Events:
         CheckIns:
           Type: Schedule

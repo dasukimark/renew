@@ -25,15 +25,19 @@ struct AccountabilityView: View {
         .onChange(of: model.reportsURL) { reportURLDraft = $0 ?? "" }
         .confirmationDialog("Remove \(removing ?? "")?", isPresented: Binding(
             get: { removing != nil }, set: { if !$0 { removing = nil } })) {
-            Button("Remove", role: .destructive) {
+            Button("Request removal", role: .destructive) {
                 if let email = removing { remove(email) }
                 removing = nil
             }
             Button("Cancel", role: .cancel) { removing = nil }
         } message: {
-            Text(model.reportsPartners.count == 1
-                 ? "They're your only partner, so email reports turn off. They get a last email."
-                 : "They get a last email.")
+            if let email = removing, model.retainedReportPartners.contains(email) {
+                Text("Renew keeps checking in while your partner reviews the new request.")
+            } else {
+                Text(model.reportsPartners.count == 1
+                     ? "Local email reports turn off. This address stays pending until your partner approves ending server monitoring."
+                     : "Local reports to this address stop. It stays pending until your partner approves the monitoring change.")
+            }
         }
         .confirmationDialog("Turn off email reports?", isPresented: $confirmingOff) {
             Button("Turn off", role: .destructive) {
@@ -41,7 +45,7 @@ struct AccountabilityView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every partner gets a last email.")
+            Text("Local email reports turn off. The server keeps monitoring until a partner approves.")
         }
     }
 
@@ -73,6 +77,24 @@ struct AccountabilityView: View {
                     .buttonStyle(.borderless)
                     .help(inSession ? "Partners can be removed after the current session ends" : "Remove this partner")
                     .disabled(inSession || model.busy || !model.daemonReachable)
+                }
+            }
+            ForEach(model.pendingReportPartners, id: \.self) { email in
+                HStack {
+                    Text(email)
+                        .textSelection(.enabled)
+                    Spacer()
+                    statusDot("Pending partner approval", .orange)
+                }
+            }
+            ForEach(model.retainedReportPartners.filter { !model.pendingReportPartners.contains($0) }, id: \.self) { email in
+                HStack {
+                    Text(email)
+                        .textSelection(.enabled)
+                    Spacer()
+                    statusDot("Monitoring retained", .green)
+                    Button("Request again") { removing = email }
+                        .disabled(inSession || model.busy || !model.daemonReachable)
                 }
             }
             if model.reportsPartners.count < ReportDestination.maxPartners {
@@ -119,6 +141,18 @@ struct AccountabilityView: View {
         } header: {
             Text("Partners")
         } footer: {
+            if !model.pendingReportPartners.isEmpty {
+                Text(reportsOn
+                     ? "Pending addresses can still receive server check-in alerts until a partner approves."
+                     : "Local reports are off. Renew keeps checking in while your partner decides.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !reportsOn && !model.retainedReportPartners.isEmpty {
+                Text("A partner declined the request. Renew continues checking in.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if !reportsOn && !model.reportServerBuiltIn {
                 Text("No report server is set up on this Mac. See server/reports/README.md, or enter a server's URL and token.")
                     .font(.caption)
@@ -130,7 +164,7 @@ struct AccountabilityView: View {
     private var canAdd: Bool {
         guard !model.busy, model.daemonReachable,
               let email = ReportDestination.normalizeEmail(newPartner),
-              !model.reportsPartners.contains(email) else { return false }
+              !model.reportsPartners.contains(email), !model.pendingReportPartners.contains(email) else { return false }
         // Adding to running reports keeps their server.
         if reportsOn { return true }
         if let _ = draftURL { return !reportTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -166,6 +200,10 @@ struct AccountabilityView: View {
     }
 
     private func remove(_ email: String) {
+        if model.retainedReportPartners.contains(email) {
+            model.requestMonitoringRemoval(email)
+            return
+        }
         let rest = model.reportsPartners.filter { $0 != email }
         model.setReports(partnerEmails: rest.isEmpty ? nil : rest, url: model.reportsURL) { _ in
             model.loadPartnerHistory()

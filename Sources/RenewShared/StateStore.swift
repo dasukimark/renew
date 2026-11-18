@@ -1,5 +1,15 @@
 import Foundation
 
+public struct MonitoringRemovalRequest: Codable, Equatable, Sendable {
+    public let id: UUID
+    public let target: ReportTarget
+
+    public init(target: ReportTarget) {
+        id = UUID()
+        self.target = target
+    }
+}
+
 /// What the daemon persists in the root-only state.json.
 public struct PersistedState: Codable, Equatable, Sendable {
     public var session: SessionInfo?
@@ -10,6 +20,12 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// Where email reports go (see `Report`). nil means off. The token is
     /// safe here: the state file is readable only by root.
     public var reports: ReportDestination?
+    /// Removed locally, still monitored by one of these report servers.
+    public var pendingPartnerRemovals: [ReportTarget]?
+    public var monitoringRemovalRequests: [MonitoringRemovalRequest]?
+    /// Partners who declined removal. Their servers still receive check-ins.
+    public var retainedMonitoring: [ReportTarget]?
+    public var seenMonitoringRejections: [String: UUID]?
     /// This install's id, sent with check-ins (see `Heartbeat`). Made by
     /// renewd the first time it starts.
     public var installID: UUID?
@@ -247,18 +263,22 @@ public enum StateStore {
         return try? Wire.decoder.decode(PersistedState.self, from: data)
     }
 
-    public static func save(_ state: PersistedState) {
+    @discardableResult
+    public static func save(_ state: PersistedState) -> Bool {
         do {
             try FileManager.default.createDirectory(atPath: Paths.dataDir, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
             let data = try Wire.encoder.encode(state)
             let tmp = Paths.stateFile + ".tmp"
-            FileManager.default.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o600])
-            if rename(tmp, Paths.stateFile) != 0 {
+            guard FileManager.default.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o600]),
+                  rename(tmp, Paths.stateFile) == 0 else {
                 log("state rename failed: \(String(cString: strerror(errno)))")
+                return false
             }
+            return true
         } catch {
             log("state save failed: \(error)")
+            return false
         }
     }
 }

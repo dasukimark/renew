@@ -218,7 +218,7 @@ check-ins are the only things Renew sends off the Mac.
 - **Locked during sessions:** reports can be turned on and partners added at
   any time, but partners removed or reports turned off only between block
   sessions. Saved partners can't be edited, only removed. A removed partner gets
-  a last email, and reports still waiting to be sent go to the old list of
+  a change notice, and reports still waiting to be sent go to the old list of
   partners. `renew reports test` (or **Send test**) sends a test
   email.
 
@@ -231,23 +231,22 @@ While email reports are on, Renew keeps two heartbeats:
   how long the Mac was awake while it wasn't running (macOS's awake clock
   pauses during sleep, so sleep doesn't count). Anything over a minute is
   sent with the next check-in and emailed right away: "Renew wasn't running
-  for 4 minutes while the Mac was awake (8:18 PM to 8:22 PM)". So stopping
-  Renew and starting it again is reported however short the gap, and being
-  offline only delays the email.
+  for 4 minutes while the Mac was awake (8:18 PM to 8:22 PM)". Being offline
+  delays the email until Renew can reach the server.
   - If the Mac restarted after renewd stopped without a clean exit (it was
     force-quit, or the Mac crashed or lost power), renewd reads macOS's
     power log (`pmset -g log`) and shutdown records to see how long the Mac
     was awake before it went down. A crash or power loss ends both at once,
     so it's not reported; force-quitting Renew, using the Mac and then
     restarting it is.
-  - Every 5 minutes renewd also notes in `state.json` that it's running. If
-    `alive.json` is then missing, unreadable or older than that note, the
-    partner is told Renew's records were deleted or replaced.
+  - Renew authenticates `alive.json` with an HMAC. If an expected record is
+    missing or fails verification, Renew reports it. Every 5 minutes renewd
+    also notes in `state.json` that it's running, which can catch a record
+    replaced with an older copy.
   - With **Keep Renew running** on, the guard is a second witness: it
-    watches `alive.json` and reports time renewd's record stood still
-    itself, so hiding a stop means stopping both and editing both files.
-    renewd brings the guard back within a minute if it's stopped, even
-    between sessions.
+    watches `alive.json` and can report a gap directly to the server.
+    renewd brings the guard back within a minute if it's stopped, even between
+    sessions.
 - **Server:** renewd checks in with the report server about every 15 minutes
   (give or take 2), when the Mac sleeps, wakes or renewd stops, and right
   away when there's downtime to report.
@@ -264,18 +263,24 @@ While email reports are on, Renew keeps two heartbeats:
   - and, after one of those, when Renew checks in again. That email says
     whether the Mac restarted, lists any downtime, or says it was a false
     alarm when Renew was running the whole time but couldn't reach the server.
+  - Renew checks in awake after missing its expected check-in by more than
+    5 minutes on the same boot. An outage can cause this.
+  - Renew restarts more than once within an hour without the Mac rebooting.
+    A single restart is recorded in the server's history.
 
 Closing the lid, shutting down or restarting don't send anything: renewd
 checks in one last time before the Mac sleeps, and the Renew app tells renewd
 when the Mac is about to shut down. renewd only accepts that notice from the
 Renew app itself (checked by its code signature), so a script can't make
-stopping renewd look like a shutdown. Turning reports off or changing
-partners tells the server to stop expecting check-ins (removed partners
-already get a last email), and so does `renew uninstall`.
+stopping renewd look like a shutdown. Turning reports off, removing a partner,
+moving servers, or running `renew uninstall` asks the server to end monitoring
+for that enrollment. The server emails an approval link to the original
+partners and keeps monitoring until one of them approves. Local changes
+and uninstall can take effect immediately.
 
 Check-ins name your partners, the Mac and the user only when renewd starts or
 those change; the rest of the time they carry just this install's id, the
-state, the boot time and any downtime.
+state, the boot and process run IDs, and any downtime.
 
 Good to know:
 
@@ -293,11 +298,9 @@ Good to know:
   reported as Renew being stopped.
 - Each user only sees emails about themselves under **Sent to your
   partners**, plus the Mac-wide check-in emails.
-- Someone with an admin password could read the server token and fake
-  check-ins, or stop renewd and the guard, edit both records and clear the
-  power log. Signing the records wouldn't help: the key would live on the
-  same Mac. Check-ins catch Renew being stopped or removed, not a determined
-  admin.
+- Someone with admin access who obtains the local HMAC key or report token
+  can forge records or check-ins. Treat each alert as evidence of the event
+  it describes.
 
 ### Uninstalling
 

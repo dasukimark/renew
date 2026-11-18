@@ -12,7 +12,7 @@ public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
     /// Sets where email reports go (see `Report`), or turns them off. Only
     /// changed or turned off between sessions.
-    case setReports, testReport
+    case setReports, testReport, requestMonitoringRemoval
     case requestUninstall, cancelUninstall
     /// Replaces the recurring block sessions the daemon starts on its own.
     case setSchedules
@@ -59,6 +59,8 @@ public struct Request: Codable, Sendable {
     public var schedules: [Schedule]?
     /// For `setReports`: the report server's URL and token, or nil to turn reports off.
     public var reports: ReportDestination?
+    /// For a new removal request after a partner declined.
+    public var partnerEmail: String?
     /// For `setProtections`: the full new set.
     public var protections: Protections?
     /// For `setActivity`: the new setting.
@@ -78,9 +80,10 @@ public struct Request: Codable, Sendable {
                 schedules: [Schedule]? = nil, protections: Protections? = nil,
                 activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, events: [ActivityEvent]? = nil,
                 activityQuery: ActivityQuery? = nil, statsQuery: ActivityStatsQuery? = nil, monitorQuery: MonitorQuery? = nil,
-                reports: ReportDestination? = nil) {
+                reports: ReportDestination? = nil, partnerEmail: String? = nil) {
         self.cmd = cmd
         self.reports = reports
+        self.partnerEmail = partnerEmail
         self.durationSeconds = durationSeconds
         self.rules = rules
         self.report = report
@@ -166,6 +169,9 @@ public struct Status: Codable, Sendable {
     /// Who email reports go to. nil when off, or from daemons that predate
     /// reports or more than one partner.
     public var reportsPartners: [String]?
+    /// Removed locally and awaiting confirmation from the report server.
+    public var pendingReportPartners: [String]?
+    public var retainedReportPartners: [String]?
     /// Whether a built-in report server is installed, so only the partners'
     /// addresses are needed.
     public var reportServerBuiltIn: Bool?
@@ -206,11 +212,15 @@ public struct Status: Codable, Sendable {
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
                 uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
                 protections: Protections? = nil, coolingOffRemovalAt: Date? = nil,
-                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil, reportsPartners: [String]? = nil, reportServerBuiltIn: Bool? = nil) {
+                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil,
+                reportsPartners: [String]? = nil, pendingReportPartners: [String]? = nil,
+                retainedReportPartners: [String]? = nil, reportServerBuiltIn: Bool? = nil) {
         self.session = session
         self.reportServerBuiltIn = reportServerBuiltIn
         self.reportsURL = reportsURL
         self.reportsPartners = reportsPartners
+        self.pendingReportPartners = pendingReportPartners
+        self.retainedReportPartners = retainedReportPartners
         self.serverTime = serverTime
         self.agents = agents
         self.uninstall = uninstall

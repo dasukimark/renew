@@ -17,11 +17,11 @@ import Foundation
 /// Each check-in also carries the downtime renewd's internal heartbeat
 /// found (`gaps`, see `AliveRecord`), which the server emails right away.
 ///
-/// `removed` tells the server to stop expecting check-ins (reports turned
-/// off, moved, or Renew uninstalled).
+/// `removed` asks the server to end monitoring (reports turned off, moved,
+/// or Renew uninstalled). `witness` carries gaps independently of renewd.
 public struct Heartbeat: Codable, Equatable, Sendable {
     public enum State: String, Codable, Sendable {
-        case awake, sleeping, shutdown, stopping, removed
+        case awake, sleeping, shutdown, stopping, removed, witness, monitoringStatus, requestRemoval
     }
 
     public var kind: String = "heartbeat"
@@ -43,6 +43,13 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     /// `kern.bootsessionuuid`: changes on every boot and only then, so the
     /// server can tell a restart from the service being stopped.
     public var bootID: String?
+    /// This renewd process's lifetime, independent of the Mac's boot.
+    public var runID: UUID?
+    /// Keep an existing enrollment alive without creating or changing one.
+    public var monitoringOnly: Bool?
+    /// This client submits recipient removals separately from check-ins.
+    public var explicitPartnerRemovals: Bool?
+    public var removingPartners: [String]?
     /// Seconds until the next check-in, roughly.
     public var interval: Int
     /// When the server last accepted a check-in from this Mac.
@@ -69,10 +76,11 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     public init(id: UUID = UUID(), install: UUID, to: Recipients?, mac: String?, user: String?,
                 timeZone: String? = TimeZone.current.identifier, sentAt: Date, state: State,
                 boot: Date, interval: Int = Int(Heartbeat.interval), lastAccepted: Date? = nil,
-                gaps: [DowntimeGap]? = nil, coveredSince: Date? = nil) {
+                gaps: [DowntimeGap]? = nil, coveredSince: Date? = nil, runID: UUID? = nil) {
         self.gaps = gaps
         self.coveredSince = coveredSince
         self.bootID = ClockReading.bootID
+        self.runID = runID
         self.id = id
         self.install = install
         self.to = to
@@ -143,17 +151,23 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     /// A check-in. With `details`, it names the partner, Mac and user.
     public static func make(_ state: State, install: UUID, details: Details?,
                             lastAccepted: Date?, now: Date = Date(), interval: TimeInterval = Heartbeat.interval,
-                            gaps: [DowntimeGap]? = nil, coveredSince: Date? = nil) -> Heartbeat {
+                            gaps: [DowntimeGap]? = nil, coveredSince: Date? = nil, runID: UUID? = nil) -> Heartbeat {
         Heartbeat(install: install, to: details.map { Recipients($0.to) }, mac: details?.mac, user: details?.user,
                   timeZone: details?.timeZone, sentAt: now,
                   state: state, boot: bootTime(), interval: Int(interval.rounded()), lastAccepted: lastAccepted,
-                  gaps: gaps.flatMap { $0.isEmpty ? nil : $0 }, coveredSince: coveredSince)
+                  gaps: gaps.flatMap { $0.isEmpty ? nil : $0 }, coveredSince: coveredSince, runID: runID)
     }
 }
 
 /// What the server says back to a check-in: the emails it sent the partner
 /// about this Mac since the last check-in it accepted.
 public struct HeartbeatReply: Codable, Equatable, Sendable {
+    public struct Monitoring: Codable, Equatable, Sendable {
+        public var partners: [String]
+        public var removalPending: Bool
+        public var rejectedDecision: UUID?
+        public var pendingPartners: [String]?
+    }
     public struct Notice: Codable, Equatable, Sendable {
         public var title: String
         public var lines: [String]
@@ -169,6 +183,8 @@ public struct HeartbeatReply: Codable, Equatable, Sendable {
     public var notices: [Notice]
     /// The server doesn't know this Mac (yet): send the details next time.
     public var needDetails: Bool?
+    /// Read-only server monitoring state, independent of daemon liveness.
+    public var monitoring: Monitoring?
 
     public init(notices: [Notice], needDetails: Bool? = nil) {
         self.notices = notices

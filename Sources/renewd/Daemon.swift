@@ -10,7 +10,8 @@ import RenewShared
 ///
 /// Sessions count down on the monotonic clock (see `Countdown`), so changing
 /// the date doesn't end one; a large date change is reported as tampering.
-final class Daemon {
+/// After startup, callbacks that access state run on `queue`.
+final class Daemon: @unchecked Sendable {
     static let minSession = 60
     static let maxSession = 7 * 86_400
     static let maxRules = Schedule.maxRules
@@ -60,6 +61,7 @@ final class Daemon {
                             installID: { [unowned self] in self.ensureInstallID() },
                             userName: { consoleUser()?.name ?? "" })
         h.coveredSince = { [unowned self] in self.alive.coveredSince }
+        h.monitoringTargets = { [unowned self] in self.monitoringTargets }
         h.onNotices = { [unowned self] notices in
             self.reporter.partnerLog.append(notices.map {
                 PartnerLogEntry(date: $0.at, channel: .checkin, status: .sent, title: $0.title, lines: $0.lines)
@@ -90,6 +92,11 @@ final class Daemon {
     /// The built-in report server, read again only when its file changes
     /// (it's replaced at install).
     private var builtInServerCache: (stamp: [Int], server: ReportServer?)?
+    private var firstMonitoringLookup = true
+    private var nextMonitoringLookup: TimeInterval = 0
+    private var monitoringLookupGeneration = UUID()
+    private var submittingMonitoringRequest = false
+    private var monitoringRequestRetryAt: [UUID: TimeInterval] = [:]
 
     /// `d` with its server resolved: its own, or the built-in one.
     private func target(_ d: ReportDestination?) -> ReportTarget? {
@@ -236,6 +243,25 @@ final class Daemon {
 
         case .setReports:
             if let error = setReports(req.reports, by: uid, at: r) { return fail(error) }
+
+        case .requestMonitoringRemoval:
+            guard state.activeSession(at: r) == nil else {
+                return fail("Request removal after the current block session ends.")
+            }
+            guard let email = req.partnerEmail,
+                  !(state.pendingPartnerRemovals ?? []).contains(where: { $0.partnerEmails.contains(email) }),
+                  let retained = state.retainedMonitoring?.filter({ $0.partnerEmails.contains(email) }),
+                  !retained.isEmpty else { return fail("This partner is no longer eligible for a new request.") }
+            let previous = state
+            for entry in retained {
+                queueMonitoringRemoval(ReportTarget(partnerEmails: [email], server: entry.server))
+            }
+            guard StateStore.save(state) else {
+                state = previous
+                return fail("Couldn't save the partner removal request.")
+            }
+            monitoringLookupGeneration = UUID()
+            submitMonitoringRequest()
 
         case .testReport:
             guard state.reports != nil else { return fail("Email reports are off. Set them up first.") }
@@ -557,30 +583,42 @@ final class Daemon {
             }
         }
         let oldTarget = target(old)
+        let previous = state
+        if let oldTarget {
+            let keepsServer = target(new)?.server.url == oldTarget.server.url
+            let remaining = Set(keepsServer ? new?.partnerEmails ?? [] : [])
+            let removed = oldTarget.partnerEmails.filter { !remaining.contains($0) }
+            if !removed.isEmpty {
+                queueMonitoringRemoval(ReportTarget(partnerEmails: removed, server: oldTarget.server))
+            }
+        }
+        state.reports = new
+        if new == nil { state.aliveMarker = nil }
+        guard StateStore.save(state) else {
+            state = previous
+            return "Couldn't save the reporting change."
+        }
+        monitoringLookupGeneration = UUID()
+        nextMonitoringLookup = 0
         let partnersChanged = old != nil && new != nil && Set(old!.partnerEmails) != Set(new!.partnerEmails)
         if let old {
             if new == nil {
-                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were turned off. This is the last report you'll get from this Mac.", uid: uid)
+                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were turned off on this Mac. The report server may still send check-in alerts.", uid: uid)
             } else if new!.url != old.url || new!.token != old.token {
-                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were moved to a different report server. This is the last report you'll get through this one.", uid: uid)
+                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were moved to a different report server. This server may still send check-in alerts.", uid: uid)
             } else if partnersChanged {
                 // What's waiting stays with the partners it was meant for:
                 // new partners don't get visits from before they were added.
                 let removed = old.partnerEmails.filter { !new!.partnerEmails.contains($0) }
                 reporter.handOff(from: oldTarget,
-                                 farewell: removed.isEmpty ? nil : "Email reports from Renew no longer go to you. This is the last report you'll get from this Mac.",
+                                 farewell: removed.isEmpty ? nil : "The partner list for email reports changed on the Mac. The report server may still send you check-in alerts.",
                                  to: oldTarget.map { ReportTarget(partnerEmails: removed, server: $0.server) },
                                  uid: uid)
             }
         }
         // Downtime from before reports were on isn't the new partner's business.
         if old == nil { heartbeater.gaps.removeAll() }
-        state.reports = new
-        if new == nil {
-            state.aliveMarker = nil
-            alive.reportsOff()
-        }
-        StateStore.save(state)
+        if new == nil { alive.reportsOff() }
         if old == nil, new != nil { alive.resume() }
         log("email reports \(new == nil ? "turned off" : "set to \(new!.partnerEmails.joined(separator: ", ")) via \(new!.url ?? "the built-in server")") by uid \(uid)")
         if let new, partnersChanged {
@@ -588,14 +626,124 @@ final class Daemon {
         } else if new != nil {
             reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Renew also checks in with the report server regularly. If it isn't running for more than a minute while the Mac is awake, you'll be emailed when it runs again; if it stops checking in for 2 hours while the Mac is awake, you'll be emailed then."], uid: uid)
         }
-        // Moving server or turning off: tell the old destination to stop
-        // expecting check-ins, then check in with the new one. On the same
-        // server, the next check-in just carries the new partners, so the
-        // server keeps this Mac's history (an unanswered "quiet" alert,
-        // reported downtime).
-        let sameServer = old != nil && new != nil && old!.url == new!.url && old!.token == new!.token
-        heartbeater.handOff(from: old != nil && !sameServer ? oldTarget : nil)
+        submitMonitoringRequest()
+        heartbeater.configurationChanged()
         return nil
+    }
+
+    private func setPendingPartners(_ emails: [String], on server: ReportServer) {
+        var pending = (state.pendingPartnerRemovals ?? []).filter { $0.server.url != server.url }
+        if !emails.isEmpty {
+            pending.append(ReportTarget(partnerEmails: Set(emails).sorted(), server: server))
+        }
+        state.pendingPartnerRemovals = pending.isEmpty ? nil : pending.sorted { $0.server.url < $1.server.url }
+    }
+
+    private func queueMonitoringRemoval(_ target: ReportTarget) {
+        let existing = (state.pendingPartnerRemovals ?? [])
+            .filter { $0.server.url == target.server.url }.flatMap(\.partnerEmails)
+        setPendingPartners(existing + target.partnerEmails, on: target.server)
+        state.monitoringRemovalRequests = (state.monitoringRemovalRequests ?? []) + [MonitoringRemovalRequest(target: target)]
+    }
+
+    private func submitMonitoringRequest() {
+        guard !dev || ProcessInfo.processInfo.environment["RENEW_DEV_REPORTS"] != nil else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard !submittingMonitoringRequest, let install = state.installID,
+              let request = state.monitoringRemovalRequests?.first(where: { (monitoringRequestRetryAt[$0.id] ?? 0) <= now })
+        else { return }
+        let configured = target(state.reports)?.server
+        let server = configured?.url == request.target.server.url ? configured ?? request.target.server : request.target.server
+        var beat = Heartbeat.make(.requestRemoval, install: install, details: nil, lastAccepted: nil)
+        beat.id = request.id
+        beat.removingPartners = request.target.partnerEmails
+        submittingMonitoringRequest = true
+        HeartbeatClient.post(beat, to: server) { [weak self] outcome, _ in
+            self?.queue.async { [weak self] in
+                guard let self else { return }
+                self.submittingMonitoringRequest = false
+                if outcome == .delivered {
+                    let previous = self.state.monitoringRemovalRequests
+                    let waiting = (previous ?? []).filter { $0.id != request.id }
+                    self.state.monitoringRemovalRequests = waiting.isEmpty ? nil : waiting
+                    if StateStore.save(self.state) {
+                        self.monitoringRequestRetryAt.removeValue(forKey: request.id)
+                        self.nextMonitoringLookup = 0
+                        return
+                    }
+                    self.state.monitoringRemovalRequests = previous
+                }
+                self.monitoringRequestRetryAt[request.id] = ProcessInfo.processInfo.systemUptime + Heartbeat.retryDelay
+            }
+        }
+    }
+
+    private var monitoringTargets: [ReportTarget] {
+        var seen = Set<String>()
+        let targets = (state.pendingPartnerRemovals ?? []) + (state.retainedMonitoring ?? [])
+        return targets.filter { seen.insert($0.server.url).inserted }
+    }
+
+    private func refreshPendingPartners() {
+        guard !dev || ProcessInfo.processInfo.environment["RENEW_DEV_REPORTS"] != nil else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now >= nextMonitoringLookup, let install = state.installID else { return }
+        let currentServer = target(state.reports)?.server
+        var servers: [String: ReportServer] = [:]
+        let lookups = firstMonitoringLookup ? monitoringTargets : state.pendingPartnerRemovals ?? []
+        for entry in lookups { servers[entry.server.url] = entry.server }
+        if let currentServer, firstMonitoringLookup || servers[currentServer.url] != nil {
+            servers[currentServer.url] = currentServer
+        }
+        if let builtIn = builtInServer(), firstMonitoringLookup || servers[builtIn.url] != nil {
+            servers[builtIn.url] = servers[builtIn.url] ?? builtIn
+        }
+        firstMonitoringLookup = false
+        nextMonitoringLookup = now + 30
+        let generation = monitoringLookupGeneration
+        for server in servers.values {
+            let beat = Heartbeat.make(.monitoringStatus, install: install, details: nil, lastAccepted: nil)
+            HeartbeatClient.post(beat, to: server, timeout: 10) { [weak self] outcome, reply in
+                guard outcome == .delivered, let monitoring = reply?.monitoring else { return }
+                self?.queue.async { [weak self] in
+                    guard let self, self.monitoringLookupGeneration == generation else { return }
+                    let before = self.state.pendingPartnerRemovals
+                    let retainedBefore = self.state.retainedMonitoring
+                    let tracked = (before ?? []).filter { $0.server.url == server.url }.flatMap(\.partnerEmails)
+                    let active = self.target(self.state.reports)
+                    let activeHere = Set(active?.server.url == server.url ? active?.partnerEmails ?? [] : [])
+                    let monitored = Set(monitoring.partners)
+                    let rejected = monitoring.rejectedDecision
+                    let newRejection = !monitoring.removalPending && rejected != nil
+                        && self.state.seenMonitoringRejections?[server.url] != rejected
+                    let oldRetained = (retainedBefore ?? []).filter { $0.server.url == server.url }.flatMap(\.partnerEmails)
+                    var retained = (retainedBefore ?? []).filter { $0.server.url != server.url }
+                    let retainedHere = newRejection ? monitored.subtracting(activeHere) : Set(oldRetained).intersection(monitored)
+                    if !retainedHere.isEmpty {
+                        retained.append(ReportTarget(partnerEmails: retainedHere.sorted(), server: server))
+                    }
+                    self.state.retainedMonitoring = retained.isEmpty ? nil : retained.sorted { $0.server.url < $1.server.url }
+                    // Discover requests made by older clients as well as removals made locally.
+                    let queued = (self.state.monitoringRemovalRequests ?? [])
+                        .filter { $0.target.server.url == server.url }.flatMap { $0.target.partnerEmails }
+                    let candidates = monitoring.removalPending ? Set(monitoring.pendingPartners ?? monitoring.partners)
+                        : Set(tracked).intersection(monitored)
+                    let pending = (newRejection ? Set<String>() : candidates).union(queued).subtracting(activeHere)
+                    self.setPendingPartners(Array(pending), on: server)
+                    if newRejection, let rejected {
+                        var decisions = self.state.seenMonitoringRejections ?? [:]
+                        decisions[server.url] = rejected
+                        self.state.seenMonitoringRejections = decisions
+                    }
+                    if self.state.pendingPartnerRemovals != before || self.state.retainedMonitoring != retainedBefore || newRejection {
+                        StateStore.save(self.state)
+                        if self.state.pendingPartnerRemovals != before || self.state.retainedMonitoring != retainedBefore {
+                            self.heartbeater.configurationChanged()
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Uptime when each kind of notice was last sent, for `notify`'s rate limit.
@@ -659,6 +807,10 @@ final class Daemon {
             monitor: requestUID.map { state.monitor(for: $0) } ?? .off,
             reportsURL: state.reports?.url,
             reportsPartners: state.reports?.partnerEmails,
+            pendingReportPartners: Set((state.pendingPartnerRemovals ?? []).flatMap(\.partnerEmails))
+                .subtracting(state.reports?.partnerEmails ?? []).sorted(),
+            retainedReportPartners: Set((state.retainedMonitoring ?? []).flatMap(\.partnerEmails))
+                .subtracting(state.reports?.partnerEmails ?? []).sorted(),
             reportServerBuiltIn: builtInServer() != nil
         )
     }
@@ -684,6 +836,8 @@ final class Daemon {
         reporter.tick()
         alive.tick()
         heartbeater.tick()
+        submitMonitoringRequest()
+        refreshPendingPartners()
 
         checkpoint(r)
 
@@ -773,7 +927,10 @@ final class Daemon {
     /// file disagrees (edited or deleted), renewd's copy is written back.
     private func adoptDiskState(_ r: ClockReading) {
         guard let file = StateStore.load() else { return }
-        if file.reports != state.reports || file.installID != state.installID || file.aliveMarker != state.aliveMarker
+        if file.reports != state.reports || file.pendingPartnerRemovals != state.pendingPartnerRemovals
+            || file.monitoringRemovalRequests != state.monitoringRemovalRequests
+            || file.retainedMonitoring != state.retainedMonitoring || file.seenMonitoringRejections != state.seenMonitoringRejections
+            || file.installID != state.installID || file.aliveMarker != state.aliveMarker
             || file.uninstall?.requestedAt != state.uninstall?.requestedAt
             || file.schedules != state.schedules
             // The anchor's date may not survive the JSON round trip bit for bit.

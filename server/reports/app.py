@@ -14,12 +14,15 @@ about Macs that went quiet without warning. See heartbeat.py.
 
 import base64
 import hmac
+import html
 import json
 import logging
 import os
+import re
 import smtplib
 import uuid
 from datetime import datetime
+from urllib.parse import parse_qs
 
 import heartbeat
 from render import as_list, build_email, recipients
@@ -191,7 +194,9 @@ def handler(event, context):
         return _scheduled_check()
 
     http = (event.get("requestContext") or {}).get("http") or {}
-    if http.get("method", "").upper() != "POST":
+    method = http.get("method", "").upper()
+    approval = event.get("rawPath") == "/monitoring/approve"
+    if method not in ({"GET", "POST"} if approval else {"POST"}):
         return _response(405, "method not allowed")
 
     body = event.get("body") or ""
@@ -202,6 +207,8 @@ def handler(event, context):
             return _response(400, "bad body")
     if len(body.encode("utf-8")) > MAX_BODY:
         return _response(413, "too large")
+    if approval:
+        return _monitoring_approval(method, event, body)
 
     try:
         token, app_password = _load_secrets()
@@ -216,7 +223,11 @@ def handler(event, context):
         return _response(401, "unauthorized")
 
     if _is_heartbeat(body):
-        return _heartbeat(body, app_password)
+        domain = (event.get("requestContext") or {}).get("domainName", "")
+        branded_origin = os.environ.get("APPROVAL_BASE_URL", "").rstrip("/")
+        origin = branded_origin if re.fullmatch(r"https://[a-zA-Z0-9.-]+", branded_origin) else (
+            f"https://{domain}" if re.fullmatch(r"[a-zA-Z0-9.-]+", domain) else None)
+        return _heartbeat(body, app_password, origin)
 
     try:
         report = parse_report(body)
@@ -252,7 +263,72 @@ def handler(event, context):
     return _response(200, "sent")
 
 
-def _heartbeat(body, app_password):
+def _approval_page(status, content):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+                    "Referrer-Policy": "no-referrer",
+                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"},
+        "body": ("<!doctype html><html lang='en'><meta charset='utf-8'>"
+                 "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                 "<title>Renew partner request</title>"
+                 "<style>body{font:17px system-ui;margin:0;background:#f4f7f6;color:#172b26}"
+                 "main{max-width:36rem;margin:8vh auto;padding:clamp(1.25rem,5vw,3rem);background:white;border:1px solid #d8e4df;border-radius:16px}"
+                 "header{font-weight:700;color:#0f6b57}h1{font-size:1.65rem}p{line-height:1.55}"
+                 "form{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.5rem 0 0}"
+                 "button{font:inherit;font-weight:600;cursor:pointer;border:1px solid #bccdc5;border-radius:8px;padding:.65rem 1rem;background:white;color:#172b26}"
+                 "button[value=reject]{background:#0f6b57;color:white;border-color:#0f6b57}</style>"
+                 "<main><header>Renew</header>" + content + "</main></html>"),
+    }
+
+
+def _monitoring_approval(method, event, body):
+    # An email scanner following the link can only load the confirmation.
+    try:
+        fields = parse_qs(event.get("rawQueryString", "") if method == "GET" else body, max_num_fields=4)
+        install = str(uuid.UUID(fields["install"][0]))
+        token = str(uuid.UUID(fields["token"][0]))
+    except (KeyError, ValueError):
+        return _approval_page(400, "<h1>Invalid approval link</h1>")
+    store = heartbeat.store()
+    try:
+        if method == "POST":
+            decision = fields.get("decision")
+            if decision not in (["approve"], ["reject"]):
+                return _approval_page(400, "<h1>Choose a monitoring decision</h1>")
+            decision = decision[0]
+            if decision == "reject" and heartbeat.reject_removal(install, token, store):
+                return _approval_page(200, "<h1>Monitoring will continue</h1><p>You declined the request to end Renew monitoring.</p>")
+            if decision == "approve":
+                result = heartbeat.approve_removal(install, token, store)
+                if result == "ended":
+                    return _approval_page(200, "<h1>Renew monitoring ended</h1><p>The server will stop expecting check-ins for this enrollment.</p>")
+                if result == "updated":
+                    return _approval_page(200, "<h1>Partner removal approved</h1><p>Renew continues monitoring for the remaining partners.</p>")
+        else:
+            item = store.get(install) or {}
+            request = item.get("removal") or {}
+            if hmac.compare_digest(request.get("token", ""), token):
+                affected = heartbeat._removing_partners(item)
+                partners = "".join(f"<li>{html.escape(address)}</li>" for address in affected)
+                full = len(affected) == len(as_list(item["to"]))
+                action = "Approve ending monitoring" if full else "Approve partner removal"
+                return _approval_page(200,
+                    f"<h1>Monitoring request for {html.escape(item['mac'])}</h1>"
+                    f"<p>This request removes check-in monitoring for:</p><ul>{partners}</ul>"
+                    "<p>Renew requires no sign-in or password to respond.</p>"
+                    "<form method='post' action='/monitoring/approve'>"
+                    f"<input type='hidden' name='install' value='{install}'>"
+                    f"<input type='hidden' name='token' value='{token}'>"
+                    "<button name='decision' value='reject'>Keep monitoring</button>"
+                    f"<button name='decision' value='approve'>{action}</button></form>")
+    except Exception:
+        log.exception("couldn't process monitoring approval")
+        return _approval_page(500, "<h1>Couldn’t process the request</h1><p>Try the link again later.</p>")
+    return _approval_page(404, "<h1>This approval link is no longer active</h1>")
+
+
+def _heartbeat(body, app_password, approval_origin):
     try:
         beat = heartbeat.parse_heartbeat(body)
     except heartbeat.Invalid as e:
@@ -262,11 +338,11 @@ def _heartbeat(body, app_password):
         log.warning("refused heartbeat from %s to an address not in ALLOWED_RECIPIENTS", beat["install"])
         return _response(403, "recipient not allowed")
     try:
-        reply = heartbeat.record_beat(beat, heartbeat.now(), heartbeat.store(), _checkin_sender(app_password))
+        reply = heartbeat.record_beat(beat, heartbeat.now(), heartbeat.store(), _checkin_sender(app_password),
+                                      approval_origin=approval_origin)
     except heartbeat.SendFailed:
-        # Nothing was recorded; renewd tries again in a minute.
-        log.exception("couldn't email about heartbeat from %s", beat["install"])
-        return _response(502, "couldn't send")
+        log.exception("couldn't accept heartbeat from %s", beat["install"])
+        return _response(502, "couldn't accept heartbeat")
     except Exception:
         log.exception("couldn't record heartbeat from %s", beat["install"])
         return _response(500, "couldn't record")
