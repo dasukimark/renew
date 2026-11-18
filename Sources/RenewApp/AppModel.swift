@@ -449,9 +449,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: alerts and uninstall request
-
-    var alertURL: String? { status?.alertURL }
+    // MARK: reports and uninstall request
 
     /// The pending uninstall request, if it hasn't expired.
     var uninstallRequest: UninstallStatus? {
@@ -464,21 +462,13 @@ final class AppModel: ObservableObject {
         return u.unlocksAt <= now
     }
 
-    func setAlerts(_ url: String?, completion: ((Bool) -> Void)? = nil) {
-        send(Request(cmd: .setAlerts, alertURL: url), completion: completion)
-    }
-
-    func testAlert() {
-        send(Request(cmd: .testAlert))
-    }
-
     var reportsURL: String? { status?.reportsURL }
-    var reportsPartner: String? { status?.reportsPartner }
+    var reportsPartners: [String] { status?.reportsPartners ?? [] }
     var reportServerBuiltIn: Bool { status?.reportServerBuiltIn == true }
 
     /// nil turns email reports off. Without `url`, reports use the built-in server.
-    func setReports(partnerEmail: String?, url: String? = nil, token: String? = nil, completion: ((Bool) -> Void)? = nil) {
-        send(Request(cmd: .setReports, reports: partnerEmail.map { ReportDestination(partnerEmail: $0, url: url, token: token) }),
+    func setReports(partnerEmails: [String]?, url: String? = nil, token: String? = nil, completion: ((Bool) -> Void)? = nil) {
+        send(Request(cmd: .setReports, reports: partnerEmails.map { ReportDestination(partnerEmails: $0, url: url, token: token) }),
              completion: completion)
     }
 

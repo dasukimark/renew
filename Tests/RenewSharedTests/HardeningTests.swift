@@ -143,22 +143,3 @@ struct EngineTests {
         }
     }
 }
-
-@Suite("Alerts")
-struct AlertTests {
-    @Test func validatesURLs() {
-        #expect(Alerts.normalize("  https://ntfy.sh/abc ") == "https://ntfy.sh/abc")
-        #expect(Alerts.normalize("ntfy.sh/abc") == nil)
-        #expect(Alerts.normalize("file:///etc/passwd") == nil)
-        #expect(Alerts.normalize("") == nil)
-    }
-
-    @Test func formatsForEachService() throws {
-        let ntfy = try #require(Alerts.makeRequest("https://ntfy.sh/t", title: "Renew on Mark’s Mac", message: "hi"))
-        #expect(ntfy.value(forHTTPHeaderField: "Title") == "Renew on Mark's Mac")
-        #expect(ntfy.httpBody == Data("hi".utf8))
-        let discord = try #require(Alerts.makeRequest("https://discord.com/api/webhooks/1/x", title: "T", message: "hi"))
-        let body = try #require(discord.httpBody.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: String] })
-        #expect(body["content"] == "**T**\nhi")
-    }
-}

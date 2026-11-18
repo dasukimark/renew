@@ -2,7 +2,7 @@
 # Saves the deployed report server's URL and token where Renew's installer
 # looks for them (~/.config/renew/report-server.json, readable only by you).
 # The installer copies it into renewd's root-only folder, so the Renew app
-# only needs your partner's email address.
+# only needs your partners' email addresses.
 #
 #   server/reports/configure-mac.sh [stack-name] [token-file]
 set -euo pipefail

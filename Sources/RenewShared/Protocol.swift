@@ -3,16 +3,15 @@ import Foundation
 /// Newline-delimited JSON over the daemon's Unix socket.
 ///
 /// The daemon only accepts commands that make things stricter: nothing here
-/// can shorten, stop or loosen a running session. Alerts can only be changed
-/// between sessions (or turned on during one), and an uninstall request only
+/// can shorten, stop or loosen a running session. Email reports can only be
+/// changed between sessions (or turned on during one), and an uninstall request only
 /// unlocks `sudo renew uninstall` after a cooling-off period. Each user has
 /// their own Activity and Monitor settings and logs, and only ever reads and
 /// changes their own.
 public enum Command: String, Codable, Sendable {
     case status, start, extend, add, report
-    case setAlerts, testAlert
-    /// Sets where email reports go (see `Report`), or turns them off. Like
-    /// alerts, only changed or turned off between sessions.
+    /// Sets where email reports go (see `Report`), or turns them off. Only
+    /// changed or turned off between sessions.
     case setReports, testReport
     case requestUninstall, cancelUninstall
     /// Replaces the recurring block sessions the daemon starts on its own.
@@ -56,8 +55,6 @@ public struct Request: Codable, Sendable {
     public var durationSeconds: Int?
     public var rules: [String]?
     public var report: AgentReport?
-    /// For `setAlerts`: the new destination, or nil to turn alerts off.
-    public var alertURL: String?
     /// For `setSchedules`: the full new set.
     public var schedules: [Schedule]?
     /// For `setReports`: the report server's URL and token, or nil to turn reports off.
@@ -78,7 +75,7 @@ public struct Request: Codable, Sendable {
     public var monitorQuery: MonitorQuery?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
-                alertURL: String? = nil, schedules: [Schedule]? = nil, protections: Protections? = nil,
+                schedules: [Schedule]? = nil, protections: Protections? = nil,
                 activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, events: [ActivityEvent]? = nil,
                 activityQuery: ActivityQuery? = nil, statsQuery: ActivityStatsQuery? = nil, monitorQuery: MonitorQuery? = nil,
                 reports: ReportDestination? = nil) {
@@ -87,7 +84,6 @@ public struct Request: Codable, Sendable {
         self.durationSeconds = durationSeconds
         self.rules = rules
         self.report = report
-        self.alertURL = alertURL
         self.schedules = schedules
         self.protections = protections
         self.activity = activity
@@ -164,14 +160,14 @@ public struct Status: Codable, Sendable {
     public var session: SessionInfo?
     public var serverTime: Date
     public var agents: [AgentStatus]
-    public var alertURL: String?
     /// The report server, when reports use one other than the built-in
     /// server (never the token).
     public var reportsURL: String?
-    /// Who email reports go to. nil when off, or from daemons that predate reports.
-    public var reportsPartner: String?
-    /// Whether a built-in report server is installed, so only the partner's
-    /// address is needed.
+    /// Who email reports go to. nil when off, or from daemons that predate
+    /// reports or more than one partner.
+    public var reportsPartners: [String]?
+    /// Whether a built-in report server is installed, so only the partners'
+    /// addresses are needed.
     public var reportServerBuiltIn: Bool?
     public var uninstall: UninstallStatus?
     /// The schedules the daemon enforces. nil from daemons that predate them.
@@ -208,16 +204,15 @@ public struct Status: Codable, Sendable {
     public var enforcesCoolingOff: Bool { protections?.uninstallCoolingOff ?? true }
 
     public init(session: SessionInfo?, serverTime: Date, agents: [AgentStatus],
-                alertURL: String? = nil, uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
+                uninstall: UninstallStatus? = nil, schedules: [Schedule]? = nil,
                 protections: Protections? = nil, coolingOffRemovalAt: Date? = nil,
-                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil, reportsPartner: String? = nil, reportServerBuiltIn: Bool? = nil) {
+                activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil, reportsPartners: [String]? = nil, reportServerBuiltIn: Bool? = nil) {
         self.session = session
         self.reportServerBuiltIn = reportServerBuiltIn
         self.reportsURL = reportsURL
-        self.reportsPartner = reportsPartner
+        self.reportsPartners = reportsPartners
         self.serverTime = serverTime
         self.agents = agents
-        self.alertURL = alertURL
         self.uninstall = uninstall
         self.schedules = schedules
         self.protections = protections

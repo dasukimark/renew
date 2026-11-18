@@ -96,7 +96,6 @@ struct ScheduleTests {
         // State files from before schedules still load.
         let old = try Wire.decoder.decode(PersistedState.self, from: Data(#"{"alertURL":"https://ntfy.sh/x"}"#.utf8))
         #expect(old.schedules == nil)
-        #expect(old.alertURL == "https://ntfy.sh/x")
 
         var state = PersistedState()
         state.schedules = [schedule(540, 1_020, .weekdays)]

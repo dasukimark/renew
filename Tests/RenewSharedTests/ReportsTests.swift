@@ -69,16 +69,16 @@ struct ReportsTests {
 
     @Test func destinationNeedsHTTPSAndAToken() {
         let p = "partner@test.invalid"
-        #expect(ReportDestination.normalize(partnerEmail: " Partner@Test.Invalid ") == ReportDestination(partnerEmail: p))
-        #expect(ReportDestination.normalize(partnerEmail: p, url: "  ", token: nil) == ReportDestination(partnerEmail: p))
-        #expect(ReportDestination.normalize(partnerEmail: p, url: " https://reports.test.invalid/ ", token: " abc123 ")
-                == ReportDestination(partnerEmail: p, url: "https://reports.test.invalid/", token: "abc123"))
-        #expect(ReportDestination.normalize(partnerEmail: p, url: "http://reports.test.invalid/", token: "abc") == nil)
-        #expect(ReportDestination.normalize(partnerEmail: p, url: "http://127.0.0.1:8080/", token: "abc") != nil)
-        #expect(ReportDestination.normalize(partnerEmail: p, url: "https://reports.test.invalid/", token: "") == nil)
-        #expect(ReportDestination.normalize(partnerEmail: p, url: "https://reports.test.invalid/", token: "has space") == nil)
-        #expect(ReportDestination.normalize(partnerEmail: p, url: "not a url", token: "abc") == nil)
-        #expect(ReportDestination.normalize(partnerEmail: "", url: "https://reports.test.invalid/", token: "abc") == nil)
+        #expect(ReportDestination.normalize(partnerEmails: [" Partner@Test.Invalid "]) == ReportDestination(partnerEmails: [p]))
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: "  ", token: nil) == ReportDestination(partnerEmails: [p]))
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: " https://reports.test.invalid/ ", token: " abc123 ")
+                == ReportDestination(partnerEmails: [p], url: "https://reports.test.invalid/", token: "abc123"))
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: "http://reports.test.invalid/", token: "abc") == nil)
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: "http://127.0.0.1:8080/", token: "abc") != nil)
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: "https://reports.test.invalid/", token: "") == nil)
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: "https://reports.test.invalid/", token: "has space") == nil)
+        #expect(ReportDestination.normalize(partnerEmails: [p], url: "not a url", token: "abc") == nil)
+        #expect(ReportDestination.normalize(partnerEmails: [""], url: "https://reports.test.invalid/", token: "abc") == nil)
     }
 
     @Test func builtInServerIsUsedWithoutAURL() throws {
@@ -89,12 +89,40 @@ struct ReportsTests {
         #expect(ReportServer.builtIn(path: file) == nil)
         FileManager.default.createFile(atPath: file, contents: Data(#"{"url":"https://reports.test.invalid/","token":"t0k"}"#.utf8))
         let builtIn = try #require(ReportServer.builtIn(path: file))
-        #expect(ReportDestination(partnerEmail: "p@test.invalid").server(builtIn: builtIn) == builtIn)
-        let own = ReportDestination(partnerEmail: "p@test.invalid", url: "https://other.test.invalid/", token: "x")
+        #expect(ReportDestination(partnerEmails: ["p@test.invalid"]).server(builtIn: builtIn) == builtIn)
+        let own = ReportDestination(partnerEmails: ["p@test.invalid"], url: "https://other.test.invalid/", token: "x")
         #expect(own.server(builtIn: builtIn) == ReportServer(url: "https://other.test.invalid/", token: "x"))
-        #expect(ReportDestination(partnerEmail: "p@test.invalid").server(builtIn: nil) == nil)
+        #expect(ReportDestination(partnerEmails: ["p@test.invalid"]).server(builtIn: nil) == nil)
         FileManager.default.createFile(atPath: file, contents: Data(#"{"url":"http://reports.test.invalid/","token":"t0k"}"#.utf8))
         #expect(ReportServer.builtIn(path: file) == nil)
+    }
+
+    @Test func severalPartners() throws {
+        #expect(ReportDestination.normalizeEmails([" A@Test.Invalid ", "", "b@test.invalid", "a@test.invalid"])
+                == ["a@test.invalid", "b@test.invalid"])
+        #expect(ReportDestination.normalizeEmails(["a@test.invalid", "nobody"]) == nil)
+        #expect(ReportDestination.normalizeEmails(["", " "]) == nil)
+        #expect(ReportDestination.normalizeEmails((0...ReportDestination.maxPartners).map { "p\($0)@test.invalid" }) == nil)
+
+        // State files and outboxes from before several partners still load.
+        let oldDest = try Wire.decoder.decode(ReportDestination.self, from: Data(#"{"partnerEmail":"p@test.invalid"}"#.utf8))
+        #expect(oldDest == ReportDestination(partnerEmails: ["p@test.invalid"]))
+        let oldTarget = try Report.decoder.decode(ReportTarget.self,
+            from: Data(#"{"partnerEmail":"p@test.invalid","server":{"url":"https://a.test.invalid/","token":"t"}}"#.utf8))
+        #expect(oldTarget.partnerEmails == ["p@test.invalid"])
+        let dest = ReportDestination(partnerEmails: ["a@test.invalid", "b@test.invalid"], url: "https://a.test.invalid/", token: "t")
+        #expect(try Wire.decoder.decode(ReportDestination.self, from: Wire.encoder.encode(dest)) == dest)
+    }
+
+    @Test func recipientsAreAStringForOneAndAListForMore() throws {
+        let server = ReportServer(url: "https://a.test.invalid/", token: "t")
+        let report = Report(mac: "M", user: "u", kind: .test, sentAt: Date(timeIntervalSince1970: 0))
+        func to(_ emails: [String]) throws -> Any? {
+            let body = try #require(ReportClient.body(report, to: ReportTarget(partnerEmails: emails, server: server)))
+            return (try JSONSerialization.jsonObject(with: body) as? [String: Any])?["to"]
+        }
+        #expect(try to(["a@test.invalid"]) as? String == "a@test.invalid")
+        #expect(try to(["a@test.invalid", "b@test.invalid"]) as? [String] == ["a@test.invalid", "b@test.invalid"])
     }
 
     @Test func partnerEmailIsChecked() {
@@ -136,8 +164,8 @@ struct ReportsTests {
         let path = tempOutboxPath()
         defer { try? FileManager.default.removeItem(atPath: (path as NSString).deletingLastPathComponent) }
         let outbox = ReportOutbox(path: path)
-        let older = ReportTarget(partnerEmail: "older@test.invalid", server: ReportServer(url: "https://a.test.invalid/", token: "a"))
-        let old = ReportTarget(partnerEmail: "old@test.invalid", server: ReportServer(url: "https://b.test.invalid/", token: "b"))
+        let older = ReportTarget(partnerEmails: ["older@test.invalid"], server: ReportServer(url: "https://a.test.invalid/", token: "a"))
+        let old = ReportTarget(partnerEmails: ["old@test.invalid", "second@test.invalid"], server: ReportServer(url: "https://b.test.invalid/", token: "b"))
         outbox.append(change(0), target: older)
         outbox.append(change(1))
         outbox.append(change(2))

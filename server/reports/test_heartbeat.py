@@ -337,7 +337,21 @@ def test_slim_beat_keeps_stored_details(smtp, store, clock):
     clock["now"] += 240
     assert app.handler(event(slim()), None)["statusCode"] == 200
     item = store.items[INSTALL]
-    assert item["to"] == "partner@test.invalid" and item["mac"] == "Test Mac" and item["lastSeen"] == T0 + 240
+    assert item["to"] == ["partner@test.invalid"] and item["mac"] == "Test Mac" and item["lastSeen"] == T0 + 240
+
+
+def test_several_partners_get_checkin_emails(smtp, store, clock):
+    app.handler(event(beat(to=["Partner@Test.Invalid", "other@test.invalid"])), None)
+    assert store.items[INSTALL]["to"] == ["partner@test.invalid", "other@test.invalid"]
+    store.items[INSTALL]["lastSeen"] = T0 - 3600
+    assert app.handler(SCHEDULED, None) == {"alerted": 1}
+    assert sent(smtp)[0]["To"] == "partner@test.invalid, other@test.invalid"
+
+
+def test_several_partners_all_need_allowing(smtp, store, clock, monkeypatch):
+    monkeypatch.setenv("ALLOWED_RECIPIENTS", "partner@test.invalid")
+    r = app.handler(event(beat(to=["partner@test.invalid", "stranger@test.invalid"])), None)
+    assert r["statusCode"] == 403
 
 
 def test_slim_beat_still_checks_allowed_recipients(smtp, store, clock, monkeypatch):

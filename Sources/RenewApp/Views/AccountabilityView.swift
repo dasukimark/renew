@@ -1,165 +1,174 @@
 import SwiftUI
 import RenewShared
 
-/// Everything your accountability partner hears about: email reports (with
-/// check-ins), instant alerts, and a history of what they were told.
+/// Everything your accountability partners hear about: email reports (with
+/// check-ins), and a history of what they were told.
 struct AccountabilityView: View {
     @ObservedObject var model: AppModel
-    @State private var alertDraft = ""
+    @State private var newPartner = ""
     @State private var reportURLDraft = ""
-    @State private var reportPartnerDraft = ""
     @State private var reportTokenDraft = ""
+    @State private var removing: String?
+    @State private var confirmingOff = false
 
     var body: some View {
         Form {
             partnerSection
-            alertsSection
             historySection
         }
         .formStyle(.grouped)
         .navigationTitle("Accountability")
         .onAppear {
-            alertDraft = model.alertURL ?? ""
             reportURLDraft = model.reportsURL ?? ""
-            reportPartnerDraft = model.reportsPartner ?? ""
             model.loadPartnerHistory()
         }
-        .onChange(of: model.alertURL) { alertDraft = $0 ?? "" }
         .onChange(of: model.reportsURL) { reportURLDraft = $0 ?? "" }
-        .onChange(of: model.reportsPartner) { reportPartnerDraft = $0 ?? "" }
+        .confirmationDialog("Remove \(removing ?? "")?", isPresented: Binding(
+            get: { removing != nil }, set: { if !$0 { removing = nil } })) {
+            Button("Remove", role: .destructive) {
+                if let email = removing { remove(email) }
+                removing = nil
+            }
+            Button("Cancel", role: .cancel) { removing = nil }
+        } message: {
+            Text(model.reportsPartners.count == 1
+                 ? "They're your only partner, so email reports turn off. They get a last email."
+                 : "They get a last email.")
+        }
+        .confirmationDialog("Turn off email reports?", isPresented: $confirmingOff) {
+            Button("Turn off", role: .destructive) {
+                model.setReports(partnerEmails: nil) { _ in model.loadPartnerHistory() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every partner gets a last email.")
+        }
     }
 
-    // MARK: partner (email reports)
+    // MARK: partners (email reports)
 
-    private var reportsOn: Bool { model.reportsPartner != nil }
-    /// Turned on any time, but changed or turned off only between sessions
-    /// (renewd enforces this too).
-    private var reportsLocked: Bool { model.session != nil && reportsOn }
-    /// The server fields show only without a built-in server, or when
-    /// reports already use a different one.
+    private var reportsOn: Bool { !model.reportsPartners.isEmpty }
+    private var inSession: Bool { model.session != nil }
+    /// Server fields only without a built-in server, or when reports
+    /// already use a different one (to change its token, or leave it).
     private var showServerFields: Bool { !model.reportServerBuiltIn || model.reportsURL != nil }
+    /// Leaving the URL empty means the built-in server.
+    private var draftURL: String? {
+        let u = reportURLDraft.trimmingCharacters(in: .whitespaces)
+        return u.isEmpty ? nil : u
+    }
 
     private var partnerSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Renew emails your accountability partner when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Emails name the site, the page title, why it was flagged and when, never the full address.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                TextField("Partner's email address", text: $reportPartnerDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(reportsLocked || !model.daemonReachable)
-                if showServerFields {
-                    TextField("Report server URL", text: $reportURLDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .disabled(reportsLocked || !model.daemonReachable)
-                    SecureField("Report token", text: $reportTokenDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(reportsLocked || !model.daemonReachable)
-                }
+            ForEach(model.reportsPartners, id: \.self) { email in
                 HStack {
-                    Button(reportsOn ? "Save" : "Turn on reports") {
-                        let custom = showServerFields && !reportURLDraft.trimmingCharacters(in: .whitespaces).isEmpty
-                        model.setReports(partnerEmail: reportPartnerDraft,
-                                         url: custom ? reportURLDraft : nil,
-                                         token: custom ? reportTokenDraft : nil) { ok in
-                            if ok { reportTokenDraft = "" }
-                            model.loadPartnerHistory()
-                        }
-                    }
-                    .disabled(reportsLocked || model.busy || !model.daemonReachable || !canSaveReports)
-                    if reportsOn {
-                        Button("Send test") {
-                            model.testReport()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { model.loadPartnerHistory() }
-                        }
-                        .disabled(model.busy)
-                        Button("Turn off") {
-                            model.setReports(partnerEmail: nil) { _ in model.loadPartnerHistory() }
-                        }
-                        .disabled(reportsLocked || model.busy)
-                    }
+                    Text(email)
+                        .textSelection(.enabled)
                     Spacer()
-                    if reportsOn { statusDot("On", .green) } else { statusDot("Off", .secondary) }
-                }
-                if reportsLocked {
-                    Text("Email reports can be changed after the current session ends.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    Button {
+                        removing = email
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(inSession ? "Partners can be removed after the current session ends" : "Remove this partner")
+                    .disabled(inSession || model.busy || !model.daemonReachable)
                 }
             }
-        } header: {
-            Text("Partner")
-        } footer: {
-            Text(model.reportServerBuiltIn
-                 ? "Your partner doesn't need an account; they just get emails. Reports wait on this Mac until they're sent. When the partner changes or reports are turned off, the previous partner gets a last email.\n\nWhile this is on, Renew checks in with the report server about every 4 minutes. If it goes quiet for 10 minutes while the Mac is awake (3 if its service was stopped), or for 7 days after sleeping or shutting down, your partner is emailed. Time the Mac was in use while Renew wasn't running is reported as soon as Renew runs again."
-                 : "No report server is set up on this Mac yet: deploy one (see server/reports/README.md), run configure-mac.sh and reinstall Renew, or enter a server's URL and token here.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var canSaveReports: Bool {
-        let partner = reportPartnerDraft.trimmingCharacters(in: .whitespaces)
-        guard !partner.isEmpty else { return false }
-        if showServerFields {
-            let url = reportURLDraft.trimmingCharacters(in: .whitespaces)
-            // An empty URL means the built-in server: allowed when one is
-            // installed and something changes (the partner, or leaving a
-            // different server).
-            if url.isEmpty { return model.reportServerBuiltIn && (partner != model.reportsPartner || model.reportsURL != nil) }
-            return !reportTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        return partner != model.reportsPartner
-    }
-
-    // MARK: instant alerts
-
-    /// Same rule as reports (renewd enforces this too).
-    private var alertsLocked: Bool { model.session != nil && model.alertURL != nil }
-
-    private var alertsSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Renew messages someone you trust if it's stopped, its files are tampered with, or the clock is changed during a block session, and when an uninstall is requested or done.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                TextField("https://ntfy.sh/your-secret-topic", text: $alertDraft)
+            if model.reportsPartners.count < ReportDestination.maxPartners {
+                HStack {
+                    TextField("Partner's email address", text: $newPartner)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { if canAdd { add() } }
+                    Button(reportsOn ? "Add" : "Turn on reports") { add() }
+                        .disabled(!canAdd)
+                }
+                .disabled(!model.daemonReachable)
+            }
+            if showServerFields {
+                TextField("Report server URL", text: $reportURLDraft)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
-                    .disabled(alertsLocked || !model.daemonReachable)
-                HStack {
-                    Button(model.alertURL == nil ? "Turn on alerts" : "Save") {
-                        model.setAlerts(alertDraft) { _ in model.loadPartnerHistory() }
-                    }
-                    .disabled(alertsLocked || model.busy || !model.daemonReachable
-                              || alertDraft.trimmingCharacters(in: .whitespaces).isEmpty
-                              || alertDraft == (model.alertURL ?? ""))
-                    if model.alertURL != nil {
-                        Button("Send test") { model.testAlert() }
-                            .disabled(model.busy)
-                        Button("Turn off") {
-                            model.setAlerts(nil) { _ in model.loadPartnerHistory() }
-                        }
-                        .disabled(alertsLocked || model.busy)
-                    }
-                    Spacer()
-                    if model.alertURL != nil { statusDot("On", .green) } else { statusDot("Off", .secondary) }
-                }
-                if alertsLocked {
-                    Text("Alerts can be changed after the current session ends.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    .disabled(inSession && reportsOn)
+                SecureField(reportsOn ? "New report token" : "Report token", text: $reportTokenDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(inSession && reportsOn)
+                if reportsOn {
+                    Button("Save server") { saveServer() }
+                        .disabled(!canSaveServer)
                 }
             }
+            if reportsOn {
+                HStack {
+                    Button("Turn off") { confirmingOff = true }
+                        .disabled(inSession || model.busy || !model.daemonReachable)
+                    Button("Send test") {
+                        model.testReport()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { model.loadPartnerHistory() }
+                    }
+                    .disabled(model.busy)
+                    Spacer()
+                    statusDot("On", .green)
+                }
+            }
+            if reportsOn && inSession {
+                Text("Partners can be added during a session, and removed after it ends.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         } header: {
-            Text("Instant alerts")
+            Text("Partners")
         } footer: {
-            Text("Free and no account needed: your partner installs the ntfy app and subscribes to a hard-to-guess topic, and you enter https://ntfy.sh/<that topic> here. Discord and Slack webhook URLs work too. When the destination changes or alerts are turned off, the old destination is told.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if !reportsOn && !model.reportServerBuiltIn {
+                Text("No report server is set up on this Mac. See server/reports/README.md, or enter a server's URL and token.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var canAdd: Bool {
+        guard !model.busy, model.daemonReachable,
+              let email = ReportDestination.normalizeEmail(newPartner),
+              !model.reportsPartners.contains(email) else { return false }
+        // Adding to running reports keeps their server.
+        if reportsOn { return true }
+        if let _ = draftURL { return !reportTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty }
+        return model.reportServerBuiltIn
+    }
+
+    private var canSaveServer: Bool {
+        guard reportsOn, !inSession, !model.busy, model.daemonReachable else { return false }
+        if draftURL == nil { return model.reportServerBuiltIn && model.reportsURL != nil }
+        return !reportTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private func saveServer() {
+        model.setReports(partnerEmails: model.reportsPartners, url: draftURL,
+                         token: draftURL == nil ? nil : reportTokenDraft) { ok in
+            if ok { reportTokenDraft = "" }
+            model.loadPartnerHistory()
+        }
+    }
+
+    private func add() {
+        let partners = model.reportsPartners + [newPartner.trimmingCharacters(in: .whitespaces)]
+        // Running reports keep their server (renewd keeps its token).
+        let url = reportsOn ? model.reportsURL : draftURL
+        let token = reportsOn || url == nil ? nil : reportTokenDraft
+        model.setReports(partnerEmails: partners, url: url, token: token) { ok in
+            if ok {
+                newPartner = ""
+                reportTokenDraft = ""
+            }
+            model.loadPartnerHistory()
+        }
+    }
+
+    private func remove(_ email: String) {
+        let rest = model.reportsPartners.filter { $0 != email }
+        model.setReports(partnerEmails: rest.isEmpty ? nil : rest, url: model.reportsURL) { _ in
+            model.loadPartnerHistory()
         }
     }
 
@@ -172,7 +181,7 @@ struct AccountabilityView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else if model.partnerHistory.isEmpty {
-                Text(model.loadingPartnerHistory ? "Loading…" : "Nothing has been sent to your partner yet.")
+                Text(model.loadingPartnerHistory ? "Loading…" : "Nothing has been sent to your partners yet.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
@@ -182,7 +191,7 @@ struct AccountabilityView: View {
             }
         } header: {
             HStack {
-                Text("Sent to your partner")
+                Text("Sent to your partners")
                 Spacer()
                 Button {
                     model.loadPartnerHistory()
@@ -194,7 +203,7 @@ struct AccountabilityView: View {
                 .disabled(model.loadingPartnerHistory)
             }
         } footer: {
-            Text("The last \(PartnerLog.maxEntries) emails, alerts and check-in emails, newest first. Check-in emails show up after Renew next reaches the report server.")
+            Text("The last \(PartnerLog.maxEntries), newest first.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

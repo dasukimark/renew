@@ -28,15 +28,13 @@ When a check-in arrives (`record_beat`) it may email too (one email at most):
 
 import json
 import os
-import re
 import time
 import uuid
 from datetime import datetime, timezone
 
-from render import CHECKIN, when, zone_for
+from render import CHECKIN, recipients, when, zone_for
 
 STATES = {"awake", "sleeping", "shutdown", "stopping", "removed"}
-EMAIL = re.compile(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(\.[a-z0-9-]+)+")
 MAX_TEXT = 300
 # Pending notices kept per Mac until it next checks in.
 MAX_NOTICES = 20
@@ -110,8 +108,10 @@ def parse_heartbeat(body):
     if state not in STATES:
         raise Invalid("unknown state")
     to = data.get("to")
-    if to is not None and (not isinstance(to, str) or len(to) > 254 or not EMAIL.fullmatch(to.strip().lower())):
-        raise Invalid("to must be one email address")
+    if to is not None:
+        to = recipients(to)
+        if to is None:
+            raise Invalid("to must be an email address or a short list of them")
     interval = data.get("interval", 240)
     if not isinstance(interval, int) or isinstance(interval, bool) or not 60 <= interval <= 86400:
         raise Invalid("interval must be a whole number of seconds")
@@ -138,7 +138,7 @@ def parse_heartbeat(body):
         "id": _uuid(data.get("id"), "id"),
         "install": _uuid(data.get("install"), "install"),
         "details": details,
-        "to": to.strip().lower() if details else None,
+        "to": to if details else None,
         "mac": (_text(data.get("mac") or "a Mac", "mac") or "a Mac") if details else None,
         "user": _text(data.get("user") or "", "user") if details else None,
         "timeZone": (zone or "")[:64] if details else None,
@@ -211,8 +211,8 @@ def lines_for(kind, item, at, beat=None):
         if gaps:
             out += [gap_line(g, who, zone) for g in gaps]
         elif _covered(item, beat):
-            out.append("False alarm: Renew was running the whole time. The Mac couldn't reach the report "
-                       "server (it was offline, or the network blocked it).")
+            out.append("False alarm: Renew was running whenever the Mac was awake. The Mac was asleep, or "
+                       "couldn't reach the report server (it was offline, or the network blocked it).")
         elif _restarted(item, beat):
             out.append(f"The Mac restarted in that time (at {when(_dt(beat['boot']), zone)}).")
         else:

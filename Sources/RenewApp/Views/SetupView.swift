@@ -3,7 +3,6 @@ import RenewShared
 
 struct SetupView: View {
     @ObservedObject var model: AppModel
-    @State private var showingProfile = false
     @State private var showingUninstall = false
     @State private var confirmingRequest = false
 
@@ -12,7 +11,6 @@ struct SetupView: View {
             serviceSection
             permissionsSection
             protectionsSection
-            profileSection
             uninstallSection
         }
         .formStyle(.grouped)
@@ -20,7 +18,6 @@ struct SetupView: View {
         .onAppear {
             model.refreshPermissions()
         }
-        .sheet(isPresented: $showingProfile) { ProfileSheet() }
         .sheet(isPresented: $showingUninstall) { UninstallSheet(model: model) }
     }
 
@@ -167,7 +164,7 @@ struct SetupView: View {
         } header: {
             Text("Protections")
         } footer: {
-            Text("All off unless you turn them on, so Renew acts like an ordinary blocker, fine for a work Mac. Blocking works either way, and a running session still can't be shortened or stopped. During a session, protections can be turned on but not off.\(model.alertURL != nil ? " Your accountability partner is told when one is turned off." : "")")
+            Text("All off unless you turn them on, so Renew acts like an ordinary blocker, fine for a work Mac. Blocking works either way, and a running session still can't be shortened or stopped. During a session, protections can be turned on but not off.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -208,22 +205,6 @@ struct SetupView: View {
         .disabled(lockedOn || model.busy || !model.daemonReachable || !model.protectionsSupported)
     }
 
-    // MARK: profile
-
-    private var profileSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Optional extra. The profile turns off private/incognito windows in Chrome, Edge, Brave, Vivaldi and Firefox, and locks Renew's background items on. It can only be removed with a password, which you hand to someone else. It stays in place outside sessions too, until you remove it.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Create lock-down profile…") { showingProfile = true }
-            }
-        } header: {
-            Text("Lock-down profile")
-        }
-    }
-
     // MARK: uninstall
 
     private var uninstallSection: some View {
@@ -260,7 +241,7 @@ struct SetupView: View {
             Button("Request uninstall") { model.requestUninstall() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Renew keeps working as normal. You can uninstall it 24 hours from now, between block sessions.\(model.alertURL != nil ? " Your accountability partner is told." : "")")
+            Text("Renew keeps working as normal. You can uninstall it 24 hours from now, between block sessions.\(model.reportsPartners.isEmpty ? "" : " Your accountability partners are told.")")
         }
     }
 
@@ -286,78 +267,6 @@ struct SetupView: View {
 
 // MARK: - Sheets
 
-private struct ProfileSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var password = ProfileBuilder.randomPassword()
-    @State private var savedURL: URL?
-    @State private var error: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Lock-down profile").font(.title2.weight(.bold))
-            Text("This is the profile's removal password. Write it down and give it to someone you trust, or seal it away. Without it, the profile can't be removed.")
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack {
-                Text(password)
-                    .font(.system(.title3, design: .monospaced).weight(.semibold))
-                    .textSelection(.enabled)
-                Spacer()
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(password, forType: .string)
-                }
-                Button("New password") { password = ProfileBuilder.randomPassword(); savedURL = nil }
-            }
-            .padding(12)
-            .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("1. Click **Save & open profile**. macOS saves it to Downloads and says it's ready to review.")
-                Text("2. In **System Settings → General → Device Management**, double-click Renew and click Install.")
-                Text("3. Come back and click **Delete profile file**, because the file contains the password in plain text.")
-            }
-            .font(.callout)
-
-            if let error { Text(error).foregroundStyle(.red).font(.callout) }
-
-            HStack {
-                Button("Close") { dismiss() }
-                Spacer()
-                if let url = savedURL {
-                    Button("Open Device Management") {
-                        if let u = URL(string: "x-apple.systempreferences:com.apple.Profiles-Settings.extension") {
-                            NSWorkspace.shared.open(u)
-                        }
-                    }
-                    Button("Delete profile file") {
-                        try? FileManager.default.removeItem(at: url)
-                        savedURL = nil
-                        dismiss()
-                    }
-                } else {
-                    Button("Save & open profile") {
-                        do {
-                            let url = try ProfileBuilder.write(password: password)
-                            savedURL = url
-                            NSWorkspace.shared.open(url)
-                        } catch {
-                            self.error = "Couldn't write the profile: \(error.localizedDescription)"
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            Text("On recent macOS versions the background-items lock may only apply when the profile comes from a device-management (MDM) server. The password and the browser settings work either way.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(24)
-        .frame(width: 560)
-    }
-}
-
 private struct UninstallSheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -381,10 +290,6 @@ private struct UninstallSheet: View {
             TextField("Type the phrase", text: $typed)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))
-            Text("If you installed the lock-down profile, remove it afterwards in System Settings → General → Device Management. It needs its removal password.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)

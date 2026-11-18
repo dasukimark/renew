@@ -1,8 +1,9 @@
 import Foundation
 
-/// One thing your accountability partner was told (or is about to be): an
-/// email report, an instant alert, or a check-in email the report server
-/// sent. Shown on the Accountability page so you can see what they see.
+/// One thing your accountability partners were told (or are about to be):
+/// an email report or a check-in email the report server sent. `alert`
+/// entries come from older versions, which also sent instant alerts; they're
+/// kept so old history still loads. Shown on the Accountability page so you can see what they see.
 public struct PartnerLogEntry: Codable, Equatable, Sendable, Identifiable {
     public enum Channel: String, Codable, Sendable { case email, alert, checkin }
     public enum Status: String, Codable, Sendable { case sent, waiting, failed }
@@ -14,7 +15,7 @@ public struct PartnerLogEntry: Codable, Equatable, Sendable, Identifiable {
     public var title: String
     public var lines: [String]
     /// The user an email was about (from the report). Entries with a user
-    /// are shown only to that user; the rest (alerts, check-ins) are about
+    /// are shown only to that user; the rest (check-ins, old alerts) are about
     /// the whole Mac.
     public var user: String?
 

@@ -1,31 +1,34 @@
 import Foundation
+import SystemConfiguration
 
-/// Email reports for an accountability partner. renewd POSTs a `Report` to
+/// Email reports for accountability partners. renewd POSTs a `Report` to
 /// your report server (see `server/reports/`), which emails it to the
-/// partner's address set here. Like the rest of the destination, the address
-/// can only be changed between sessions, and the old partner is told.
+/// partners' addresses set here. Like the rest of the destination, the
+/// addresses can only be changed between sessions, and removed partners are
+/// told.
 ///
 /// The server is normally the built-in one (`ReportServer`, installed with
-/// Renew), so only the partner's address is needed; `url` and `token` are
+/// Renew), so only the partners' addresses are needed; `url` and `token` are
 /// set only for a different server.
 ///
 /// A report names the site, the page title, why it was flagged, when and
 /// for how long. It never carries the full address.
 public struct ReportDestination: Codable, Equatable, Sendable {
-    /// Where the server emails reports.
-    public var partnerEmail: String
+    /// Where the server emails reports. Never empty once normalized.
+    public var partnerEmails: [String]
     /// A different report server, or nil for the built-in one.
     public var url: String?
     /// Sent as `Authorization: Bearer <token>`; nil with `url`.
     public var token: String?
 
-    public init(partnerEmail: String, url: String? = nil, token: String? = nil) {
-        self.partnerEmail = partnerEmail
+    public init(partnerEmails: [String], url: String? = nil, token: String? = nil) {
+        self.partnerEmails = partnerEmails
         self.url = url
         self.token = token
     }
 
     public static let maxTokenLength = 512
+    public static let maxPartners = 10
 
     public var usesBuiltInServer: Bool { url == nil }
 
@@ -47,15 +50,49 @@ public struct ReportDestination: Codable, Equatable, Sendable {
         return e
     }
 
+    /// The addresses normalized, without blanks or repeats, in order. nil if
+    /// any is invalid, none are given, or there are more than `maxPartners`.
+    public static func normalizeEmails(_ raw: [String]) -> [String]? {
+        var out: [String] = []
+        for r in raw where !r.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let e = normalizeEmail(r) else { return nil }
+            if !out.contains(e) { out.append(e) }
+        }
+        guard !out.isEmpty, out.count <= maxPartners else { return nil }
+        return out
+    }
+
     /// A usable destination, trimmed, or nil. Without a URL it uses the
     /// built-in server; with one it needs a token too.
-    public static func normalize(partnerEmail rawEmail: String, url rawURL: String? = nil,
+    public static func normalize(partnerEmails rawEmails: [String], url rawURL: String? = nil,
                                  token rawToken: String? = nil) -> ReportDestination? {
-        guard let email = normalizeEmail(rawEmail) else { return nil }
+        guard let emails = normalizeEmails(rawEmails) else { return nil }
         let urlText = rawURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !urlText.isEmpty else { return ReportDestination(partnerEmail: email) }
+        guard !urlText.isEmpty else { return ReportDestination(partnerEmails: emails) }
         guard let server = ReportServer.normalize(url: urlText, token: rawToken ?? "") else { return nil }
-        return ReportDestination(partnerEmail: email, url: server.url, token: server.token)
+        return ReportDestination(partnerEmails: emails, url: server.url, token: server.token)
+    }
+
+    private enum CodingKeys: String, CodingKey { case partnerEmails, partnerEmail, url, token }
+
+    /// Reads state files from before there could be several partners
+    /// (`partnerEmail`) too.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let list = try c.decodeIfPresent([String].self, forKey: .partnerEmails) {
+            partnerEmails = list
+        } else {
+            partnerEmails = [try c.decode(String.self, forKey: .partnerEmail)]
+        }
+        url = try c.decodeIfPresent(String.self, forKey: .url)
+        token = try c.decodeIfPresent(String.self, forKey: .token)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(partnerEmails, forKey: .partnerEmails)
+        try c.encodeIfPresent(url, forKey: .url)
+        try c.encodeIfPresent(token, forKey: .token)
     }
 }
 
@@ -74,9 +111,14 @@ public struct ReportServer: Codable, Equatable, Sendable {
     /// An https URL (the token travels with every report; plain http only
     /// to this Mac, for testing) and a non-empty token without spaces.
     public static func normalize(url rawURL: String, token rawToken: String) -> ReportServer? {
-        guard let url = Alerts.normalize(rawURL), let parsed = URL(string: url) else { return nil }
-        let local = ["localhost", "127.0.0.1", "::1"].contains(parsed.host?.lowercased() ?? "")
-        guard parsed.scheme?.lowercased() == "https" || local else { return nil }
+        let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard url.count <= 2_048, let parsed = URL(string: url), let host = parsed.host?.lowercased(), !host.isEmpty
+        else { return nil }
+        switch parsed.scheme?.lowercased() {
+        case "https": break
+        case "http" where ["localhost", "127.0.0.1", "::1"].contains(host): break
+        default: return nil
+        }
         let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty, token.count <= ReportDestination.maxTokenLength,
               token.unicodeScalars.allSatisfy({ $0.isASCII && $0.value > 0x20 && $0.value < 0x7f })
@@ -124,10 +166,15 @@ public struct Report: Codable, Equatable, Sendable {
     /// Flagged visits left out because the report was full.
     public var omitted: Int
     public var changes: [String]
-    /// The partner's address, filled in when sent (from the destination).
-    public var to: String?
+    /// The partners' addresses, filled in when sent (from the destination).
+    public var to: Recipients?
     /// The Mac's time zone (e.g. `America/New_York`), so the email shows its times.
     public var timeZone: String?
+
+    /// This Mac's name, as reports show it.
+    public static var macName: String {
+        (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? Host.current().localizedName ?? "a Mac"
+    }
 
     public static let maxFlags = 200
     /// Reports are trimmed to stay under this many bytes of JSON (the server
@@ -238,14 +285,51 @@ extension MonitorSettings {
     }
 }
 
+/// A report's recipients. Sent as one string for a single address, which
+/// report servers from before several partners also accept, or as a list.
+public struct Recipients: Codable, Equatable, Sendable {
+    public var emails: [String]
+
+    public init(_ emails: [String]) { self.emails = emails }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let one = try? c.decode(String.self) { emails = [one] } else { emails = try c.decode([String].self) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        if emails.count == 1 { try c.encode(emails[0]) } else { try c.encode(emails) }
+    }
+}
+
 /// Who a report goes to and through which server, fully resolved.
 public struct ReportTarget: Codable, Equatable, Sendable {
-    public var partnerEmail: String
+    public var partnerEmails: [String]
     public var server: ReportServer
 
-    public init(partnerEmail: String, server: ReportServer) {
-        self.partnerEmail = partnerEmail
+    public init(partnerEmails: [String], server: ReportServer) {
+        self.partnerEmails = partnerEmails
         self.server = server
+    }
+
+    private enum CodingKeys: String, CodingKey { case partnerEmails, partnerEmail, server }
+
+    /// Reads outboxes from before there could be several partners too.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let list = try c.decodeIfPresent([String].self, forKey: .partnerEmails) {
+            partnerEmails = list
+        } else {
+            partnerEmails = [try c.decode(String.self, forKey: .partnerEmail)]
+        }
+        server = try c.decode(ReportServer.self, forKey: .server)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(partnerEmails, forKey: .partnerEmails)
+        try c.encode(server, forKey: .server)
     }
 }
 
@@ -357,7 +441,7 @@ public enum ReportClient {
     /// The JSON body for `report` sent to `target`.
     public static func body(_ report: Report, to target: ReportTarget) -> Data? {
         var report = report
-        report.to = target.partnerEmail
+        report.to = Recipients(target.partnerEmails)
         report.timeZone = TimeZone.current.identifier
         return try? Report.encoder.encode(report)
     }

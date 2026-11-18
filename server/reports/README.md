@@ -1,18 +1,19 @@
 # Renew report server
 
 A small AWS Lambda that turns Renew's flag reports into emails for your
-accountability partner. renewd POSTs each report here; the Lambda emails it
-from a Gmail account you create just for this. Your partner doesn't need an
+accountability partners. renewd POSTs each report here; the Lambda emails it
+from a Gmail account you create just for this. Partners don't need an
 account, they only get emails.
 
 It also keeps track of renewd's **check-ins** (about every 4 minutes while
 reports are on, plus one before the Mac sleeps or renewd exits) in a small
-DynamoDB table, and every minute emails the partner about any Mac that went
+DynamoDB table, and every minute emails the partners about any Mac that went
 quiet without warning. See [Check-ins](#check-ins).
 
-Your partner's address is set in the Renew app and sent with each report. It
-can only be changed between block sessions, and the previous partner gets a
-last email when it is. The token is what stops strangers using the server; to
+Your partners' addresses (up to 10) are set in the Renew app and sent with
+each report, as one address or a list; each email goes to all of them. They
+can only be changed between block sessions, and a removed partner gets a last
+email. The token is what stops strangers using the server; to
 also limit which addresses it will email, set `AllowedRecipients`.
 
 Reports name the site, the page title, why it was flagged, when and for how
@@ -51,7 +52,7 @@ You need an AWS account, the [AWS CLI](https://aws.amazon.com/cli/) and the
    Redeploying keeps the values the stack already has, not the template's
    defaults. To change them later, pass them explicitly:
    `sam deploy --parameter-overrides GmailAddress=<address> SilenceMinutes=10 StoppingMinutes=3 QuietCapHours=168`. Leave `AllowedRecipients` empty, or list your
-   partner's address to make the server refuse anyone else. `TimeZone` is only
+   partners' addresses to make the server refuse anyone else. `TimeZone` is only
    a fallback: reports carry the Mac's time zone. Say yes when SAM asks whether it's OK that the
    function URL has no authentication: the Lambda checks the token itself.
    The function is named `renew-report-server`; its URL stays the same across
@@ -61,22 +62,22 @@ You need an AWS account, the [AWS CLI](https://aws.amazon.com/cli/) and the
    URL and token to `~/.config/renew/report-server.json` (readable only by
    you). Reinstall Renew (`sudo scripts/install.sh`); the installer copies it
    into renewd's root-only folder.
-6. **Turn reports on:** in **Accountability → Partner**, enter your partner's
-   email and click **Turn on reports** (or `renew reports set <partner-email>`). Your partner gets a "reports are on" email. **Send
+6. **Turn reports on:** in **Accountability → Partners**, enter your partners'
+   emails and click **Turn on reports** (or `renew reports set <email> [<email>...]`). Your partners get a "reports are on" email. **Send
    test** sends another.
 
 ## Check-ins
 
 Each check-in says whether the Mac is `awake`, going to sleep (`sleeping`),
 shutting down (`shutdown`), or that renewd stopped without a shutdown
-(`stopping`), along with when the Mac booted. It names the partner, Mac and
+(`stopping`), along with when the Mac booted. It names the partners, Mac and
 user only when renewd starts or those change; the table keeps them. A
 check-in without them from a Mac the server doesn't know gets
 `{"needDetails": true}`, and renewd sends them next time. `removed` (reports
 turned off or moved, or `renew uninstall`) deletes the Mac's entry. The table
 (`renew-heartbeats`) is created by `sam deploy`; no new secrets are needed.
 
-Every minute the Lambda emails the partner about a Mac that:
+Every minute the Lambda emails the partners about a Mac that:
 
 - was `awake` and hasn't checked in for `SilenceMinutes` (10);
 - was `stopping` and hasn't checked in for `StoppingMinutes` (3);
@@ -94,8 +95,8 @@ When a check-in arrives it may also send one email:
 
 Each silence and each gap is emailed once; email ids depend on what they're
 about, so a retry is never a second email. The reply to a check-in lists what
-the partner was emailed, which the Renew app shows under **Accountability →
-Sent to your partner**.
+the partners were emailed, which the Renew app shows under **Accountability →
+Sent to your partners**.
 
 ## Check it
 
@@ -131,8 +132,12 @@ Logs are in CloudWatch under `/aws/lambda/<function name>` (kept 30 days).
   call the function URL; check the function's resource-based policy allows
   `lambda:InvokeFunctionUrl` (and, on newer accounts, `lambda:InvokeFunction`)
   for principal `*` with function URL auth type `NONE`.
-- **Changing the partner:** in Renew, between block sessions. If you set
-  `AllowedRecipients`, add the new address there first (`sam deploy`).
+- **Changing partners:** add partners any time, remove them between block
+  sessions. If you set `AllowedRecipients`, add any new address there first
+  (`sam deploy`). **More than one partner needs a server deployed after
+  several partners were added:** an older one refuses every report and
+  check-in sent to a list (HTTP 400), so redeploy before adding a second
+  partner.
   **Changing the token:** update the SSM parameter, then redeploy so the
   Lambda reads it again (it caches secrets while it stays warm), and set the
   new token in Renew: rerun `configure-mac.sh` and reinstall Renew.
