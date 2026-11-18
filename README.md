@@ -90,7 +90,7 @@ either way, and a running session can't be shortened or stopped either way.
 
 | Protection | CLI name | What it does |
 |---|---|---|
-| Keep Renew running | `keep-running` | Runs a second root service, the guard (otherwise only renewd runs). During a session, renewd and the guard bring each other and the app back if they're stopped, undo `launchctl disable`, and put Renew's files back if they're deleted or changed. |
+| Keep Renew running | `keep-running` | Runs a second root service, the guard (otherwise only renewd runs). During a session, renewd and the guard bring each other and the app back if they're stopped, undo `launchctl disable`, and put Renew's files back if they're deleted or changed. With email reports on, the guard also watches renewd's internal heartbeat (see [Check-ins](#check-ins)). |
 | Lock System Settings switches | `lock-settings` | During a session, switches for background items and permissions only turn on, not off (see [below](#turning-renew-off-in-system-settings)). |
 | Close browsers Renew can't watch | `close-browsers` | During a session, closes browsers Renew has lost permission to watch, unsupported browsers and unknown apps built on Chrome's or Firefox's engine. With it off, those browsers just aren't blocked. |
 | Uninstall cooling-off | `cooling-off` | Uninstalling needs a request and a 24-hour wait (see [Uninstalling](#uninstalling)). |
@@ -232,11 +232,29 @@ While email reports are on, Renew keeps two heartbeats:
   pauses during sleep, so sleep doesn't count). Anything over a minute is
   sent with the next check-in and emailed right away: "Renew wasn't running
   for 4 minutes while the Mac was awake (8:18 PM to 8:22 PM)". So stopping
-  Renew and starting it again is reported however short the gap.
-- **Server:** renewd checks in with the report server about every 4 minutes
-  (give or take 30 seconds), and when the Mac sleeps, wakes or renewd stops.
+  Renew and starting it again is reported however short the gap, and being
+  offline only delays the email.
+  - If the Mac restarted after renewd stopped without a clean exit (it was
+    force-quit, or the Mac crashed or lost power), renewd reads macOS's
+    power log (`pmset -g log`) and shutdown records to see how long the Mac
+    was awake before it went down. A crash or power loss ends both at once,
+    so it's not reported; force-quitting Renew, using the Mac and then
+    restarting it is.
+  - Every 5 minutes renewd also notes in `state.json` that it's running. If
+    `alive.json` is then missing, unreadable or older than that note, the
+    partner is told Renew's records were deleted or replaced.
+  - With **Keep Renew running** on, the guard is a second witness: it
+    watches `alive.json` and reports time renewd's record stood still
+    itself, so hiding a stop means stopping both and editing both files.
+    renewd brings the guard back within a minute if it's stopped, even
+    between sessions.
+- **Server:** renewd checks in with the report server about every 15 minutes
+  (give or take 2), when the Mac sleeps, wakes or renewd stops, and right
+  away when there's downtime to report.
   The server checks every minute and emails your partner when:
-  - the Mac is awake and Renew hasn't checked in for **10 minutes**;
+  - the Mac is awake and Renew hasn't checked in for **2 hours** (the internal
+    heartbeat reports time Renew wasn't running, so this only catches Renew
+    never coming back: removed, or the Mac wiped);
   - Renew said its service was stopping (not a shutdown) and hasn't checked
     in for **3 minutes**;
   - Renew said the Mac was going to sleep or shutting down and nothing has
@@ -261,10 +279,14 @@ state, the boot time and any downtime.
 
 Good to know:
 
-- Being offline (or on a network that blocks the server) for more than 10
-  minutes while the Mac is awake looks the same as Renew being stopped. Your
-  partner gets a "stopped checking in" email, then a "false alarm" one once
-  the Mac is back online.
+- Being offline (or on a network that blocks the server) for more than 2
+  hours while the Mac is awake (a flight without Wi-Fi) looks the same as
+  Renew being removed. Your partner gets a "stopped checking in" email, then
+  a "false alarm" one once the Mac is back online. If Renew is removed
+  completely, your partner hears about it within about 2 hours.
+- renewd sends no check-ins between "will sleep" and the next full wake
+  (macOS briefly wakes a sleeping Mac for maintenance). If macOS ever misses
+  telling it the Mac woke, keyboard or mouse use counts as a wake.
 - Renew learns that the Mac is shutting down from the Renew app (or from no
   one being logged in). If the app isn't running, a restart still looks fine
   as long as the Mac comes back within 3 minutes, but a longer shutdown is
@@ -272,8 +294,10 @@ Good to know:
 - Each user only sees emails about themselves under **Sent to your
   partners**, plus the Mac-wide check-in emails.
 - Someone with an admin password could read the server token and fake
-  check-ins, or edit renewd's files. Check-ins catch Renew being stopped or
-  removed, not a determined admin.
+  check-ins, or stop renewd and the guard, edit both records and clear the
+  power log. Signing the records wouldn't help: the key would live on the
+  same Mac. Check-ins catch Renew being stopped or removed, not a determined
+  admin.
 
 ### Uninstalling
 
@@ -327,7 +351,8 @@ renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/statu
   ├─ [keep-running] restores its files from /var/db/com.renew/backup if deleted or altered
   └─ [keep-running] keeps the guard loaded
 renewd --guard  (second LaunchDaemon, loaded by renewd only with keep-running on)
-                ── keeps renewd loaded, repairs files, restores state.json
+                ── keeps renewd loaded, repairs files, restores state.json (during sessions)
+                ── watches alive.json and reports time renewd wasn't running (witness.json)
 
 [name]: only with that protection on (see Protections), or with Activity or the Monitor on.
 ```

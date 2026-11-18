@@ -49,6 +49,8 @@ public enum Paths {
     public static var partnerLogFile: String { dataDir + "/partner-log.json" }
     /// renewd's internal heartbeat (see `AliveRecord`).
     public static var aliveFile: String { dataDir + "/alive.json" }
+    /// The guard's copy of renewd's internal heartbeat (see `WitnessRecord`).
+    public static var witnessFile: String { dataDir + "/witness.json" }
     /// Downtime found by the internal heartbeat, waiting to be sent (see `DowntimeGap`).
     public static var downtimeGapsFile: String { dataDir + "/downtime-gaps.json" }
     /// Previous report servers still to be told to stop expecting check-ins.

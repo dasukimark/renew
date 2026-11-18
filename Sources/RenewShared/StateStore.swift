@@ -13,6 +13,11 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// This install's id, sent with check-ins (see `Heartbeat`). Made by
     /// renewd the first time it starts.
     public var installID: UUID?
+    /// While email reports are on, when renewd last noted that it was
+    /// running (every few minutes). If its internal heartbeat's record is
+    /// then missing, or older than this, the record was deleted or put back
+    /// from an old copy (see `AliveRecord.isConsistent`).
+    public var aliveMarker: AliveMarker?
     public var uninstall: UninstallRequest?
     /// Recurring block sessions renewd starts on its own (see `Schedule`).
     public var schedules: [Schedule]?

@@ -4,8 +4,9 @@ import IOKit.pwr_mgt
 import RenewShared
 
 /// Sends check-ins (see `Heartbeat`) to the report server while email
-/// reports are on: one at start, then about every 4 minutes, plus one when
-/// the Mac sleeps, wakes or renewd stops. Check-ins skip the outbox: an old
+/// reports are on: one at start, then about every 15 minutes, plus one when
+/// the Mac sleeps, wakes or renewd stops, and one as soon as new downtime is
+/// waiting (found by renewd or the guard). Check-ins skip the outbox: an old
 /// one is worthless, so a failed one is just tried again a minute later.
 /// Each carries the downtime the internal heartbeat found (see
 /// `AliveTracker`) until the server takes it, and names the partner, Mac
@@ -42,6 +43,10 @@ final class Heartbeater: @unchecked Sendable {
     /// The details the server last took; nil until then, so the first
     /// check-in after starting carries them.
     private var acceptedDetails: Heartbeat.Details?
+    /// The gaps file as last looked at (modification time and size), and
+    /// the gap ids the last check-in carried: a gap not among them is new.
+    private var gapsStamp: [Int] = []
+    private var gapsTried: Set<UUID> = []
     /// Uptime when the app last said the Mac is powering off.
     private var poweringOffAt: TimeInterval?
 
@@ -56,6 +61,8 @@ final class Heartbeater: @unchecked Sendable {
     /// clients; an `awake` check-in then, right before it sleeps again
     /// unannounced, makes the server email that Renew went quiet.
     private var asleep = false
+    /// Awake-clock seconds at "will sleep".
+    private var sleptAt: TimeInterval = 0
 
     init(queue: DispatchQueue, dev: Bool, destination: @escaping () -> ReportTarget?,
          installID: @escaping () -> UUID, userName: @escaping () -> String) {
@@ -74,6 +81,17 @@ final class Heartbeater: @unchecked Sendable {
     /// telling previous destinations to stop expecting check-ins.
     func tick() {
         retryRemovals()
+        if asleep, Heartbeat.inUseSinceSleep(awakeSinceSleep: AliveRecord.awakeNow() - sleptAt, sleepWait: Self.sleepWait,
+                                             idle: Self.hidIdleSeconds()) {
+            // macOS didn't say the Mac woke (or it missed telling us), but
+            // someone is using it: dark wakes have no keyboard or mouse.
+            asleep = false
+            log("heartbeat: the Mac is in use without a wake notice; checking in again")
+            nextBeat = 0
+        }
+        // Not while a check-in is on its way: its reply sets the next one,
+        // and the file is looked at again afterwards.
+        if !sending, newGapsWaiting() { nextBeat = 0 }
         guard !sending, !asleep, Self.uptime >= nextBeat, let target = destination() else { return }
         send(.awake, to: target)
     }
@@ -173,6 +191,7 @@ final class Heartbeater: @unchecked Sendable {
     private func send(_ state: Heartbeat.State, to target: ReportTarget, then: (() -> Void)? = nil) {
         let delay = Heartbeat.nextDelay()
         if logOnly {
+            gapsTried = Set(gaps.load().map(\.id))
             logDev(state, to: target)
             nextBeat = Self.uptime + delay
             then?()
@@ -180,6 +199,7 @@ final class Heartbeater: @unchecked Sendable {
         }
         sending = true
         let beat = make(state, for: target)
+        gapsTried = Set((beat.gaps ?? []).map(\.id))
         HeartbeatClient.post(beat, to: target.server) { [weak self] outcome, reply in
             self?.queue.async {
                 guard let self else { return }
@@ -206,6 +226,17 @@ final class Heartbeater: @unchecked Sendable {
                 then?()
             }
         }
+    }
+
+    /// Whether the gaps file holds a gap no check-in has tried to send yet.
+    /// Reads the file only when it changed.
+    private func newGapsWaiting() -> Bool {
+        var st = stat()
+        let stamp = stat(gaps.path, &st) == 0
+            ? [Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec), Int(st.st_size)] : []
+        guard stamp != gapsStamp else { return false }
+        gapsStamp = stamp
+        return !Set(gaps.load().map(\.id)).subtracting(gapsTried).isEmpty
     }
 
     private func logDev(_ state: Heartbeat.State, to target: ReportTarget) {
@@ -247,6 +278,7 @@ final class Heartbeater: @unchecked Sendable {
             IOAllowPowerChange(rootPort, argument)
         case Self.systemWillSleep:
             asleep = true
+            sleptAt = AliveRecord.awakeNow()
             pendingSleep = argument
             guard let target = destination() else { return allowSleep(argument) }
             // Even if a check-in is on its way, the server must hear this one.
@@ -263,6 +295,16 @@ final class Heartbeater: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// Seconds since the last keyboard, mouse or trackpad input.
+    static func hidIdleSeconds() -> TimeInterval? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOHIDSystem"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        guard let value = IORegistryEntryCreateCFProperty(service, "HIDIdleTime" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? NSNumber else { return nil }
+        return value.doubleValue / 1_000_000_000
     }
 
     private func allowSleep(_ argument: Int) {

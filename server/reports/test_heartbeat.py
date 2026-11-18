@@ -231,7 +231,7 @@ SCHEDULED = {"source": "aws.events", "detail-type": "Scheduled Event", "detail":
 
 
 def test_scheduled_check_emails_silent_mac(smtp, store, clock):
-    store.items[INSTALL] = (stored(last_seen=T0 - 3600))
+    store.items[INSTALL] = (stored(last_seen=T0 - 3 * 3600))
     assert app.handler(SCHEDULED, None) == {"alerted": 1}
     msgs = sent(smtp)
     assert len(msgs) == 1 and msgs[0]["Subject"] == "Renew on Test Mac stopped checking in"
@@ -259,7 +259,7 @@ def test_scheduled_check_quiet_too_long(smtp, store, clock):
 
 
 def test_scheduled_check_retries_failed_send(smtp, store, clock):
-    store.items[INSTALL] = (stored(last_seen=T0 - 3600))
+    store.items[INSTALL] = (stored(last_seen=T0 - 3 * 3600))
     smtp.fail_send = True
     assert app.handler(SCHEDULED, None) == {"alerted": 0}
     assert store.items[INSTALL]["alerted"] is False
@@ -300,7 +300,7 @@ def test_gap_wording():
 def test_default_limits(monkeypatch):
     for name in ("SILENCE_MINUTES", "STOPPING_MINUTES", "QUIET_CAP_HOURS"):
         monkeypatch.delenv(name, raising=False)
-    assert heartbeat.silence_seconds() == 600
+    assert heartbeat.silence_seconds() == 7200
     assert heartbeat.stopping_seconds() == 180
     assert heartbeat.cap_seconds() == 7 * 86400
 
@@ -343,7 +343,7 @@ def test_slim_beat_keeps_stored_details(smtp, store, clock):
 def test_several_partners_get_checkin_emails(smtp, store, clock):
     app.handler(event(beat(to=["Partner@Test.Invalid", "other@test.invalid"])), None)
     assert store.items[INSTALL]["to"] == ["partner@test.invalid", "other@test.invalid"]
-    store.items[INSTALL]["lastSeen"] = T0 - 3600
+    store.items[INSTALL]["lastSeen"] = T0 - 3 * 3600
     assert app.handler(SCHEDULED, None) == {"alerted": 1}
     assert sent(smtp)[0]["To"] == "partner@test.invalid, other@test.invalid"
 
@@ -386,6 +386,28 @@ def test_restarted_gap_wording(smtp, store, clock):
     store.items[INSTALL] = (stored(last_seen=T0 - 240))
     app.handler(event(slim(gaps=[gap_body(restarted=True)])), None)
     assert "the Mac restarted before it ran again" in sent(smtp)[0].get_body(("plain",)).get_content()
+
+
+def test_restarted_gap_with_awake_time_from_the_power_log(smtp, store, clock):
+    store.items[INSTALL] = (stored(last_seen=T0 - 240))
+    g = dict(gap_body(), awakeSeconds=900, restarted=True)
+    app.handler(event(slim(gaps=[g])), None)
+    text = sent(smtp)[0].get_body(("plain",)).get_content()
+    assert "for 15 minutes while the Mac was awake, and the Mac restarted before it ran again" in text
+
+
+def test_records_missing_gap_wording(smtp, store, clock):
+    store.items[INSTALL] = (stored(last_seen=T0 - 240))
+    g = dict(gap_body(restarted=True), kind="recordsMissing")
+    app.handler(event(slim(gaps=[g])), None)
+    text = sent(smtp)[0].get_body(("plain",)).get_content()
+    assert "records on Test Mac (tester) were deleted or replaced with an old copy" in text
+
+
+def test_unknown_gap_kind_is_an_ordinary_gap(smtp, store, clock):
+    store.items[INSTALL] = (stored(last_seen=T0 - 240))
+    app.handler(event(slim(gaps=[dict(gap_body(), kind="fromTheFuture")])), None)
+    assert "for 4 minutes while the Mac was awake" in sent(smtp)[0].get_body(("plain",)).get_content()
 
 
 def test_gap_on_first_beat(smtp, store, clock):
@@ -460,3 +482,9 @@ def test_stopped_email_lists_gaps(smtp, store, clock):
     app.handler(event(slim(gaps=[gap_body(awake=300)])), None)
     text = sent(smtp)[0].get_body(("plain",)).get_content()
     assert "was stopped for" in text and "5 minutes while the Mac was awake" in text
+
+
+def test_silent_email_names_the_macs_own_interval(smtp, store, clock):
+    store.items[INSTALL] = stored(last_seen=T0 - 3 * 3600, interval=900)
+    app.handler(SCHEDULED, None)
+    assert "checks in about every 15 minutes" in sent(smtp)[0].get_body(("plain",)).get_content()

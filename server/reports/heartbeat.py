@@ -1,6 +1,7 @@
 """Check-ins (heartbeats) from renewd, and emails when they stop.
 
-While email reports are on, renewd checks in about every 4 minutes, and
+While email reports are on, renewd checks in about every 15 minutes (each
+check-in says how often), at once when it has downtime to report, and
 also says when the Mac is going to sleep (`sleeping`), shutting down
 (`shutdown`), or when its service stops without a shutdown (`stopping`).
 Each Mac's latest check-in is one item in a DynamoDB table, keyed by its
@@ -8,7 +9,9 @@ install id. The partner, Mac name and user come only in some check-ins
 (when they change); the item keeps them. A scheduled run every minute
 (`check_all`) emails the partner when:
 
-- `awake`, then nothing for SILENCE_MINUTES (10): "silent".
+- `awake`, then nothing for SILENCE_MINUTES (120): "silent". renewd's
+  internal heartbeat reports time it wasn't running (`gaps`) by itself, so
+  this is only the dead man's switch for Renew never coming back.
 - `stopping`, then nothing for STOPPING_MINUTES (3): "silent".
 - `sleeping` or `shutdown`, then nothing for QUIET_CAP_HOURS (168): "quiet".
 
@@ -35,6 +38,7 @@ from datetime import datetime, timezone
 from render import CHECKIN, recipients, when, zone_for
 
 STATES = {"awake", "sleeping", "shutdown", "stopping", "removed"}
+GAP_KINDS = {"recordsMissing"}
 MAX_TEXT = 300
 # Pending notices kept per Mac until it next checks in.
 MAX_NOTICES = 20
@@ -58,7 +62,7 @@ def now():
 
 
 def silence_seconds():
-    return int(float(os.environ.get("SILENCE_MINUTES", "10")) * 60)
+    return int(float(os.environ.get("SILENCE_MINUTES", "120")) * 60)
 
 
 def stopping_seconds():
@@ -128,9 +132,13 @@ def parse_heartbeat(body):
         awake = g.get("awakeSeconds")
         if awake is not None and (not isinstance(awake, int) or isinstance(awake, bool) or awake < 0):
             raise Invalid(f"gaps[{i}].awakeSeconds must be a whole number")
+        kind = g.get("kind")
+        if kind is not None and kind not in GAP_KINDS:
+            # A kind from a newer Renew: still a gap, worded as an ordinary one.
+            kind = None
         gaps.append({"id": _uuid(g.get("id"), f"gaps[{i}].id"), "from": _epoch(g.get("from"), f"gaps[{i}].from"),
                      "to": _epoch(g.get("to"), f"gaps[{i}].to"), "awakeSeconds": awake,
-                     "restarted": g.get("restarted") is True})
+                     "restarted": g.get("restarted") is True, "kind": kind})
     last = data.get("lastAccepted")
     covered = data.get("coveredSince")
     details = to is not None
@@ -196,9 +204,9 @@ def lines_for(kind, item, at, beat=None):
                 AGAIN]
     if kind == "silent":
         return [f"Renew on {who} last checked in at {last}, {age} ago. While the Mac is awake it checks in "
-                f"about every 4 minutes.",
-                "That can mean Renew's background service was stopped or removed, or the Mac lost its internet "
-                "connection or power.",
+                f"about every {gap(item.get('interval', 240))}.",
+                "That can mean Renew was removed, or the Mac has been awake but offline (or lost power). "
+                "If Renew was only stopped, it says so, with how long, once it runs again.",
                 AGAIN]
     if kind == "quiet":
         doing = "going to sleep" if item["state"] == "sleeping" else "shutting down"
@@ -229,6 +237,12 @@ def lines_for(kind, item, at, beat=None):
 
 def gap_line(g, who, zone):
     span = f"{when(_dt(g['from']), zone)} to {when(_dt(g['to']), zone)}"
+    if g.get("kind") == "recordsMissing":
+        return (f"Renew's records on {who} were deleted or replaced with an old copy while it wasn't running "
+                f"({span}), so it can't tell whether Renew was stopped while the Mac was awake.")
+    if g.get("awakeSeconds") is not None and g.get("restarted"):
+        return (f"Renew wasn't running on {who} for {gap(g['awakeSeconds'])} while the Mac was awake, "
+                f"and the Mac restarted before it ran again ({span}).")
     if g.get("awakeSeconds") is not None:
         return f"Renew wasn't running on {who} for {gap(g['awakeSeconds'])} while the Mac was awake ({span})."
     return (f"Renew's background service on {who} was stopped, and the Mac restarted before it ran again "

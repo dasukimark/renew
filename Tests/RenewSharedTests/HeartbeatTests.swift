@@ -4,7 +4,7 @@ import Testing
 
 // Made-up domains only; never the real explicit list.
 
-private func tempPath(_ name: String) -> String {
+func tempPath(_ name: String) -> String {
     let dir = NSTemporaryDirectory() + "renew-tests-\(UUID().uuidString)"
     return dir + "/" + name
 }
@@ -25,7 +25,7 @@ struct HeartbeatTests {
         #expect(json["install"] as? String == install.uuidString)
         #expect(json["boot"] as? String == "2026-11-17T08:00:00Z")
         #expect(json["sentAt"] as? String == "2026-11-17T16:00:00Z")
-        #expect(json["interval"] as? Int == 240)
+        #expect(json["interval"] as? Int == 900)
         #expect(json["to"] as? String == "partner@test.invalid")
         #expect(json["lastAccepted"] == nil)
         #expect(json["bootID"] as? String == ClockReading.bootID)
@@ -61,14 +61,14 @@ struct HeartbeatTests {
         #expect(json["coveredSince"] as? String == "2026-11-17T08:00:00Z")
     }
 
-    @Test func delayIsFourMinutesGiveOrTakeThirtySeconds() {
-        #expect(Heartbeat.nextDelay(random: 0) == 210)
-        #expect(Heartbeat.nextDelay(random: 0.5) == 240)
-        #expect(Heartbeat.nextDelay(random: 1) == 270)
-        #expect(Heartbeat.nextDelay(random: 7) == 270)
+    @Test func delayIsFifteenMinutesGiveOrTakeTwo() {
+        #expect(Heartbeat.nextDelay(random: 0) == 780)
+        #expect(Heartbeat.nextDelay(random: 0.5) == 900)
+        #expect(Heartbeat.nextDelay(random: 1) == 1_020)
+        #expect(Heartbeat.nextDelay(random: 7) == 1_020)
         for _ in 0..<200 {
             let d = Heartbeat.nextDelay()
-            #expect(d >= 210 && d <= 270)
+            #expect(d >= 780 && d <= 1_020)
         }
     }
 
