@@ -81,7 +81,7 @@ def event(body, method="POST", token=TOKEN):
     if token is not None:
         headers["authorization"] = f"Bearer {token}"
     return {
-        "requestContext": {"http": {"method": method}},
+        "requestContext": {"http": {"method": method}, "domainName": "reports.test.invalid"},
         "headers": headers,
         "body": body if isinstance(body, str) else json.dumps(body),
         "isBase64Encoded": False,

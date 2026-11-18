@@ -25,26 +25,33 @@ When a check-in arrives (`record_beat`) it may email too (one email at most):
 - "gap" when renewd's internal heartbeat found time the Mac was awake
   without Renew running (it was stopped and started again).
 
-`removed` (reports turned off or moved, or Renew uninstalled through
-`renew uninstall`) deletes the item, so no email follows.
+`removed` requests partner approval to end monitoring. A `witness` check-in
+reports a guard observation without changing the daemon's last-seen time.
 """
 
 import json
+import logging
 import os
 import time
 import uuid
 from datetime import datetime, timezone
 
-from render import CHECKIN, recipients, when, zone_for
+from render import CHECKIN, MAX_RECIPIENTS, as_list, recipients, when, zone_for
 
-STATES = {"awake", "sleeping", "shutdown", "stopping", "removed"}
-GAP_KINDS = {"recordsMissing"}
+STATES = {"awake", "sleeping", "shutdown", "stopping", "removed", "witness", "monitoringStatus", "requestRemoval"}
+GAP_KINDS = {"recordsMissing", "recordUnverified", "heartbeatStalled"}
 MAX_TEXT = 300
 # Pending notices kept per Mac until it next checks in.
 MAX_NOTICES = 20
 MAX_GAPS = 50
-# Gap ids already emailed, so a check-in sent twice doesn't email twice.
+# Gap ids already queued for delivery, shared between both reporters.
 MAX_REPORTED_GAPS = 200
+MAX_HISTORY = 100
+MAX_PENDING_EMAIL_BYTES = 210 * 1024
+MAX_NOTICE_BYTES = 85 * 1024
+# Longer than the Lambda timeout, so a timed-out worker's claim can be retried.
+EMAIL_LEASE_SECONDS = 60
+log = logging.getLogger(__name__)
 # A different boot time by more than this means the Mac restarted.
 BOOT_TOLERANCE = 5
 
@@ -71,6 +78,14 @@ def stopping_seconds():
 
 def cap_seconds():
     return int(float(os.environ.get("QUIET_CAP_HOURS", "168")) * 3600)
+
+
+def checkin_grace_seconds():
+    return int(float(os.environ.get("CHECKIN_GRACE_MINUTES", "5")) * 60)
+
+
+def restart_window_seconds():
+    return int(float(os.environ.get("RESTART_WINDOW_MINUTES", "60")) * 60)
 
 
 # MARK: parsing
@@ -142,6 +157,9 @@ def parse_heartbeat(body):
     last = data.get("lastAccepted")
     covered = data.get("coveredSince")
     details = to is not None
+    removing = data.get("removingPartners")
+    if removing is not None and (removing := recipients(removing)) is None:
+        raise Invalid("removingPartners must contain valid email addresses")
     return {
         "id": _uuid(data.get("id"), "id"),
         "install": _uuid(data.get("install"), "install"),
@@ -154,6 +172,10 @@ def parse_heartbeat(body):
         "sentAt": _epoch(data.get("sentAt"), "sentAt"),
         "boot": _epoch(data.get("boot"), "boot"),
         "bootID": _text(data["bootID"], "bootID", 64) if data.get("bootID") is not None else None,
+        "runID": _uuid(data["runID"], "runID") if data.get("runID") is not None else None,
+        "monitoringOnly": data.get("monitoringOnly") is True,
+        "explicitPartnerRemovals": data.get("explicitPartnerRemovals") is True,
+        "removingPartners": removing,
         "interval": interval,
         "lastAccepted": _epoch(last, "lastAccepted") if last is not None else None,
         "coveredSince": _epoch(covered, "coveredSince") if covered is not None else None,
@@ -230,13 +252,27 @@ def lines_for(kind, item, at, beat=None):
     if kind == "stopped":
         return [f"Renew on {who} said the Mac was shutting down at {last}, but the Mac didn't restart: "
                 f"Renew's background service was stopped for {age}."] + [gap_line(g, who, zone) for g in gaps]
-    if kind == "gap":
+    if kind in ("gap", "unverified", "stall"):
         return [gap_line(g, who, zone) for g in gaps]
+    if kind == "restart":
+        return [f"Renew on {who} restarted more than once without the Mac rebooting.",
+                f"Renew was back online as of {when(_dt(at), zone)}."]
+    if kind == "missed":
+        return [f"Renew on {who} missed an expected check-in while the Mac was expected to be awake.",
+                f"The server heard from Renew again at {when(_dt(at), zone)}, {age} after the previous check-in."]
+    if kind == "removal":
+        return [f"The report server received a request to change monitoring for Renew on {who}.",
+                "While Renew remains installed, it keeps checking in while you decide. You can approve the request or choose to keep monitoring."]
     raise ValueError(kind)
 
 
 def gap_line(g, who, zone):
     span = f"{when(_dt(g['from']), zone)} to {when(_dt(g['to']), zone)}"
+    if g.get("kind") == "recordUnverified":
+        return f"Renew's heartbeat record on {who} couldn't be verified ({span})."
+    if g.get("kind") == "heartbeatStalled" and g.get("awakeSeconds") is not None:
+        return (f"Renew's guard on {who} saw the daemon heartbeat stand still for at least "
+                f"{gap(g['awakeSeconds'])} while the Mac was awake ({span}).")
     if g.get("kind") == "recordsMissing":
         return (f"Renew's records on {who} were deleted or replaced with an old copy while it wasn't running "
                 f"({span}), so it can't tell whether Renew was stopped while the Mac was awake.")
@@ -312,56 +348,320 @@ def decide(item, at, silence, cap, stopping=180):
     return None
 
 
-def record_beat(beat, at, store, send, attempts=3):
-    """Stores `beat` and sends any back/stopped/gap email (one at most).
-    Returns the reply for renewd: the notices (what the partner was emailed
-    since its last check-in) and `needDetails` when the server doesn't know
-    the Mac and the check-in didn't say who it's about. Raises SendFailed
-    (and stores nothing) if an email couldn't be sent, so renewd's retry
-    sends it then.
-
-    The write only lands if the item hasn't changed since it was read (a
-    scheduled check may have just emailed about it); otherwise it starts
-    over with the new item."""
+def record_beat(beat, at, store, send, attempts=3, approval_origin=None):
+    """Commit the evidence and its email together before attempting delivery."""
+    install = beat["install"]
+    if beat["state"] == "monitoringStatus":
+        item = store.get(install) or {}
+        monitoring = {"partners": as_list(item["to"]) if item else [], "removalPending": bool(item.get("removal"))}
+        if item.get("removal"):
+            monitoring["pendingPartners"] = _removing_partners(item)
+        if item.get("rejectedRemoval"):
+            monitoring["rejectedDecision"] = item["rejectedRemoval"]["id"]
+        return {"notices": [], "monitoring": monitoring}
     for _ in range(attempts):
-        result = _record_beat_once(beat, at, store, send)
+        result = _record_beat_once(beat, at, store, approval_origin)
         if result is not None:
+            if result.pop("deliver", False):
+                _deliver_email(install, at, store, send)
+            if result.pop("takeNotices", False):
+                result["notices"] = _take_notices(install, store)
             return result
     raise SendFailed("the check-in kept changing underneath; try again")
 
 
-def _record_beat_once(beat, at, store, send):
+def _put(store, item, prev):
+    return store.put(dict(item, revision=str(uuid.uuid4())), expect=prev)
+
+
+def _request_removal(at, origin, removing):
+    if origin is None:
+        raise SendFailed("no report server origin for the approval link")
+    return {"token": str(uuid.uuid4()), "at": at, "origin": origin, "notified": False,
+            "removingPartners": sorted(removing)}
+
+
+def _removing_partners(item):
+    request = item["removal"]
+    current = as_list(item["to"])
+    if "removingPartners" in request:
+        return [email for email in current if email in request["removingPartners"]]
+    desired = set(request.get("proposedPartners") or [])
+    return [email for email in current if email not in desired]
+
+
+def approve_removal(install, token, store):
+    for _ in range(5):
+        current = store.get(install) or {}
+        if (current.get("removal") or {}).get("token") != token:
+            return None
+        removing = set(_removing_partners(current))
+        remaining = [email for email in as_list(current["to"]) if email not in removing]
+        if not remaining:
+            if store.approve_removal(install, token, expect=current):
+                return "ended"
+            continue
+        updated = _resolve_removal(current)
+        updated["to"] = remaining
+        queued = []
+        for entry in updated["pendingEmails"]:
+            recipients = [email for email in as_list(entry["report"]["to"]) if email in remaining]
+            if recipients:
+                queued.append(dict(entry, report=dict(entry["report"], to=recipients)))
+        updated["pendingEmails"] = queued
+        original = as_list(current.get("approvalRecipients") or current["to"])
+        updated["approvalRecipients"] = [email for email in original if email in remaining] or remaining
+        if _put(store, updated, current):
+            return "updated"
+    raise SendFailed("the monitoring request kept changing")
+
+
+def _resolve_removal(item):
+    updated = dict(item)
+    message_id = _removal_email(item)["id"]
+    updated["pendingEmails"] = [entry for entry in item.get("pendingEmails", [])
+                                if entry["report"]["id"] != message_id]
+    updated.pop("removal")
+    return updated
+
+
+def reject_removal(install, token, store):
+    for _ in range(5):
+        current = store.get(install) or {}
+        request = current.get("removal") or {}
+        if request.get("token") != token:
+            return False
+        updated = _resolve_removal(current)
+        updated["rejectedRemoval"] = {"id": str(uuid.uuid4()), "partners": _removing_partners(current)}
+        if _put(store, updated, current):
+            return True
+    raise SendFailed("the monitoring request kept changing")
+
+
+def _removal_email(item):
+    request = item["removal"]
+    approvers = item.get("approvalRecipients") or item["to"]
+    report = email_for("removal", dict(item, lastSeen=request["at"], to=approvers), request["at"])
+    report["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"renew-removal/{item['install']}/{request['token']}"))
+    report["approvalURL"] = (f"{request['origin']}/monitoring/approve"
+                             f"?install={item['install']}&token={request['token']}")
+    return report
+
+
+def _json_size(data):
+    return len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _queue_email(item, report):
+    queued = list(item.get("pendingEmails") or [])
+    queued.append({"report": dict(report, sentAt=int(report["sentAt"].timestamp()))})
+    while _json_size(queued) > MAX_PENDING_EMAIL_BYTES:
+        # Preserve any in-flight email and the partner's approval request.
+        oldest = next((i for i, entry in enumerate(queued[:-1])
+                       if "lease" not in entry and entry["report"]["kind"] != "removal"), None)
+        if oldest is None:
+            if len(queued[-1]["report"]["changes"]) > 1:
+                queued[-1]["report"]["changes"] = [queued[-1]["report"]["changes"][0],
+                                                  "This email omits some observations because the delivery queue is full."]
+            if _json_size(queued) > MAX_PENDING_EMAIL_BYTES:
+                log.warning("check-in email queue full for %s", item["install"])
+                queued.pop()
+            break
+        log.warning("discarding oldest queued check-in email for %s", item["install"])
+        queued.pop(oldest)
+    item["pendingEmails"] = queued
+
+
+def _deliver_email(install, at, store, send):
+    """Claim queued delivery using the item's revision. Return the kind sent."""
+    lease = str(uuid.uuid4())
+    for _ in range(5):
+        current = store.get(install)
+        queued = (current or {}).get("pendingEmails") or []
+        if not queued or queued[0].get("leaseUntil", 0) > at:
+            return None
+        head = dict(queued[0], lease=lease, leaseUntil=at + EMAIL_LEASE_SECONDS)
+        if _put(store, dict(current, pendingEmails=[head] + queued[1:]), current):
+            break
+    else:
+        return None
+
+    report = dict(head["report"], sentAt=_dt(head["report"]["sentAt"]))
+    try:
+        send(report)
+        message = notice(report)
+    except Exception:
+        log.warning("couldn't deliver queued check-in email for %s", install, exc_info=True)
+        message = None
+
+    for _ in range(8):
+        current = store.get(install)
+        queued = (current or {}).get("pendingEmails") or []
+        if not queued or queued[0].get("lease") != lease:
+            break
+        updated = dict(current)
+        if message is None:
+            updated["pendingEmails"] = [{"report": queued[0]["report"]}] + queued[1:]
+        else:
+            updated["pendingEmails"] = queued[1:]
+            notices = ((current.get("notices") or []) + [message])[-MAX_NOTICES:]
+            while len(notices) > 1 and _json_size(notices) > MAX_NOTICE_BYTES:
+                notices.pop(0)
+            if _json_size(notices) > MAX_NOTICE_BYTES:
+                message["lines"] = message["lines"][:1]
+            updated["notices"] = notices
+            if report["kind"] == "removal" and current.get("removal"):
+                updated["removal"] = dict(current["removal"], notified=True)
+        if _put(store, updated, current):
+            break
+    return report["kind"] if message is not None else None
+
+
+def _take_notices(install, store):
+    for _ in range(5):
+        current = store.get(install)
+        notices = (current or {}).get("notices") or []
+        if not notices or _put(store, dict(current, notices=[]), current):
+            return notices
+    return []
+
+
+def _new_gaps(beat, prev):
+    reported = list((prev or {}).get("reportedGaps") or [])
+    new = []
+    seen = set(reported)
+    for g in beat["gaps"]:
+        if g["id"] not in seen:
+            new.append(g)
+            seen.add(g["id"])
+    return new, (reported + [g["id"] for g in new])[-MAX_REPORTED_GAPS:]
+
+
+def _gap_email_kind(gaps):
+    if any(g["kind"] == "recordUnverified" for g in gaps):
+        return "unverified"
+    if any(g["kind"] == "heartbeatStalled" for g in gaps):
+        return "stall"
+    return "gap"
+
+
+def _witness(beat, prev, at, store):
+    if not prev:
+        return {"notices": [], "needDetails": True}
+    new, reported = _new_gaps(beat, prev)
+    if not new:
+        return {"notices": []}
+    updated = dict(prev, reportedGaps=reported)
+    _queue_email(updated, email_for(_gap_email_kind(new), prev, at, {"newGaps": new}))
+    if _put(store, updated, prev):
+        return {"notices": [], "deliver": True}
+    return None
+
+
+def _restart_event(prev, beat, at, history):
+    if not prev or not prev.get("runID") or not beat["runID"] or prev["runID"] == beat["runID"]:
+        return None
+    if _restarted(prev, beat):
+        return None
+    since = at - restart_window_seconds()
+    recent = [entry for entry in history if entry["kind"] == "restart" and entry["at"] >= since
+              and not _restarted(entry, beat)]
+    return {"kind": "restart", "at": at, "previousRunID": prev["runID"], "runID": beat["runID"],
+            "boot": beat["boot"], "bootID": beat["bootID"],
+            "alertQueued": bool(recent) and not any(entry.get("alertQueued", entry.get("emailed")) for entry in recent)}
+
+
+def _missed_checkin(prev, beat, at):
+    return (prev and prev["state"] == "awake" and beat["state"] == "awake"
+            and not _restarted(prev, beat)
+            and at - prev["lastSeen"] > prev["interval"] + checkin_grace_seconds())
+
+
+def _submit_removal(beat, prev, at, store, origin):
+    if not prev:
+        return {"notices": []}
+    request_ids = prev.get("removalRequestIDs") or []
+    request_id = beat["id"] if beat["state"] == "requestRemoval" else None
+    if request_id in request_ids:
+        return {"notices": []}
+    current = set(as_list(prev["to"]))
+    requested = beat["removingPartners"]
+    removing = current if requested is None else current.intersection(requested)
+    if not removing:
+        return {"notices": []}
+    prior = set(_removing_partners(prev)) if prev.get("removal") else set()
+    updated = dict(prev)
+    if removing - prior:
+        if prior:
+            updated = _resolve_removal(prev)
+        updated["removal"] = _request_removal(at, origin, removing | prior)
+        _queue_email(updated, _removal_email(updated))
+    if request_id is not None:
+        updated["removalRequestIDs"] = (request_ids + [request_id])[-100:]
+    if updated == prev:
+        return {"notices": [], "deliver": bool(prev.get("pendingEmails"))}
+    if _put(store, updated, prev):
+        return {"notices": [], "deliver": bool(updated.get("pendingEmails"))}
+    return None
+
+
+def _record_beat_once(beat, at, store, approval_origin):
     prev = store.get(beat["install"])
-    if beat["state"] == "removed":
-        store.delete(beat["install"])
-        return {"notices": list(prev.get("notices") or []) if prev else []}
+    if beat["monitoringOnly"] and not prev:
+        return {"notices": []}
+    if beat["state"] == "witness":
+        return _witness(beat, prev, at, store)
+    if beat["state"] in ("removed", "requestRemoval"):
+        return _submit_removal(beat, prev, at, store, approval_origin)
     if not beat["details"] and not prev:
         return {"notices": [], "needDetails": True}
+    history = list((prev or {}).get("history") or [])
+    if (prev and beat["runID"] and beat["runID"] != prev.get("runID") and not _restarted(prev, beat)
+            and any(entry.get("previousRunID") == beat["runID"] for entry in history)):
+        # A final check-in from the old process may arrive after the new one.
+        return {"notices": []}
 
-    # Who and what this is about: from the check-in, or as stored.
-    ident = {k: beat[k] if beat["details"] else prev[k] for k in ("to", "mac", "user", "timeZone")}
-    reported = list(prev.get("reportedGaps") or []) if prev else []
-    new_gaps = [g for g in beat["gaps"] if g["id"] not in reported]
+    rejected = (prev or {}).get("rejectedRemoval")
+    # A rejected edit should never turn the next ordinary beat into a new request.
+    previous_partners = as_list(prev["to"]) if prev else []
+    reported_partners = as_list(beat["to"])
+    removed = set(previous_partners) - set(reported_partners) if beat["details"] and not beat["monitoringOnly"] else set()
+    rejected_partners = set()
+    if rejected:
+        rejected_partners = set(rejected["partners"]) if "partners" in rejected else (
+            set(previous_partners) - set(rejected.get("proposedPartners") or []))
+    removal = (prev or {}).get("removal")
+    if removal and "removingPartners" not in removal:
+        removal = dict(removal, removingPartners=_removing_partners(prev))
+    if removed - rejected_partners and removal is None and not beat["explicitPartnerRemovals"]:
+        removal = _request_removal(at, approval_origin, removed - rejected_partners)
+    use_details = beat["details"] and not beat["monitoringOnly"]
+    ident = {k: (beat if use_details else prev)[k] for k in ("to", "mac", "user", "timeZone")}
+    if removed or removal:
+        # Existing partners stay enrolled unless a partner approves their removal.
+        ident["to"] = list(dict.fromkeys(previous_partners + reported_partners))[:MAX_RECIPIENTS]
+    new_gaps, reported = _new_gaps(beat, prev)
     context = dict(beat, **ident, newGaps=new_gaps)
 
-    pending = list(prev.get("notices") or []) if prev else []
-    kind = None
-    if prev and prev.get("alerted"):
-        kind = "back"
-    elif prev and prev["state"] == "shutdown" and not _restarted(prev, beat):
-        kind = "stopped"
-    elif new_gaps:
-        kind = "gap"
-    if kind:
-        about = prev or {"install": beat["install"], "lastSeen": at, **ident}
-        report = email_for(kind, about, at, context)
-        try:
-            send(report)
-        except Exception as e:
-            raise SendFailed(str(e)) from e
-        pending.append(notice(report))
+    restart = _restart_event(prev, beat, at, history)
+    if restart:
+        history.append(restart)
+    missed = _missed_checkin(prev, beat, at)
+    if missed:
+        history.append({"kind": "missed", "at": at, "previousCheckin": prev["lastSeen"]})
 
-    stored = store.put({
+    kinds = []
+    if prev and prev.get("alerted"):
+        kinds.append("back")
+    elif prev and prev["state"] == "shutdown" and not _restarted(prev, beat):
+        kinds.append("stopped")
+    elif new_gaps:
+        kinds.append(_gap_email_kind(new_gaps))
+    if missed:
+        kinds.append("missed")
+    if restart and restart["alertQueued"]:
+        kinds.append("restart")
+    item = {
         "install": beat["install"],
         **ident,
         "state": beat["state"],
@@ -371,33 +671,52 @@ def _record_beat_once(beat, at, store, send):
         "lastAccepted": beat["lastAccepted"],
         "coveredSince": beat["coveredSince"],
         "alerted": False,
-        "notices": [],
+        "notices": (prev or {}).get("notices") or [],
+        "pendingEmails": (prev or {}).get("pendingEmails") or [],
         "bootID": beat["bootID"],
-        "reportedGaps": (reported + [g["id"] for g in new_gaps])[-MAX_REPORTED_GAPS:],
-    }, expect=prev)
-    if not stored:
+        "runID": beat["runID"],
+        "reportedGaps": reported,
+        "history": history[-MAX_HISTORY:],
+        "approvalRecipients": (prev.get("approvalRecipients") or prev["to"]) if prev else ident["to"],
+        "removalRequestIDs": (prev or {}).get("removalRequestIDs") or [],
+    }
+    if removal:
+        item["removal"] = removal
+        if not prev.get("removal"):
+            _queue_email(item, _removal_email(item))
+    if rejected:
+        if use_details and not removal:
+            rejected = dict(rejected, partners=sorted(rejected_partners - set(reported_partners)))
+        item["rejectedRemoval"] = rejected
+    if kinds:
+        about = prev or {"install": beat["install"], "lastSeen": at, **ident}
+        report = email_for(kinds[0], about, at, context)
+        for kind in kinds[1:]:
+            report["changes"].extend(lines_for(kind, about, at, context))
+        _queue_email(item, report)
+    if not _put(store, item, prev):
         return None
-    return {"notices": pending}
+    return {"notices": [], "deliver": bool(item["pendingEmails"]), "takeNotices": True}
 
 
 def check_all(at, store, send, silence, cap, stopping=180):
-    """Emails about every Mac that went quiet. Returns how many emails were
-    sent. An item is marked `alerted` before its email goes out, so two runs
-    at once can't both send it; a failed send clears the mark for the next
-    run."""
+    """Queue silence alerts and retry earlier mail that could not be sent."""
     sent = 0
     for item in store.scan():
+        install = item["install"]
         kind = decide(item, at, silence, cap, stopping)
-        if not kind or not store.claim(item["install"], item["lastSeen"]):
-            continue
-        report = email_for(kind, item, at)
-        try:
-            send(report)
-        except Exception:
-            store.release(item["install"], item["lastSeen"])
-            continue
-        store.add_notice(item["install"], notice(report))
-        sent += 1
+        if kind:
+            updated = dict(item, alerted=True)
+            _queue_email(updated, email_for(kind, item, at))
+            _put(store, updated, item)
+        # Give queued removal and silence notifications a chance in the same tick.
+        if kind or item.get("pendingEmails"):
+            for _ in range(2):
+                delivered = _deliver_email(install, at, store, send)
+                if delivered is None:
+                    break
+                if delivered in ("silent", "quiet"):
+                    sent += 1
     return sent
 
 
@@ -428,8 +747,8 @@ class DynamoStore:
         return self._plain(item) if item else None
 
     def put(self, item, expect=None):
-        """Writes `item` if the stored one still matches `expect` (its
-        lastSeen and alerted), or doesn't exist when `expect` is None.
+        """Writes `item` if the stored one still matches `expect`, or
+        doesn't exist when `expect` is None.
         Returns whether it was written."""
         from botocore.exceptions import ClientError
         if expect is None:
@@ -438,6 +757,11 @@ class DynamoStore:
             alerted = "alerted = :al" if expect.get("alerted") else "(attribute_not_exists(alerted) OR alerted = :al)"
             cond = {"ConditionExpression": f"lastSeen = :ls AND {alerted}",
                     "ExpressionAttributeValues": {":ls": expect["lastSeen"], ":al": bool(expect.get("alerted"))}}
+            if "revision" in expect:
+                cond["ConditionExpression"] += " AND revision = :rev"
+                cond["ExpressionAttributeValues"][":rev"] = expect["revision"]
+            else:
+                cond["ConditionExpression"] += " AND attribute_not_exists(revision)"
         try:
             self.table.put_item(Item=item, **cond)
             return True
@@ -446,8 +770,27 @@ class DynamoStore:
                 return False
             raise
 
-    def delete(self, install):
-        self.table.delete_item(Key={"install": install})
+    def approve_removal(self, install, token, expect):
+        from botocore.exceptions import ClientError
+        condition = "removal.#token = :token"
+        values = {":token": token}
+        if "revision" in expect:
+            condition += " AND revision = :rev"
+            values[":rev"] = expect["revision"]
+        else:
+            condition += " AND attribute_not_exists(revision)"
+        try:
+            self.table.delete_item(
+                Key={"install": install},
+                ConditionExpression=condition,
+                ExpressionAttributeNames={"#token": "token"},
+                ExpressionAttributeValues=values,
+            )
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
 
     def scan(self):
         items, kwargs = [], {}
@@ -457,42 +800,6 @@ class DynamoStore:
             if "LastEvaluatedKey" not in page:
                 return items
             kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-
-    def _conditional(self, **kwargs):
-        from botocore.exceptions import ClientError
-        try:
-            self.table.update_item(**kwargs)
-            return True
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                return False
-            raise
-
-    def claim(self, install, last_seen):
-        """Marks the item alerted, if it isn't already and hasn't checked in since."""
-        return self._conditional(
-            Key={"install": install},
-            UpdateExpression="SET alerted = :t",
-            ConditionExpression="lastSeen = :ls AND (attribute_not_exists(alerted) OR alerted = :f)",
-            ExpressionAttributeValues={":t": True, ":f": False, ":ls": last_seen})
-
-    def release(self, install, last_seen):
-        self._conditional(
-            Key={"install": install},
-            UpdateExpression="SET alerted = :f",
-            ConditionExpression="lastSeen = :ls",
-            ExpressionAttributeValues={":f": False, ":ls": last_seen})
-
-    def add_notice(self, install, notice):
-        item = self.get(install)
-        if not item:
-            return
-        notices = (item.get("notices") or []) + [notice]
-        self._conditional(
-            Key={"install": install},
-            UpdateExpression="SET notices = :n",
-            ConditionExpression="attribute_exists(install)",
-            ExpressionAttributeValues={":n": notices[-MAX_NOTICES:]})
 
 
 _store = None

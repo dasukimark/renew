@@ -192,6 +192,43 @@ struct AliveRecordTests {
         file.save(r)
         #expect(file.load() == r)
     }
+
+    @Test func signedRecordMigratesLegacyAndRejectsEditsOrDeletion() throws {
+        let file = AliveRecordFile(path: tempPath("alive.json"))
+        try FileManager.default.createDirectory(atPath: (file.path as NSString).deletingLastPathComponent,
+                                               withIntermediateDirectories: true)
+        let url = URL(fileURLWithPath: file.path)
+        let legacy = AliveRecord(bootID: "original-boot", awake: 12, wall: start, coveredSince: start)
+        let legacyBytes = try Report.encoder.encode(legacy)
+        try legacyBytes.write(to: url)
+        #expect(file.load() == legacy)
+        #expect(file.save(legacy))
+        #expect(file.load() == legacy)
+
+        let signed = try String(contentsOf: url, encoding: .utf8)
+        try signed.replacingOccurrences(of: "original-boot", with: "altered-boot").write(to: url, atomically: true, encoding: .utf8)
+        if case .unverified = file.read() {} else { Issue.record("An edited payload should fail authentication") }
+
+        try legacyBytes.write(to: url)
+        if case .unverified = file.read() {} else { Issue.record("Migration should close the unsigned path") }
+
+        try FileManager.default.removeItem(at: url)
+        if case .unverified = file.read() {} else { Issue.record("A missing signed record should fail verification") }
+    }
+
+    @Test func removingSigningKeyDoesNotReopenMigration() throws {
+        let file = AliveRecordFile(path: tempPath("alive.json"))
+        let record = AliveRecord(bootID: "boot", awake: 12, wall: start, coveredSince: start)
+        let url = URL(fileURLWithPath: file.path)
+        #expect(file.save(record))
+        try FileManager.default.removeItem(atPath: file.path + ".key")
+        try Report.encoder.encode(record).write(to: url)
+        if case .unverified = AliveRecordFile(path: file.path).read() {} else {
+            Issue.record("Losing the key must not let an unsigned record pass")
+        }
+        #expect(file.save(record))
+        #expect(file.load() == record)
+    }
 }
 
 @Suite("Partner history")

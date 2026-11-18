@@ -60,6 +60,11 @@ CHECKIN = {
     "back": ("Renew on {mac} is checking in again", "Checking in again", ("#15803d", "#f0fdf4")),
     "stopped": ("Renew on {mac} was stopped", "Renew was stopped", ("#b91c1c", "#fef2f2")),
     "gap": ("Renew on {mac} wasn't running for a while", "Renew wasn't running", ("#b91c1c", "#fef2f2")),
+    "unverified": ("Renew's heartbeat record on {mac} couldn't be verified", "Heartbeat record couldn't be verified", ("#b91c1c", "#fef2f2")),
+    "stall": ("Renew's guard saw a stalled heartbeat on {mac}", "Renew's heartbeat stalled", ("#b91c1c", "#fef2f2")),
+    "restart": ("Renew restarted more than once on {mac}", "Renew restarted", ("#b45309", "#fffbeb")),
+    "missed": ("Renew on {mac} missed a check-in", "Missed a check-in", ("#b45309", "#fffbeb")),
+    "removal": ("Review a Renew monitoring request for {mac}", "Request to end monitoring", ("#b45309", "#fffbeb")),
 }
 
 PILLS = {
@@ -226,6 +231,9 @@ def build_email(report, sender):
         text += [f"...and {report['omitted']} more flagged visits not listed.", ""]
     for c in report["changes"]:
         text.append(f"- {unlinkable(c)}")
+    approval_url = report.get("approvalURL")
+    if approval_url:
+        text += ["", f"Review the request: {approval_url}", "Renew will not ask for a password."]
     text += ["", f"Sent by Renew at {when(report['sentAt'], zone)}. Sites are shown without links.",
              f"Report {report['id']}"]
 
@@ -249,6 +257,11 @@ def build_email(report, sender):
         else:
             color, bg = (("#15803d", "#f0fdf4") if report["kind"] == "test" else ("#b45309", "#fffbeb"))
         body.append(notice(report["changes"], color, bg))
+    if approval_url:
+        body.append(f'<tr><td style="padding:16px 0"><a href="{html.escape(approval_url, quote=True)}" '
+                    'style="display:inline-block;background:#0f6b57;color:white;padding:10px 16px;'
+                    'border-radius:8px;text-decoration:none;font-weight:600">Review in Renew</a>'
+                    f'<p style="color:{MUTED};font-size:13px">Renew will not ask for a password.</p></td></tr>')
 
     page = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

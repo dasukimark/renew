@@ -73,9 +73,25 @@ shutting down (`shutdown`), or that renewd stopped without a shutdown
 (`stopping`), along with when the Mac booted. It names the partners, Mac and
 user only when renewd starts or those change; the table keeps them. A
 check-in without them from a Mac the server doesn't know gets
-`{"needDetails": true}`, and renewd sends them next time. `removed` (reports
-turned off or moved, or `renew uninstall`) deletes the Mac's entry. The table
-(`renew-heartbeats`) is created by `sam deploy`; no new secrets are needed.
+`{"needDetails": true}`, and renewd sends them next time. The table
+(`renew-heartbeats`) is created by `sam deploy`.
+
+`requestRemoval` asks to remove specified partners, or to end monitoring if
+no partner list is supplied. Renew saves the request and its ID before
+submission so it can retry after a restart. The server still accepts
+`removed` from older clients. It emails the original partners a private
+review link that lists the affected addresses.
+While Renew is installed, it keeps sending check-ins during the wait.
+Choosing **Keep monitoring** declines the request and check-ins continue.
+Approving removes only the addresses listed on the review page. If any
+partners remain, their existing monitoring continues. Local activity
+reports follow the settings on the Mac, and uninstall takes effect
+immediately. Opening the review link alone leaves monitoring active.
+
+To use a branded review link, route GET and POST for `/monitoring/approve`
+from your HTTPS hostname to the report function, including query strings
+and form data. Set the `ApprovalBaseURL` stack parameter to that origin.
+Without it, review links use the AWS Function URL. Keep review links private.
 
 Every minute the Lambda emails the partners about a Mac that:
 
@@ -98,12 +114,27 @@ When a check-in arrives it may also send one email:
   (`gaps`: time the Mac was awake while renewd wasn't running, measured from
   macOS's power log when the Mac restarted in between; `kind:
   "recordsMissing"` when renewd's records were deleted or replaced, so the
-  length is unknown).
+  length is unknown);
+- "Heartbeat record couldn't be verified" if the signed local record is
+  missing or fails authentication;
+- "Missed a check-in" if Renew checks in awake on the same boot and the
+  previous awake check-in was more than one interval plus
+  `CheckinGraceMinutes` (5) ago;
+- "Renew restarted" when a second same-boot process restart is observed
+  within `RestartWindowMinutes` (60). A lone restart goes in the server's
+  bounded `history` field with the time the server first saw the new run.
 
-Each silence and each gap is emailed once; email ids depend on what they're
-about, so a retry is never a second email. The reply to a check-in lists what
-the partners were emailed, which the Renew app shows under **Accountability →
-Sent to your partners**.
+With **Keep Renew running** enabled, the guard can report a stalled heartbeat
+while the main daemon is still unresponsive. A guard check-in leaves the main
+daemon's last-seen time untouched.
+Deploy the server update before distributing the Mac update so it can accept
+guard check-ins and require removal approval.
+
+The server records check-ins before attempting email. Failed deliveries are
+retried by the scheduled check, and the guard and daemon share the same
+gap IDs so the server queues each gap once. Check-in replies list emails
+that were sent, which the Renew app shows under **Accountability → Sent to
+your partners**.
 
 ## Check it
 
@@ -114,7 +145,8 @@ curl -i -X POST "$URL" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: appli
   -d '{"id":"00000000-0000-0000-0000-000000000001","kind":"test","mac":"curl","user":"","sentAt":"2026-01-01T00:00:00Z","flags":[],"changes":["Test from curl"],"to":"you@example.com"}'   # 200, email arrives
 ```
 
-A check-in (stored, no email; delete it again with `"state":"removed"`):
+A check-in (stored, no email). To clean it up, send `"state":"removed"`
+and confirm from the email sent to the test partner:
 
 ```sh
 curl -i -X POST "$URL" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \

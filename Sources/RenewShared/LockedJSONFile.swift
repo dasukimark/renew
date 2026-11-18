@@ -25,10 +25,14 @@ public struct LockedJSONFile<Value: Codable & Equatable> {
         let lock = open(path + ".lock", O_CREAT | O_RDWR, 0o600)
         guard lock >= 0 else {
             log("\(label): can't open \(path).lock: \(String(cString: strerror(errno)))")
-            return change(empty)
+            return empty
         }
         defer { close(lock) }
-        flock(lock, LOCK_EX)
+        while flock(lock, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            log("\(label): can't lock \(path): \(String(cString: strerror(errno)))")
+            return empty
+        }
         defer { flock(lock, LOCK_UN) }
 
         var current = empty

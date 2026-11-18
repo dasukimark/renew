@@ -43,6 +43,8 @@ final class AliveTracker: @unchecked Sendable {
     /// Awake-clock seconds and wall time of the last record written.
     private var lastWrite: TimeInterval = -.infinity
     private var lastWriteWall = Date()
+    private var expectsSignedRecord = false
+    private var reportedUnverified = false
     private var unchecked: [UncheckedRestart] = []
 
     /// How often the marker in state.json is moved on.
@@ -63,13 +65,24 @@ final class AliveTracker: @unchecked Sendable {
     func start() {
         startTimer()
         guard reporting() else { return }
-        let previous = file.load()
+        let result = file.read()
+        let previous: AliveRecord?
+        switch result {
+        case .record(let record), .legacy(let record): previous = record
+        case .missing, .unverified: previous = nil
+        }
         let currentMarker = marker()
         let now = Date()
         let bootID = ClockReading.bootID
         let toCheck: [UncheckedRestart] = locked {
             _coveredSince = now
-            if let m = currentMarker, !AliveRecord.isConsistent(previous, marker: m) {
+            if case .unverified = result {
+                expectsSignedRecord = true
+                if !reportUnverified(since: currentMarker?.wall ?? now, at: now) {
+                    active = true
+                    return []
+                }
+            } else if let m = currentMarker, !AliveRecord.isConsistent(previous, marker: m) {
                 // Nothing in the record can be trusted: report from the last
                 // time renewd is known to have been running.
                 keep(DowntimeGap(from: min(m.wall, previous?.wall ?? m.wall), to: now,
@@ -155,10 +168,11 @@ final class AliveTracker: @unchecked Sendable {
         }
     }
 
-    private func keep(_ gap: DowntimeGap, why: String? = nil) {
+    @discardableResult
+    private func keep(_ gap: DowntimeGap, why: String? = nil) -> Bool {
         let awake = gap.awakeSeconds.map { DurationText.format($0) } ?? "unknown"
         log("internal heartbeat: renewd wasn't running from \(gap.from) to \(gap.to) (Mac awake for \(awake)\(gap.restarted ? ", restarted in between" : "")\(why.map { "; \($0)" } ?? ""))")
-        gaps.append(gap)
+        return gaps.append(gap)
     }
 
     /// Reads the power log in the background, then decides about each run
@@ -201,10 +215,29 @@ final class AliveTracker: @unchecked Sendable {
     /// Under `lock`.
     private func write(exit: AliveRecord.Exit?) {
         let awake = AliveRecord.awakeNow()
+        let now = Date()
+        if expectsSignedRecord {
+            if case .record = file.read() {
+                reportedUnverified = false
+            } else if !reportUnverified(since: lastWriteWall, at: now) {
+                return
+            }
+        }
         lastWrite = awake
-        lastWriteWall = Date()
-        file.save(AliveRecord(bootID: ClockReading.bootID, awake: awake, wall: lastWriteWall, coveredSince: _coveredSince,
-                              exit: exit, unchecked: unchecked.isEmpty ? nil : unchecked))
+        lastWriteWall = now
+        if file.save(AliveRecord(bootID: ClockReading.bootID, awake: awake, wall: now, coveredSince: _coveredSince,
+                                 exit: exit, unchecked: unchecked.isEmpty ? nil : unchecked)) {
+            expectsSignedRecord = true
+            reportedUnverified = false
+        }
+    }
+
+    private func reportUnverified(since: Date, at now: Date) -> Bool {
+        if reportedUnverified { return true }
+        reportedUnverified = keep(DowntimeGap(from: min(since, now), to: now, awakeSeconds: nil,
+                                               restarted: false, kind: .recordUnverified),
+                                  why: "heartbeat record couldn't be verified")
+        return reportedUnverified
     }
 
     private func locked<T>(_ body: () -> T) -> T {

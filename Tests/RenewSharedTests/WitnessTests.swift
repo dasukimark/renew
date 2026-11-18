@@ -220,8 +220,8 @@ struct WitnessTests {
             + [(500, daemon(500))]
         let gaps = watch(looks).1
         #expect(gaps.count == 1)
-        #expect(gaps[0].awakeSeconds == 400)
-        #expect(gaps[0].from == last.wall && gaps[0].to == at(500))
+        #expect(gaps[0].kind == .heartbeatStalled && gaps[0].awakeSeconds == 61)
+        #expect(gaps[0].from == last.wall && gaps[0].to == at(161))
         // renewd finds the same gap from its own record: same id, emailed once.
         let (own, _) = AliveRecord.assess(previous: last, bootID: "boot-1", awake: 500, wall: at(500))
         #expect(own?.id == gaps[0].id)
@@ -234,7 +234,7 @@ struct WitnessTests {
         let looks: [(TimeInterval, AliveRecord?)] = stride(from: 101.0, to: 996, by: 3).map { ($0, daemon(100)) }
             + [(996, forged), (1_000, daemon(1_000))]
         let gaps = watch(looks).1
-        #expect(gaps.count == 1 && gaps[0].awakeSeconds == 895)
+        #expect(gaps.count == 1 && gaps[0].awakeSeconds == 61)
         #expect(AliveRecord.assess(previous: forged, bootID: "boot-1", awake: 1_000, wall: at(1_000)).gap == nil)
     }
 
@@ -270,9 +270,14 @@ struct WitnessTests {
         #expect(watch([(2_000, daemon(1_995)), (2_003, daemon(2_000))], from: w).1.isEmpty)
     }
 
-    @Test func aStandstillBeforeARestartIsReportedAtTheNextBoot() {
-        let (w, _) = watch(stride(from: 101.0, through: 700, by: 3).map { ($0, daemon(100)) })
-        let (after, gaps) = watch([(20, daemon(15, boot: "boot-2"))], from: w, boot: "boot-2")
+    @Test func aStandstillBeforeARestartIsReportedOnce() {
+        let (w, sent) = watch(stride(from: 101.0, through: 700, by: 3).map { ($0, daemon(100)) })
+        let nextBoot: [(TimeInterval, AliveRecord?)] = [(20, daemon(15, boot: "boot-2"))]
+        #expect(sent.count == 1)
+        #expect(watch(nextBoot, from: w, boot: "boot-2").1.isEmpty)
+        // A legacy witness file didn't report a stall before the reboot.
+        let legacy = WitnessRecord(bootID: "boot-1", awake: 698, wall: at(698), seen: daemon(100))
+        let (after, gaps) = watch(nextBoot, from: legacy, boot: "boot-2")
         #expect(gaps.count == 1)
         #expect(gaps[0].awakeSeconds == 598 && gaps[0].restarted)
         #expect(gaps[0].id == DowntimeGap.id(after: "boot-1", awake: 100))

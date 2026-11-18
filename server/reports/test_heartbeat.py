@@ -1,5 +1,6 @@
 import json
 import uuid
+from urllib.parse import urlencode
 
 import pytest
 
@@ -28,6 +29,7 @@ class FakeStore:
         if expect is None and current is not None:
             return False
         if expect is not None and (current is None or current["lastSeen"] != expect["lastSeen"]
+                                   or current.get("revision") != expect.get("revision")
                                    or bool(current.get("alerted")) != bool(expect.get("alerted"))):
             return False
         if self.before_put:
@@ -37,28 +39,15 @@ class FakeStore:
         self.items[item["install"]] = dict(item)
         return True
 
-    def delete(self, install):
-        self.items.pop(install, None)
+    def approve_removal(self, install, token, expect):
+        item = self.items.get(install) or {}
+        if item.get("removal", {}).get("token") != token or item.get("revision") != expect.get("revision"):
+            return False
+        del self.items[install]
+        return True
 
     def scan(self):
         return [json.loads(json.dumps(i)) for i in self.items.values()]
-
-    def claim(self, install, last_seen):
-        item = self.items.get(install)
-        if not item or item["lastSeen"] != last_seen or item.get("alerted"):
-            return False
-        item["alerted"] = True
-        return True
-
-    def release(self, install, last_seen):
-        item = self.items.get(install)
-        if item and item["lastSeen"] == last_seen:
-            item["alerted"] = False
-
-    def add_notice(self, install, notice):
-        if install in self.items:
-            self.items[install]["notices"] = self.items[install].get("notices", []) + [notice]
-
 
 @pytest.fixture
 def store(monkeypatch):
@@ -168,11 +157,182 @@ def test_beat_allowed_recipients(smtp, store, clock, monkeypatch):
     assert not store.items
 
 
-def test_removed_deletes(smtp, store, clock):
+def test_removed_requires_explicit_partner_approval(smtp, store, clock):
     store.items[INSTALL] = (stored())
+    assert app.handler(event(beat(state="removed", to="stranger@test.invalid")), None)["statusCode"] == 200
     assert app.handler(event(beat(state="removed")), None)["statusCode"] == 200
+    assert store.items[INSTALL]["lastSeen"] == T0
+    message, = sent(smtp)
+    assert message["To"] == "partner@test.invalid"
+    token = store.items[INSTALL]["removal"]["token"]
+    query = urlencode({"install": INSTALL, "token": token})
+    assert f"https://reports.test.invalid/monitoring/approve?{query}" in message.get_body(("plain",)).get_content()
+    get = dict(event("", method="GET", token=None), rawPath="/monitoring/approve", rawQueryString=query)
+    assert app.handler(get, None)["statusCode"] == 200
+    assert INSTALL in store.items
+
+    post = dict(event(urlencode({"install": INSTALL, "token": str(uuid.uuid4()), "decision": "approve"})),
+                rawPath="/monitoring/approve")
+    assert app.handler(post, None)["statusCode"] == 404
+    assert INSTALL in store.items
+    post = dict(event(query, token=None), rawPath="/monitoring/approve")
+    assert app.handler(post, None)["statusCode"] == 400
+    assert INSTALL in store.items
+    post = dict(event(query + "&decision=approve", token=None), rawPath="/monitoring/approve")
+    assert app.handler(post, None)["statusCode"] == 200
     assert INSTALL not in store.items
+    assert app.handler(post, None)["statusCode"] == 404
+
+
+def test_only_original_partners_receive_approval_link(smtp, store, clock):
+    app.handler(event(beat()), None)
+    app.handler(event(beat(to=["partner@test.invalid", "new@test.invalid"])), None)
+    app.handler(event(beat(to="new@test.invalid")), None)
+    assert store.items[INSTALL]["to"] == ["partner@test.invalid", "new@test.invalid"]
+    assert sent(smtp)[0]["To"] == "partner@test.invalid"
+
+
+def test_monitoring_status_tracks_pending_approval_without_checking_in(smtp, store, clock):
+    app.handler(event(beat()), None)
+    app.handler(event(slim(state="removed")), None)
+    token = store.items[INSTALL]["removal"]["token"]
+    before = store.get(INSTALL)
+    clock["now"] += 600
+    lookup = event(slim(state="monitoringStatus"))
+    assert app.handler(event(slim(state="monitoringStatus"), token=None), None)["statusCode"] == 401
+    reply = app.handler(lookup, None)
+    assert json.loads(reply["body"])["monitoring"] == {
+        "partners": ["partner@test.invalid"], "removalPending": True, "pendingPartners": ["partner@test.invalid"],
+    }
+    assert store.get(INSTALL) == before
+    approve = dict(event(urlencode({"install": INSTALL, "token": token, "decision": "approve"}), token=None),
+                   rawPath="/monitoring/approve")
+    assert app.handler(approve, None)["statusCode"] == 200
+    reply = app.handler(lookup, None)
+    assert json.loads(reply["body"])["monitoring"] == {"partners": [], "removalPending": False}
+    assert INSTALL not in store.items
+    assert len(sent(smtp)) == 1
+
+
+def test_monitoring_only_beats_keep_pending_enrollment_alive_and_cannot_recreate_it(smtp, store, clock):
+    app.handler(event(beat()), None)
+    app.handler(event(slim(state="removed")), None)
+    token = store.items[INSTALL]["removal"]["token"]
+    for _ in range(13):
+        clock["now"] += 600
+        assert app.handler(event(slim(monitoringOnly=True)), None)["statusCode"] == 200
+    assert store.items[INSTALL]["lastSeen"] == clock["now"]
+    assert app.handler(SCHEDULED, None) == {"alerted": 0}
+    assert len(sent(smtp)) == 1
+    payload = urlencode({"install": INSTALL, "token": token, "decision": "approve"})
+    assert app.handler(dict(event(payload, token=None), rawPath="/monitoring/approve"), None)["statusCode"] == 200
+    assert app.handler(event(beat(monitoringOnly=True)), None)["statusCode"] == 200
+    assert INSTALL not in store.items
+
+
+def test_partner_can_reject_and_monitoring_survives_without_reopening_request(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "other@test.invalid"])), None)
+    app.handler(event(beat(to="other@test.invalid")), None)
+    token = store.items[INSTALL]["removal"]["token"]
+    query = urlencode({"install": INSTALL, "token": token})
+    page = app.handler(dict(event("", method="GET", token=None), rawPath="/monitoring/approve", rawQueryString=query), None)
+    assert "Keep monitoring" in page["body"] and "Approve partner removal" in page["body"]
+    assert "removal" in store.items[INSTALL]
+    post = dict(event(query + "&decision=reject", token=None), rawPath="/monitoring/approve")
+    assert app.handler(post, None)["statusCode"] == 200
+    assert app.handler(post, None)["statusCode"] == 404
+    app.handler(event(beat(to=["other@test.invalid", "added@test.invalid"])), None)
+    clock["now"] += 600
+    app.handler(event(slim(monitoringOnly=True)), None)
+    reply = app.handler(event(slim(state="monitoringStatus")), None)
+    monitoring = json.loads(reply["body"])["monitoring"]
+    assert monitoring["partners"] == ["partner@test.invalid", "other@test.invalid", "added@test.invalid"]
+    assert monitoring["removalPending"] is False and monitoring["rejectedDecision"]
+    assert store.items[INSTALL]["lastSeen"] == clock["now"]
+    assert "removal" not in store.items[INSTALL] and len(sent(smtp)) == 1
+
+
+def test_partial_approval_preserves_remaining_partners_without_another_checkin(smtp, store, clock):
+    removed = "partner@test.invalid"
+    remaining = "other@test.invalid"
+    app.handler(event(beat(to=[removed, remaining])), None)
+    request = slim(state="requestRemoval", removingPartners=[removed])
+    assert app.handler(event(request), None)["statusCode"] == 200
+    token = store.items[INSTALL]["removal"]["token"]
+    form = urlencode({"install": INSTALL, "token": token, "decision": "approve"})
+    reply = app.handler(dict(event(form, token=None), rawPath="/monitoring/approve"), None)
+    assert reply["statusCode"] == 200
+    assert "Partner removal approved" in reply["body"]
+    assert store.items[INSTALL]["to"] == [remaining]
+    assert store.items[INSTALL]["lastSeen"] == T0
+    clock["now"] += 7201
+    assert app.handler(SCHEDULED, None) == {"alerted": 1}
+    assert sent(smtp)[-1]["To"] == remaining
+
+
+def test_partial_approval_retargets_a_queued_silence_email(smtp, store, clock):
+    removed = "partner@test.invalid"
+    remaining = "other@test.invalid"
+    app.handler(event(beat(to=[removed, remaining])), None)
+    app.handler(event(slim(state="requestRemoval", removingPartners=[removed])), None)
+    token = store.items[INSTALL]["removal"]["token"]
+    smtp.fail_send = True
+    clock["now"] += 7201
+    assert app.handler(SCHEDULED, None) == {"alerted": 0}
+    form = urlencode({"install": INSTALL, "token": token, "decision": "approve"})
+    assert app.handler(dict(event(form, token=None), rawPath="/monitoring/approve"), None)["statusCode"] == 200
+    smtp.fail_send = False
+    assert app.handler(SCHEDULED, None) == {"alerted": 1}
+    assert sent(smtp)[-1]["To"] == remaining
+
+
+def test_rejection_deduplicates_retries_and_allows_a_fresh_request(smtp, store, clock):
+    removed = "partner@test.invalid"
+    app.handler(event(beat(to=[removed, "other@test.invalid"])), None)
+    request = slim(state="requestRemoval", removingPartners=[removed])
+    assert app.handler(event(request), None)["statusCode"] == 200
+    assert app.handler(event(request), None)["statusCode"] == 200
+    token = store.items[INSTALL]["removal"]["token"]
+    form = urlencode({"install": INSTALL, "token": token, "decision": "reject"})
+    assert app.handler(dict(event(form, token=None), rawPath="/monitoring/approve"), None)["statusCode"] == 200
+    assert app.handler(event(request), None)["statusCode"] == 200
+    assert "removal" not in store.items[INSTALL]
+    assert len(sent(smtp)) == 1
+    new_request = dict(request, id=str(uuid.uuid4()))
+    assert app.handler(event(new_request), None)["statusCode"] == 200
+    assert len(sent(smtp)) == 2
+    assert store.items[INSTALL]["removal"]["token"] != token
+
+
+def test_explicit_removal_can_be_delivered_after_the_new_partner_list(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "other@test.invalid"])), None)
+    app.handler(event(beat(to="other@test.invalid", explicitPartnerRemovals=True)), None)
+    assert "removal" not in store.items[INSTALL]
+    assert len(store.items[INSTALL]["to"]) == 2
     assert not sent(smtp)
+    assert app.handler(event(slim(state="requestRemoval", removingPartners=["partner@test.invalid"])), None)["statusCode"] == 200
+    assert store.items[INSTALL]["removal"]["removingPartners"] == ["partner@test.invalid"]
+
+
+def test_removal_email_uses_branded_origin_when_configured(smtp, store, clock, monkeypatch):
+    monkeypatch.setenv("APPROVAL_BASE_URL", "https://reports.renew.test/")
+    app.handler(event(beat()), None)
+    app.handler(event(slim(state="removed")), None)
+    message, = sent(smtp)
+    assert "https://reports.renew.test/monitoring/approve?" in message.get_body(("html",)).get_content()
+    assert "Review in Renew" in message.get_body(("html",)).get_content()
+
+
+def test_pending_removal_retries_email_and_preserves_silence_alerts(smtp, store, clock):
+    app.handler(event(beat()), None)
+    smtp.fail_send = True
+    assert app.handler(event(slim(state="removed")), None)["statusCode"] == 200
+    assert store.items[INSTALL]["removal"]["notified"] is False
+    smtp.fail_send = False
+    clock["now"] += 7201
+    assert app.handler(SCHEDULED, None) == {"alerted": 1}
+    assert store.items[INSTALL]["removal"]["notified"] is True
+    assert len(sent(smtp)) == 2
 
 
 def test_back_after_silent(smtp, store, clock):
@@ -217,12 +377,17 @@ def test_sleep_and_wake_is_quiet(smtp, store, clock):
     assert not sent(smtp)
 
 
-def test_failed_back_email_keeps_state(smtp, store, clock):
+def test_failed_back_email_is_retried_after_recording_the_checkin(smtp, store, clock):
     store.items[INSTALL] = (stored(last_seen=T0 - 7200, alerted=True))
     smtp.fail_send = True
-    assert app.handler(event(beat()), None)["statusCode"] == 502
-    assert store.items[INSTALL]["alerted"] is True
-    assert store.items[INSTALL]["lastSeen"] == T0 - 7200
+    assert app.handler(event(beat()), None)["statusCode"] == 200
+    assert store.items[INSTALL]["alerted"] is False
+    assert store.items[INSTALL]["lastSeen"] == T0
+    assert store.items[INSTALL]["pendingEmails"][0]["report"]["kind"] == "back"
+    smtp.fail_send = False
+    app.handler(SCHEDULED, None)
+    assert len(sent(smtp)) == 1
+    assert store.items[INSTALL]["pendingEmails"] == []
 
 
 # MARK: the scheduled check
@@ -262,7 +427,7 @@ def test_scheduled_check_retries_failed_send(smtp, store, clock):
     store.items[INSTALL] = (stored(last_seen=T0 - 3 * 3600))
     smtp.fail_send = True
     assert app.handler(SCHEDULED, None) == {"alerted": 0}
-    assert store.items[INSTALL]["alerted"] is False
+    assert store.items[INSTALL]["pendingEmails"][0]["report"]["kind"] == "silent"
     smtp.fail_send = False
     assert app.handler(SCHEDULED, None) == {"alerted": 1}
 
@@ -272,12 +437,6 @@ def test_scheduled_check_respects_allowed_recipients(smtp, store, clock, monkeyp
     store.items[INSTALL] = (stored(last_seen=T0 - 3600))
     assert app.handler(SCHEDULED, None) == {"alerted": 0}
     assert not sent(smtp)
-
-
-def test_claim_is_exclusive(store):
-    store.items[INSTALL] = stored(last_seen=T0)
-    assert store.claim(INSTALL, T0)
-    assert not store.claim(INSTALL, T0)
 
 
 def test_same_email_same_message_id():
@@ -357,7 +516,7 @@ def test_several_partners_all_need_allowing(smtp, store, clock, monkeypatch):
 def test_slim_beat_still_checks_allowed_recipients(smtp, store, clock, monkeypatch):
     store.items[INSTALL] = (stored(last_seen=T0 - 3600, alerted=True))
     monkeypatch.setenv("ALLOWED_RECIPIENTS", "someone@test.invalid")
-    assert app.handler(event(slim()), None)["statusCode"] == 502
+    assert app.handler(event(slim()), None)["statusCode"] == 200
     assert not sent(smtp)
 
 
@@ -488,3 +647,104 @@ def test_silent_email_names_the_macs_own_interval(smtp, store, clock):
     store.items[INSTALL] = stored(last_seen=T0 - 3 * 3600, interval=900)
     app.handler(SCHEDULED, None)
     assert "checks in about every 15 minutes" in sent(smtp)[0].get_body(("plain",)).get_content()
+
+
+def test_first_same_boot_restart_is_logged_second_is_emailed(smtp, store, clock):
+    first, second, third = (str(uuid.uuid4()) for _ in range(3))
+    app.handler(event(beat(bootID="boot-a")), None)  # Older senders have no run ID.
+    app.handler(event(slim(bootID="boot-a", runID=first)), None)
+    assert store.items[INSTALL]["history"] == []
+    clock["now"] += 60
+    app.handler(event(slim(bootID="boot-a", runID=second)), None)
+    assert not sent(smtp)
+    assert store.items[INSTALL]["history"][0] == {
+        "kind": "restart", "at": T0 + 60, "previousRunID": first, "runID": second,
+        "boot": BOOT_EPOCH, "bootID": "boot-a", "alertQueued": False,
+    }
+    app.handler(event(slim(state="stopping", bootID="boot-a", runID=first)), None)
+    assert store.items[INSTALL]["state"] == "awake"
+    clock["now"] += 60
+    app.handler(event(slim(bootID="boot-a", runID=third)), None)
+    message, = sent(smtp)
+    assert message["Subject"] == "Renew restarted more than once on Test Mac"
+    assert "back online" in message.get_body(("plain",)).get_content()
+    app.handler(event(slim(bootID="boot-b", runID=str(uuid.uuid4()))), None)
+    assert len(store.items[INSTALL]["history"]) == 2
+    app.handler(event(slim(bootID="boot-b", runID=str(uuid.uuid4()))), None)
+    assert store.items[INSTALL]["history"][-1]["alertQueued"] is False
+    assert len(sent(smtp)) == 1
+    clock["now"] += 1
+    app.handler(event(slim(bootID="boot-b", runID=str(uuid.uuid4()))), None)
+    assert store.items[INSTALL]["history"][-1]["alertQueued"] is True
+    assert len(sent(smtp)) == 2
+
+
+def test_missed_checkin_is_reported_on_return_before_silence_alarm(smtp, store, clock):
+    run = str(uuid.uuid4())
+    app.handler(event(beat(bootID="boot-a", runID=run)), None)
+    clock["now"] += 901
+    assert app.handler(SCHEDULED, None) == {"alerted": 0}
+    app.handler(event(slim(bootID="boot-a", runID=run)), None)
+    message, = sent(smtp)
+    assert message["Subject"] == "Renew on Test Mac missed a check-in"
+    assert store.items[INSTALL]["history"][-1] == {"kind": "missed", "at": T0 + 901, "previousCheckin": T0}
+    app.handler(event(slim(bootID="boot-a", runID=run)), None)
+    assert len(sent(smtp)) == 1
+
+
+def test_smtp_outage_still_records_late_and_subsequent_checkins(smtp, store, clock):
+    app.handler(event(beat()), None)
+    smtp.fail_send = True
+    clock["now"] += 901
+    first_recovery = clock["now"]
+    assert app.handler(event(slim()), None)["statusCode"] == 200
+    assert store.items[INSTALL]["lastSeen"] == first_recovery
+    clock["now"] += 600
+    assert app.handler(event(slim()), None)["statusCode"] == 200
+    item = store.items[INSTALL]
+    assert item["lastSeen"] == clock["now"]
+    assert [e["kind"] for e in item["history"]] == ["missed"]
+    assert [e["report"]["kind"] for e in item["pendingEmails"]] == ["missed"]
+    smtp.fail_send = False
+    assert app.handler(SCHEDULED, None) == {"alerted": 0}
+    assert len(sent(smtp)) == 1
+    assert store.items[INSTALL]["pendingEmails"] == []
+
+
+def test_witness_reports_without_updating_daemon_last_seen(smtp, store, clock):
+    app.handler(event(beat()), None)
+    clock["now"] += 300
+    gap = dict(gap_body(), kind="heartbeatStalled")
+    assert app.handler(event(slim(state="witness", gaps=[gap])), None)["statusCode"] == 200
+    item = store.items[INSTALL]
+    assert item["lastSeen"] == T0 and item["state"] == "awake"
+    app.handler(event(slim(gaps=[dict(gap, kind=None)])), None)
+    message, = sent(smtp)
+    assert "heartbeat stand still for at least" in message.get_body(("plain",)).get_content()
+    assert store.items[INSTALL]["lastSeen"] == T0 + 300
+
+
+def test_racing_witness_and_daemon_only_email_the_gap_once(store):
+    store.items[INSTALL] = stored(last_seen=T0 - 120, alerted=True)
+    gap = gap_body()
+    witness = heartbeat.parse_heartbeat(json.dumps(slim(state="witness", gaps=[gap])))
+    awake = heartbeat.parse_heartbeat(json.dumps(slim(gaps=[gap])))
+    messages = []
+
+    def send(report):
+        messages.append(report)
+        # A scheduled retry while SMTP is in progress must respect the claim.
+        heartbeat.check_all(T0, store, messages.append, SILENCE, CAP)
+
+    store.before_put = lambda s: heartbeat.record_beat(witness, T0, s, send)
+    heartbeat.record_beat(awake, T0, store, send)
+    assert [m["kind"] for m in messages] == ["gap", "back"]
+    assert sum("Renew wasn't running on" in line for m in messages for line in m["changes"]) == 1
+    assert store.items[INSTALL]["pendingEmails"] == []
+
+
+def test_record_authentication_email_describes_evidence(smtp, store, clock):
+    app.handler(event(beat(gaps=[dict(gap_body(), kind="recordUnverified")])), None)
+    message, = sent(smtp)
+    assert message["Subject"] == "Renew's heartbeat record on Test Mac couldn't be verified"
+    assert "couldn't be verified" in message.get_body(("plain",)).get_content()

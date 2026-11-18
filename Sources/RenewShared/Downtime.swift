@@ -208,6 +208,10 @@ public struct DowntimeGap: Codable, Equatable, Sendable, Identifiable {
         /// renewd's records were deleted or put back from an old copy
         /// while it wasn't running, so how long it was gone is unknown.
         case recordsMissing
+        /// The heartbeat failed authentication, or an expected signed record was missing.
+        case recordUnverified
+        /// The guard saw that the daemon heartbeat hadn't advanced while the Mac was awake.
+        case heartbeatStalled
     }
 
     public init(id: UUID = UUID(), from: Date, to: Date, awakeSeconds: Int?, restarted: Bool, kind: Kind? = nil) {
@@ -259,8 +263,10 @@ public struct DowntimeGapStore {
 
     /// Adds `gap`, unless one with its id is already waiting (renewd and
     /// the guard may both find it).
-    public func append(_ gap: DowntimeGap) {
-        file.update { $0.contains { $0.id == gap.id } ? $0 : Array(($0 + [gap]).suffix(Self.maxGaps)) }
+    @discardableResult
+    public func append(_ gap: DowntimeGap) -> Bool {
+        let updated = file.update { $0.contains { $0.id == gap.id } ? $0 : Array(($0 + [gap]).suffix(Self.maxGaps)) }
+        return updated.contains { $0.id == gap.id }
     }
 
     /// Removes gaps the server has taken.
@@ -278,18 +284,100 @@ public struct AliveRecordFile {
 
     public init(path: String = Paths.aliveFile) { self.path = path }
 
-    public func load() -> AliveRecord? {
-        guard let data = FileManager.default.contents(atPath: path) else { return nil }
-        return try? Report.decoder.decode(AliveRecord.self, from: data)
+    public enum ReadResult {
+        case record(AliveRecord)
+        case legacy(AliveRecord)
+        case missing
+        case unverified
     }
 
-    public func save(_ record: AliveRecord) {
-        guard let data = try? Report.encoder.encode(record) else { return }
+    private struct SignedRecord: Codable {
+        let payload: String
+        let tag: Data
+    }
+
+    private struct SigningKey: Codable, Equatable {
+        let bytes: Data
+        /// Only this exact legacy record may be used if migration is interrupted.
+        let legacyDigest: Data?
+    }
+
+    private var keyFile: LockedJSONFile<SigningKey?> {
+        LockedJSONFile(path: path + ".key", label: "alive record key", empty: nil)
+    }
+
+    private var signingMarker: String { path + ".signing-required" }
+
+    public func load() -> AliveRecord? {
+        switch read() {
+        case .record(let record), .legacy(let record): return record
+        case .missing, .unverified: return nil
+        }
+    }
+
+    public func read() -> ReadResult {
+        let key = keyFile.load()
+        let fm = FileManager.default
+        if key == nil, fm.fileExists(atPath: signingMarker) || fm.fileExists(atPath: keyFile.path) {
+            return .unverified
+        }
+        guard let data = fm.contents(atPath: path) else {
+            return key == nil ? .missing : .unverified
+        }
+        if let signed = try? Report.decoder.decode(SignedRecord.self, from: data) {
+            let payload = Data(signed.payload.utf8)
+            guard let key, key.bytes.count == 32,
+                  HMAC<SHA256>.isValidAuthenticationCode(signed.tag, authenticating: payload,
+                                                         using: SymmetricKey(data: key.bytes)),
+                  let record = try? Report.decoder.decode(AliveRecord.self, from: payload) else {
+                return .unverified
+            }
+            return .record(record)
+        }
+        if key == nil || key?.legacyDigest == Data(SHA256.hash(data: data)),
+           let record = try? Report.decoder.decode(AliveRecord.self, from: data) {
+            return .legacy(record)
+        }
+        return .unverified
+    }
+
+    @discardableResult
+    public func save(_ record: AliveRecord) -> Bool {
+        let existing = keyFile.load()
+        let key = existing?.bytes.count == 32 ? existing : keyFile.update { existing in
+            if let existing, existing.bytes.count == 32 { return existing }
+            let fm = FileManager.default
+            let legacyBytes = fm.fileExists(atPath: signingMarker) ? nil : fm.contents(atPath: path)
+            let legacy = legacyBytes.flatMap { data in
+                (try? Report.decoder.decode(AliveRecord.self, from: data)).map { _ in Data(SHA256.hash(data: data)) }
+            }
+            return SigningKey(bytes: SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }, legacyDigest: legacy)
+        }
+        guard let key, key.bytes.count == 32, let payload = try? Report.encoder.encode(record) else {
+            log("alive record: couldn't load or create the signing key")
+            return false
+        }
+        let tag = HMAC<SHA256>.authenticationCode(for: payload, using: SymmetricKey(data: key.bytes))
+        let signed = SignedRecord(payload: String(decoding: payload, as: UTF8.self), tag: Data(tag))
+        guard let data = try? Report.encoder.encode(signed) else { return false }
+        // Persist the signing requirement before replacing the legacy record.
+        // If interrupted, the key still identifies the one accepted legacy payload.
+        let marker = open(signingMarker, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        if marker >= 0 {
+            close(marker)
+        } else if errno != EEXIST {
+            log("alive record: couldn't persist the signing requirement: \(String(cString: strerror(errno)))")
+            return false
+        }
         let tmp = path + ".tmp"
         guard FileManager.default.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o600]),
               rename(tmp, path) == 0 else {
             log("alive record: couldn't save \(path): \(String(cString: strerror(errno)))")
-            return
+            return false
         }
+        if key.legacyDigest != nil {
+            keyFile.update { _ in SigningKey(bytes: key.bytes, legacyDigest: nil) }
+        }
+        return true
     }
 }
