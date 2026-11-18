@@ -19,6 +19,8 @@ final class Reporter: @unchecked Sendable {
 
     private let queue: DispatchQueue
     private let outbox: ReportOutbox
+    /// What the partner was told, for the Accountability page.
+    let partnerLog = PartnerLog()
     /// In `--dev` runs without `RENEW_DEV_REPORTS`, reports are only logged.
     private let logOnly: Bool
     private var batches: [uid_t: (flags: [MonitorFlag], due: TimeInterval)] = [:]
@@ -61,9 +63,20 @@ final class Reporter: @unchecked Sendable {
         guard let target = destination() else { return false }
         let report = Report(mac: Alerts.macName, user: Self.userName(uid), kind: .test, sentAt: Date(),
                             changes: ["Test report from Renew. If you're reading this, email reports work."])
-        if logOnly { logDev(report) } else { ReportClient.post(report, to: target) { _ in } }
+        if logOnly { logDev(report); return true }
+        let partnerLog = partnerLog
+        ReportClient.post(report, to: target) { outcome in
+            switch outcome {
+            case .delivered: partnerLog.append(.email(report, status: .sent, date: Date()))
+            case .rejected, .refused: partnerLog.append(.email(report, status: .failed, date: Date()))
+            case .retry: break
+            }
+        }
         return true
     }
+
+    /// Reports waiting to be sent, oldest first.
+    func waiting() -> [OutboxEntry] { outbox.load() }
 
     /// Called on every tick: turns due batches into reports and sends
     /// waiting ones.
@@ -140,13 +153,20 @@ final class Reporter: @unchecked Sendable {
         sending = false
         let settled: Bool
         switch outcome {
-        case .delivered, .rejected:
+        case .delivered:
             settled = true
+            partnerLog.append(.email(entry.report, status: .sent, date: Date()))
+        case .rejected:
+            settled = true
+            partnerLog.append(.email(entry.report, status: .failed, date: Date()))
         case .refused:
             // A previous destination that no longer takes reports won't
             // start again; don't let it hold up the current one.
             settled = entry.target != nil
-            if settled { log("reports: dropped report \(entry.report.id) owed to a previous report server that refused it") }
+            if settled {
+                log("reports: dropped report \(entry.report.id) owed to a previous report server that refused it")
+                partnerLog.append(.email(entry.report, status: .failed, date: Date()))
+            }
         case .retry:
             settled = false
         }

@@ -27,25 +27,35 @@ public enum Alerts {
     /// `kind` and `minInterval` rate-limit repeats across every Renew process
     /// (daemon, guard, CLI), so a restart or a burst of tampering sends one
     /// message, not ten. `wait` blocks until it's sent or times out, for use
-    /// right before the process exits.
+    /// right before the process exits. Returns whether it was sent (rather
+    /// than skipped: no destination, or sent recently); `done` then gets
+    /// whether the destination accepted it.
+    @discardableResult
     public static func send(to url: String?, _ message: String, kind: String? = nil,
-                            minInterval: TimeInterval = 0, wait: Bool = false) {
-        guard let url, let request = makeRequest(url, title: "Renew on \(macName)", message: message) else { return }
+                            minInterval: TimeInterval = 0, wait: Bool = false,
+                            done: (@Sendable (Bool) -> Void)? = nil) -> Bool {
+        guard let url, let request = makeRequest(url, title: "Renew on \(macName)", message: message) else { return false }
         if let kind, minInterval > 0, !claim(kind, for: minInterval) {
             log("alert '\(kind)' suppressed (sent recently)")
-            return
+            return false
         }
         log("sending alert\(kind.map { " '\($0)'" } ?? ""): \(message)")
-        let done = DispatchSemaphore(value: 0)
+        let signal = DispatchSemaphore(value: 0)
+        let finished = done
         session.dataTask(with: request) { _, response, error in
+            var ok = false
             if let error {
                 log("alert failed: \(error.localizedDescription)")
             } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 log("alert failed: HTTP \(http.statusCode)")
+            } else {
+                ok = true
             }
-            done.signal()
+            finished?(ok)
+            signal.signal()
         }.resume()
-        if wait { _ = done.wait(timeout: .now() + 8) }
+        if wait { _ = signal.wait(timeout: .now() + 8) }
+        return true
     }
 
     private static let session: URLSession = {

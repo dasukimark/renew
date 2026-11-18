@@ -2,9 +2,9 @@ import Foundation
 import RenewShared
 
 /// Accepts one JSON request per connection on a world-writable Unix socket.
-/// The caller's uid comes from the kernel (getpeereid), not the payload.
+/// The caller's uid and audit token come from the kernel, not the payload.
 final class SocketServer {
-    typealias Handler = (Request, uid_t) -> Response
+    typealias Handler = (Request, uid_t, _ auditToken: Data?) -> Response
 
     private let path: String
     private let handler: Handler
@@ -86,7 +86,7 @@ final class SocketServer {
         do {
             let line = try readLine(client, max: 1 << 20)
             let request = try Wire.decoder.decode(Request.self, from: line)
-            response = handler(request, uid)
+            response = handler(request, uid, PeerCheck.auditToken(of: client))
         } catch {
             response = Response(ok: false, error: "bad request: \(error)")
         }

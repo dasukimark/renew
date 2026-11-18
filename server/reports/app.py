@@ -6,6 +6,10 @@ ALLOWED_RECIPIENTS to restrict which addresses the server will email.
 
 Secrets (the report token and the Gmail app password) are SecureString SSM
 parameters, read once per cold start.
+
+It also keeps track of check-ins (heartbeats) from each Mac in a DynamoDB
+table, and every few minutes (an EventBridge schedule) emails the partner
+about Macs that went quiet without warning. See heartbeat.py.
 """
 
 import base64
@@ -18,6 +22,7 @@ import smtplib
 import uuid
 from datetime import datetime
 
+import heartbeat
 from render import build_email
 
 log = logging.getLogger()
@@ -150,7 +155,43 @@ def send_email(msg, sender, app_password):
         smtp.send_message(msg)
 
 
+def _json_response(status, data):
+    return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": json.dumps(data)}
+
+
+def _allowed_recipients():
+    return {a.strip().lower() for a in os.environ.get("ALLOWED_RECIPIENTS", "").split(",") if a.strip()}
+
+
+def _is_heartbeat(body):
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("kind") == "heartbeat"
+
+
+def _send_built(report, app_password):
+    """Emails a cleaned report; raises on failure."""
+    sender = os.environ["GMAIL_ADDRESS"]
+    send_email(build_email(report, sender), sender, app_password)
+
+
+def _checkin_sender(app_password):
+    """Sends check-in emails, only to ALLOWED_RECIPIENTS when that's set."""
+    allowed = _allowed_recipients()
+
+    def send(report):
+        if allowed and report["to"] not in allowed:
+            raise heartbeat.SendFailed("recipient not allowed")
+        _send_built(report, app_password)
+    return send
+
+
 def handler(event, context):
+    if event.get("source") == "aws.events" or event.get("detail-type") == "Scheduled Event":
+        return _scheduled_check()
+
     http = (event.get("requestContext") or {}).get("http") or {}
     if http.get("method", "").upper() != "POST":
         return _response(405, "method not allowed")
@@ -176,12 +217,15 @@ def handler(event, context):
     if not given or not hmac.compare_digest(given.encode(), token.encode()):
         return _response(401, "unauthorized")
 
+    if _is_heartbeat(body):
+        return _heartbeat(body, app_password)
+
     try:
         report = parse_report(body)
     except Invalid as e:
         return _response(400, f"bad report: {e}")
 
-    allowed = {a.strip().lower() for a in os.environ.get("ALLOWED_RECIPIENTS", "").split(",") if a.strip()}
+    allowed = _allowed_recipients()
     if allowed and report["to"] not in allowed:
         log.warning("refused report %s to an address not in ALLOWED_RECIPIENTS", report["id"])
         return _response(403, "recipient not allowed")
@@ -208,3 +252,36 @@ def handler(event, context):
         _recently_sent.pop(next(iter(_recently_sent)))
     log.info("sent %s report %s (%d flags)", report["kind"], report["id"], len(report["flags"]))
     return _response(200, "sent")
+
+
+def _heartbeat(body, app_password):
+    try:
+        beat = heartbeat.parse_heartbeat(body)
+    except heartbeat.Invalid as e:
+        return _response(400, f"bad heartbeat: {e}")
+    allowed = _allowed_recipients()
+    if allowed and beat["to"] is not None and beat["to"] not in allowed:
+        log.warning("refused heartbeat from %s to an address not in ALLOWED_RECIPIENTS", beat["install"])
+        return _response(403, "recipient not allowed")
+    try:
+        reply = heartbeat.record_beat(beat, heartbeat.now(), heartbeat.store(), _checkin_sender(app_password))
+    except heartbeat.SendFailed:
+        # Nothing was recorded; renewd tries again in a minute.
+        log.exception("couldn't email about heartbeat from %s", beat["install"])
+        return _response(502, "couldn't send")
+    except Exception:
+        log.exception("couldn't record heartbeat from %s", beat["install"])
+        return _response(500, "couldn't record")
+    return _json_response(200, reply)
+
+
+def _scheduled_check():
+    try:
+        _, app_password = _load_secrets()
+    except Exception:
+        log.exception("couldn't read secrets from SSM")
+        return {"checked": 0, "error": "secrets"}
+    sent = heartbeat.check_all(heartbeat.now(), heartbeat.store(), _checkin_sender(app_password),
+                               silence=heartbeat.silence_seconds(), cap=heartbeat.cap_seconds(),
+                               stopping=heartbeat.stopping_seconds())
+    return {"alerted": sent}

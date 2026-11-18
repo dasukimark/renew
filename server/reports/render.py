@@ -28,6 +28,15 @@ CARD = "#ffffff"
 ACCENT = "#0f766e"
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"
 
+# Check-in emails (see heartbeat.py): subject, heading and notice colors.
+CHECKIN = {
+    "silent": ("Renew on {mac} stopped checking in", "Renew stopped checking in", ("#b91c1c", "#fef2f2")),
+    "quiet": ("Renew on {mac} has been away for a while", "Away for a while", ("#b45309", "#fffbeb")),
+    "back": ("Renew on {mac} is checking in again", "Checking in again", ("#15803d", "#f0fdf4")),
+    "stopped": ("Renew on {mac} was stopped", "Renew was stopped", ("#b91c1c", "#fef2f2")),
+    "gap": ("Renew on {mac} wasn't running for a while", "Renew wasn't running", ("#b91c1c", "#fef2f2")),
+}
+
 PILLS = {
     "explicit": ("#fef2f2", "#b91c1c"),
     "word": ("#eef2ff", "#4338ca"),
@@ -163,6 +172,11 @@ def build_email(report, sender):
         heading = plural(n, "flagged visit")
         sub = f"on {who}" + (f" · {span(flags, zone)}" if flags else "")
         preheader = f"{plural(n, 'flagged visit')} on {plural(len(sites), 'site')}"
+    elif report["kind"] in CHECKIN:
+        subject_t, heading, _ = CHECKIN[report["kind"]]
+        subject = subject_t.format(mac=report["mac"])
+        sub = f"on {who} · {when(report['sentAt'], zone)}"
+        preheader = report["changes"][0] if report["changes"] else heading
     elif report["kind"] == "change":
         subject = f"Renew: monitoring changed on {report['mac']}"
         heading = "Monitoring changed"
@@ -205,7 +219,10 @@ def build_email(report, sender):
             body.append(f"<tr><td style='padding:14px 0 0;border-top:1px solid {LINE};color:{MUTED};font-size:13px'>"
                         f"…and {report['omitted']} more flagged visits not listed.</td></tr>")
     if report["changes"]:
-        color, bg = (("#15803d", "#f0fdf4") if report["kind"] == "test" else ("#b45309", "#fffbeb"))
+        if report["kind"] in CHECKIN:
+            color, bg = CHECKIN[report["kind"]][2]
+        else:
+            color, bg = (("#15803d", "#f0fdf4") if report["kind"] == "test" else ("#b45309", "#fffbeb"))
         body.append(notice(report["changes"], color, bg))
 
     page = f"""<!doctype html>

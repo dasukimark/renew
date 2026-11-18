@@ -35,6 +35,11 @@ public enum Command: String, Codable, Sendable {
     /// Replaces only the Monitor's copy of the watched blocklists' rules
     /// (`monitor.listRules`), leaving the rest of its settings as they are.
     case setMonitorListRules
+    /// The app heard that the Mac is about to log out, restart or shut
+    /// down, so renewd's exit counts as a shutdown (see `Heartbeat`).
+    case poweringOff
+    /// What the accountability partner was told (see `PartnerLogEntry`).
+    case partnerHistory
 }
 
 public struct AgentReport: Codable, Sendable {
@@ -242,10 +247,13 @@ public struct Response: Codable, Sendable {
     /// For `monitorFlags`: whether `flags` only holds flags added since the
     /// query's `fromOffset`.
     public var flagsIncremental: Bool?
+    /// For `partnerHistory`: newest first.
+    public var partnerHistory: [PartnerLogEntry]?
 
     public init(ok: Bool, error: String? = nil, status: Status? = nil, activity: ActivityPage? = nil,
-                stats: [DaySummary]? = nil, flags: MonitorPage? = nil) {
+                stats: [DaySummary]? = nil, flags: MonitorPage? = nil, partnerHistory: [PartnerLogEntry]? = nil) {
         self.ok = ok
+        self.partnerHistory = partnerHistory
         self.error = error
         self.status = status
         self.activity = activity?.events

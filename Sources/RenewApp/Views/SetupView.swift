@@ -6,10 +6,6 @@ struct SetupView: View {
     @State private var showingProfile = false
     @State private var showingUninstall = false
     @State private var confirmingRequest = false
-    @State private var alertDraft = ""
-    @State private var reportURLDraft = ""
-    @State private var reportPartnerDraft = ""
-    @State private var reportTokenDraft = ""
 
     var body: some View {
         Form {
@@ -17,21 +13,13 @@ struct SetupView: View {
             permissionsSection
             protectionsSection
             profileSection
-            alertsSection
-            reportsSection
             uninstallSection
         }
         .formStyle(.grouped)
         .navigationTitle("Setup")
         .onAppear {
             model.refreshPermissions()
-            alertDraft = model.alertURL ?? ""
-            reportURLDraft = model.reportsURL ?? ""
-            reportPartnerDraft = model.reportsPartner ?? ""
         }
-        .onChange(of: model.alertURL) { alertDraft = $0 ?? "" }
-        .onChange(of: model.reportsURL) { reportURLDraft = $0 ?? "" }
-        .onChange(of: model.reportsPartner) { reportPartnerDraft = $0 ?? "" }
         .sheet(isPresented: $showingProfile) { ProfileSheet() }
         .sheet(isPresented: $showingUninstall) { UninstallSheet(model: model) }
     }
@@ -42,13 +30,13 @@ struct SetupView: View {
         Section {
             LabeledContent("Background service") {
                 if model.isLocalTest {
-                    status("Local test run", .secondary)
+                    statusDot("Local test run", .secondary)
                 } else if !model.isInstalled {
-                    status("Not installed", .secondary)
+                    statusDot("Not installed", .secondary)
                 } else if model.daemonReachable {
-                    status("Running", .green)
+                    statusDot("Running", .green)
                 } else {
-                    status("Not responding", .orange)
+                    statusDot("Not responding", .orange)
                 }
             }
             if model.isInstalled {
@@ -91,7 +79,7 @@ struct SetupView: View {
                 }
                 Spacer()
                 if model.accessibilityGranted {
-                    status("Allowed", .green)
+                    statusDot("Allowed", .green)
                 } else {
                     Button("Allow…") {
                         Permissions.requestAccessibility()
@@ -133,14 +121,14 @@ struct SetupView: View {
 
     @ViewBuilder private func browserControl(_ b: BrowserPermission) -> some View {
         if b.kind == .firefox {
-            if model.accessibilityGranted { status("Ready", .green) } else { status("Needs Accessibility", .orange) }
+            if model.accessibilityGranted { statusDot("Ready", .green) } else { statusDot("Needs Accessibility", .orange) }
         } else {
             switch b.state {
             case .allowed:
-                status("Allowed", .green)
+                statusDot("Allowed", .green)
             case .denied:
                 HStack {
-                    status("Not allowed", .red)
+                    statusDot("Not allowed", .red)
                     Button("Open Settings") { Permissions.openAutomationSettings() }
                 }
             case .notAsked:
@@ -236,132 +224,6 @@ struct SetupView: View {
         }
     }
 
-    // MARK: alerts
-
-    /// Alerts can be turned on any time, but changed or turned off only
-    /// between sessions (renewd enforces this too).
-    private var alertsLocked: Bool { model.session != nil && model.alertURL != nil }
-
-    private var alertsSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Renew messages someone you trust if it's stopped, its files are tampered with, or the clock is changed during a block session, and when an uninstall is requested or done.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                TextField("https://ntfy.sh/your-secret-topic", text: $alertDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .disabled(alertsLocked || !model.daemonReachable)
-                HStack {
-                    Button(model.alertURL == nil ? "Turn on alerts" : "Save") {
-                        model.setAlerts(alertDraft)
-                    }
-                    .disabled(alertsLocked || model.busy || !model.daemonReachable
-                              || alertDraft.trimmingCharacters(in: .whitespaces).isEmpty
-                              || alertDraft == (model.alertURL ?? ""))
-                    if model.alertURL != nil {
-                        Button("Send test") { model.testAlert() }
-                            .disabled(model.busy)
-                        Button("Turn off") { model.setAlerts(nil) }
-                            .disabled(alertsLocked || model.busy)
-                    }
-                    Spacer()
-                    if model.alertURL != nil { status("On", .green) } else { status("Off", .secondary) }
-                }
-                if alertsLocked {
-                    Text("Alerts can be changed after the current session ends.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-        } header: {
-            Text("Accountability alerts")
-        } footer: {
-            Text("Free and no account needed: your partner installs the ntfy app and subscribes to a hard-to-guess topic, and you enter https://ntfy.sh/<that topic> here. Discord and Slack webhook URLs work too. When the destination changes or alerts are turned off, the old destination is told.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    // MARK: email reports
-
-    private var reportsOn: Bool { model.reportsPartner != nil }
-    /// Same rule as alerts (renewd enforces this too).
-    private var reportsLocked: Bool { model.session != nil && reportsOn }
-    /// The server fields show only without a built-in server, or when
-    /// reports already use a different one.
-    private var showServerFields: Bool { !model.reportServerBuiltIn || model.reportsURL != nil }
-
-    private var reportsSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Renew emails your accountability partner when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Emails name the site, the page title, why it was flagged and when, never the full address.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                TextField("Partner's email address", text: $reportPartnerDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(reportsLocked || !model.daemonReachable)
-                if showServerFields {
-                    TextField("Report server URL", text: $reportURLDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .disabled(reportsLocked || !model.daemonReachable)
-                    SecureField("Report token", text: $reportTokenDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(reportsLocked || !model.daemonReachable)
-                }
-                HStack {
-                    Button(reportsOn ? "Save" : "Turn on reports") {
-                        let custom = showServerFields && !reportURLDraft.trimmingCharacters(in: .whitespaces).isEmpty
-                        model.setReports(partnerEmail: reportPartnerDraft,
-                                         url: custom ? reportURLDraft : nil,
-                                         token: custom ? reportTokenDraft : nil) { ok in
-                            if ok { reportTokenDraft = "" }
-                        }
-                    }
-                    .disabled(reportsLocked || model.busy || !model.daemonReachable || !canSaveReports)
-                    if reportsOn {
-                        Button("Send test") { model.testReport() }
-                            .disabled(model.busy)
-                        Button("Turn off") { model.setReports(partnerEmail: nil) }
-                            .disabled(reportsLocked || model.busy)
-                    }
-                    Spacer()
-                    if reportsOn { status("On", .green) } else { status("Off", .secondary) }
-                }
-                if reportsLocked {
-                    Text("Email reports can be changed after the current session ends.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-        } header: {
-            Text("Email reports")
-        } footer: {
-            Text(model.reportServerBuiltIn
-                 ? "Your partner doesn't need an account; they just get emails. Reports wait on this Mac until they're sent. When the partner changes or reports are turned off, the previous partner gets a last email."
-                 : "No report server is set up on this Mac yet: deploy one (see server/reports/README.md), run configure-mac.sh and reinstall Renew, or enter a server's URL and token here.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var canSaveReports: Bool {
-        let partner = reportPartnerDraft.trimmingCharacters(in: .whitespaces)
-        guard !partner.isEmpty else { return false }
-        if showServerFields {
-            let url = reportURLDraft.trimmingCharacters(in: .whitespaces)
-            // An empty URL means the built-in server: allowed when one is
-            // installed and something changes (the partner, or leaving a
-            // different server).
-            if url.isEmpty { return model.reportServerBuiltIn && (partner != model.reportsPartner || model.reportsURL != nil) }
-            return !reportTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        return partner != model.reportsPartner
-    }
-
     // MARK: uninstall
 
     private var uninstallSection: some View {
@@ -419,13 +281,6 @@ struct SetupView: View {
         }
         let left = DurationText.format(Int(u.unlocksAt.timeIntervalSince(model.now)))
         return "Requested. Unlocks at \(Format.clock(u.unlocksAt)) (in \(left))."
-    }
-
-    private func status(_ text: String, _ color: Color) -> some View {
-        HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 7, height: 7)
-            Text(text).foregroundStyle(.secondary)
-        }
     }
 }
 

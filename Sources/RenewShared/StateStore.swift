@@ -12,6 +12,9 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// Where email reports go (see `Report`). nil means off. The token is
     /// safe here: the state file is readable only by root.
     public var reports: ReportDestination?
+    /// This install's id, sent with check-ins (see `Heartbeat`). Made by
+    /// renewd the first time it starts.
+    public var installID: UUID?
     public var uninstall: UninstallRequest?
     /// Recurring block sessions renewd starts on its own (see `Schedule`).
     public var schedules: [Schedule]?

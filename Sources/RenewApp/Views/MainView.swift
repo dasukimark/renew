@@ -28,6 +28,7 @@ struct MainView: View {
             case .lists: ListsView(model: model)
             case .activity: ActivityView(model: model)
             case .monitor: MonitorView(model: model)
+            case .accountability: AccountabilityView(model: model)
             case .setup: SetupView(model: model)
             }
         }
