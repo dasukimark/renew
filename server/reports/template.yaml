@@ -20,8 +20,8 @@ Parameters:
     Description: SSM SecureString parameter holding the token renewd sends.
   SilenceMinutes:
     Type: Number
-    Default: 10
-    Description: Email the partners when a Mac that's awake hasn't checked in for this many minutes.
+    Default: 120
+    Description: Email the partners when a Mac that's awake hasn't checked in for this many minutes. Renew reports time it wasn't running by itself, so this only catches Renew never coming back.
   StoppingMinutes:
     Type: Number
     Default: 3

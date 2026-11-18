@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// renewd's internal heartbeat: every few seconds it writes an `AliveRecord`
@@ -27,13 +28,22 @@ public struct AliveRecord: Codable, Equatable, Sendable {
     public var coveredSince: Date
     /// Set when renewd exits cleanly; nil while running (or if it was killed).
     public var exit: Exit?
+    /// Runs from before the Mac restarted, while they're still being
+    /// checked against the power log (see `assessRestart`). Kept here so
+    /// renewd restarting (or the Mac restarting again) mid-check doesn't
+    /// drop them. Oldest first, at most `maxUnchecked`.
+    public var unchecked: [UncheckedRestart]?
 
-    public init(bootID: String, awake: TimeInterval, wall: Date, coveredSince: Date, exit: Exit? = nil) {
+    public static let maxUnchecked = 10
+
+    public init(bootID: String, awake: TimeInterval, wall: Date, coveredSince: Date, exit: Exit? = nil,
+                unchecked: [UncheckedRestart]? = nil) {
         self.bootID = bootID
         self.awake = awake
         self.wall = wall
         self.coveredSince = coveredSince
         self.exit = exit
+        self.unchecked = unchecked
     }
 
     /// How often renewd writes its record.
@@ -52,27 +62,130 @@ public struct AliveRecord: Codable, Equatable, Sendable {
     ///
     /// - Same boot: the awake time since the last record, if over `tolerance`.
     /// - New boot after a clean shutdown: nothing (the Mac was off).
-    /// - New boot after renewd was stopped without a shutdown: a gap from
-    ///   then until the restart (how long the Mac was awake is unknown),
-    ///   unless the Mac booted within `Heartbeat.restartWindow` of it: that
-    ///   was a restart Renew wasn't told about (the app wasn't running).
-    /// - New boot after renewd didn't exit cleanly: a crash or power loss;
-    ///   nothing is reported, but coverage starts again.
+    /// - New boot otherwise (renewd was stopped, killed, or the Mac lost
+    ///   power): see `assessRestart`. Reading the power log is slow, so
+    ///   renewd does that part later, off its state queue.
     public static func assess(previous: AliveRecord?, bootID: String, awake: TimeInterval,
-                              wall: Date, bootedAt: Date? = nil) -> (gap: DowntimeGap?, coveredSince: Date) {
+                              wall: Date, bootedAt: Date? = nil,
+                              history: PowerHistory = PowerHistory()) -> (gap: DowntimeGap?, coveredSince: Date) {
         guard let p = previous else { return (nil, wall) }
         if p.bootID == bootID {
             let awakeGap = awake - p.awake
             guard awakeGap > tolerance else { return (nil, p.coveredSince) }
-            return (DowntimeGap(from: p.wall, to: wall, awakeSeconds: Int(awakeGap.rounded()), restarted: false), wall)
+            return (DowntimeGap(after: p, to: wall, awakeSeconds: awakeGap, restarted: false), wall)
         }
-        switch p.exit {
-        case .shutdown: return (nil, p.coveredSince)
-        case .stopping:
-            if let b = bootedAt, b.timeIntervalSince(p.wall) <= Heartbeat.restartWindow { return (nil, p.coveredSince) }
-            return (DowntimeGap(from: p.wall, to: wall, awakeSeconds: nil, restarted: true), wall)
-        case nil: return (nil, wall)
+        if p.exit == .shutdown { return (nil, p.coveredSince) }
+        switch assessRestart(UncheckedRestart(p, restartedAt: wall, bootedAt: bootedAt), history: history) {
+        case .gap(let gap): return (gap, wall)
+        case .fine: return (nil, p.coveredSince)
+        case .unknown: return (nil, wall)
         }
+    }
+
+    public enum RestartOutcome: Equatable, Sendable {
+        /// The Mac was in use without renewd before it went down.
+        case gap(DowntimeGap)
+        /// renewd was running until the Mac went down (or nearly).
+        case fine
+        /// No way to tell: most likely a crash or power loss.
+        case unknown
+    }
+
+    /// The Mac restarted after renewd stopped without a clean shutdown
+    /// (it was stopped, killed, or the Mac crashed or lost power). The
+    /// power log (`history`) says how long the Mac was awake between
+    /// renewd's last record and the Mac going down:
+    ///
+    /// - Over `tolerance`: a gap, however the Mac went down. So stopping
+    ///   renewd, using the Mac and restarting it is reported.
+    /// - Under: fine. A crash or power loss ends both at once.
+    /// - The log doesn't reach back that far: if a clean shutdown came
+    ///   well after the last record, renewd was stopped before it (a gap of
+    ///   unknown length). If renewd said it was stopping, the Mac booting
+    ///   within `Heartbeat.restartWindow` counts as a restart Renew wasn't
+    ///   told about (the app wasn't running). Otherwise unknown.
+    public static func assessRestart(_ u: UncheckedRestart, history: PowerHistory) -> RestartOutcome {
+        let bootedAt = u.bootedAt ?? u.restartedAt
+        let down = history.awake(after: u.wall, before: bootedAt)
+        if let seconds = down.awakeSeconds, seconds > tolerance {
+            return .gap(DowntimeGap(after: u, awakeSeconds: seconds))
+        }
+        if let shutdown = down.shutdownAt {
+            // A clean shutdown: the log (if any) covers up to it exactly.
+            if down.awakeSeconds != nil { return .fine }
+            return shutdown.timeIntervalSince(u.wall) > tolerance ? .gap(DowntimeGap(after: u, awakeSeconds: nil)) : .fine
+        }
+        // No clean shutdown, so the Mac went down abruptly. The power log
+        // only has lines when something happens, so the time after its last
+        // line is unknown: an hour of use with nothing logged looks short.
+        if u.exit == .stopping {
+            // renewd was stopped on purpose (a crash can't say that), so
+            // this isn't a crash: as before, only a quick restart is fine.
+            return bootedAt.timeIntervalSince(u.wall) > Heartbeat.restartWindow ? .gap(DowntimeGap(after: u, awakeSeconds: nil)) : .fine
+        }
+        // Killed, or a crash or power loss: a crash looks the same, so only
+        // what the log shows counts.
+        return down.awakeSeconds == nil ? .unknown : .fine
+    }
+
+    /// Whether this record can be trusted against `marker`, the last time
+    /// renewd noted in state.json that it was running (see
+    /// `PersistedState.aliveMarker`). renewd writes its record far more
+    /// often than the marker, so a record older than the marker was put
+    /// back from an old copy. Within a boot the awake clock decides, so
+    /// setting the date back doesn't look like that.
+    public static func isConsistent(_ record: AliveRecord?, marker: AliveMarker?) -> Bool {
+        guard let marker else { return true }
+        guard let record else { return false }
+        if record.bootID == marker.bootID { return record.awake >= marker.awake - tolerance }
+        return record.wall >= marker.wall.addingTimeInterval(-tolerance)
+    }
+}
+
+/// renewd noting that it's running, kept in state.json (see
+/// `PersistedState.aliveMarker`).
+public struct AliveMarker: Codable, Equatable, Sendable {
+    public var bootID: String
+    public var awake: TimeInterval
+    public var wall: Date
+
+    public init(bootID: String, awake: TimeInterval, wall: Date) {
+        self.bootID = bootID
+        self.awake = awake
+        self.wall = wall
+    }
+}
+
+/// renewd's last record from before the Mac restarted, waiting to be
+/// checked against the power log.
+public struct UncheckedRestart: Codable, Equatable, Sendable {
+    public var bootID: String
+    public var awake: TimeInterval
+    /// When renewd was last known to be running.
+    public var wall: Date
+    public var exit: AliveRecord.Exit?
+    /// When renewd was running again after the restart.
+    public var restartedAt: Date
+    /// When the Mac booted after it (it may have restarted again since).
+    public var bootedAt: Date?
+    /// The old run's `coveredSince`, kept if renewd turns out to have run
+    /// until the Mac went down.
+    public var coveredSince: Date?
+
+    public init(bootID: String, awake: TimeInterval, wall: Date, exit: AliveRecord.Exit?, restartedAt: Date,
+                bootedAt: Date? = nil, coveredSince: Date? = nil) {
+        self.bootID = bootID
+        self.awake = awake
+        self.wall = wall
+        self.exit = exit
+        self.restartedAt = restartedAt
+        self.bootedAt = bootedAt
+        self.coveredSince = coveredSince
+    }
+
+    public init(_ r: AliveRecord, restartedAt: Date, bootedAt: Date? = nil) {
+        self.init(bootID: r.bootID, awake: r.awake, wall: r.wall, exit: r.exit, restartedAt: restartedAt,
+                  bootedAt: bootedAt, coveredSince: r.coveredSince)
     }
 }
 
@@ -88,13 +201,45 @@ public struct DowntimeGap: Codable, Equatable, Sendable, Identifiable {
     /// in between, so it's unknown.
     public var awakeSeconds: Int?
     public var restarted: Bool
+    /// What kind of gap; nil for the usual one (renewd wasn't running).
+    public var kind: Kind?
 
-    public init(id: UUID = UUID(), from: Date, to: Date, awakeSeconds: Int?, restarted: Bool) {
+    public enum Kind: String, Codable, Sendable {
+        /// renewd's records were deleted or put back from an old copy
+        /// while it wasn't running, so how long it was gone is unknown.
+        case recordsMissing
+    }
+
+    public init(id: UUID = UUID(), from: Date, to: Date, awakeSeconds: Int?, restarted: Bool, kind: Kind? = nil) {
         self.id = id
         self.from = from
         self.to = to
         self.awakeSeconds = awakeSeconds
         self.restarted = restarted
+        self.kind = kind
+    }
+
+    /// The gap after renewd's record `last` (same boot).
+    public init(after last: AliveRecord, to: Date, awakeSeconds: TimeInterval, restarted: Bool) {
+        self.init(id: Self.id(after: last.bootID, awake: last.awake), from: last.wall, to: to,
+                  awakeSeconds: Int(awakeSeconds.rounded()), restarted: restarted)
+    }
+
+    /// The gap after renewd's last record before a restart.
+    public init(after u: UncheckedRestart, awakeSeconds: TimeInterval?) {
+        self.init(id: Self.id(after: u.bootID, awake: u.awake), from: u.wall, to: u.restartedAt,
+                  awakeSeconds: awakeSeconds.map { Int($0.rounded()) }, restarted: true)
+    }
+
+    /// The same id for the same gap, whoever finds it: renewd itself, or
+    /// the guard (see `Witness`). It depends only on renewd's last record
+    /// before the gap, so the server emails about it once.
+    public static func id(after bootID: String, awake: TimeInterval) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data("renew-gap/\(bootID)/\(awake)".utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50 // "version 5"-style: name-based
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 }
 
@@ -112,8 +257,10 @@ public struct DowntimeGapStore {
 
     public func load() -> [DowntimeGap] { file.load() }
 
+    /// Adds `gap`, unless one with its id is already waiting (renewd and
+    /// the guard may both find it).
     public func append(_ gap: DowntimeGap) {
-        file.update { Array(($0 + [gap]).suffix(Self.maxGaps)) }
+        file.update { $0.contains { $0.id == gap.id } ? $0 : Array(($0 + [gap]).suffix(Self.maxGaps)) }
     }
 
     /// Removes gaps the server has taken.

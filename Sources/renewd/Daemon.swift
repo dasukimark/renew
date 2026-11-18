@@ -69,7 +69,15 @@ final class Daemon {
     }()
 
     /// The internal heartbeat (see `AliveRecord`).
-    private lazy var alive = AliveTracker(gaps: heartbeater.gaps) { [unowned self] in self.state.reports != nil }
+    private lazy var alive = AliveTracker(
+        gaps: heartbeater.gaps,
+        reporting: { [unowned self] in self.state.reports != nil },
+        marker: { [unowned self] in self.state.aliveMarker },
+        setMarker: { [unowned self] date in
+            guard self.state.aliveMarker != date else { return }
+            self.state.aliveMarker = date
+            StateStore.save(self.state)
+        })
 
     /// This install's id, made and saved the first time it's needed.
     private func ensureInstallID() -> UUID {
@@ -568,13 +576,17 @@ final class Daemon {
         // Downtime from before reports were on isn't the new partner's business.
         if old == nil { heartbeater.gaps.removeAll() }
         state.reports = new
+        if new == nil {
+            state.aliveMarker = nil
+            alive.reportsOff()
+        }
         StateStore.save(state)
         if old == nil, new != nil { alive.resume() }
         log("email reports \(new == nil ? "turned off" : "set to \(new!.partnerEmails.joined(separator: ", ")) via \(new!.url ?? "the built-in server")") by uid \(uid)")
         if let new, partnersChanged {
             reporter.add(changes: ["Email reports from Renew now go to: \(new.partnerEmails.joined(separator: ", "))."], uid: uid)
         } else if new != nil {
-            reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Renew also checks in about every 4 minutes; if it goes quiet while the Mac is awake, or isn't running for a while, you'll be emailed."], uid: uid)
+            reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Renew also checks in with the report server regularly. If it isn't running for more than a minute while the Mac is awake, you'll be emailed when it runs again; if it stops checking in for 2 hours while the Mac is awake, you'll be emailed then."], uid: uid)
         }
         // Moving server or turning off: tell the old destination to stop
         // expecting check-ins, then check in with the new one. On the same
@@ -710,8 +722,12 @@ final class Daemon {
                        kind: "repair", every: 600)
             }
             ensureAgent(now)
-            // Bring the guard back if it was stopped during the session.
-            if now.timeIntervalSince(lastGuardCheck) >= 10 { syncGuard() }
+        }
+        // Bring the guard back if it was stopped: quickly during a session,
+        // where it also keeps renewd running; otherwise it's still the
+        // second witness to renewd's internal heartbeat (see `WitnessRecord`).
+        if state.effectiveProtections.keepRunning, now.timeIntervalSince(lastGuardCheck) >= (active != nil ? 10 : 60) {
+            syncGuard()
         }
     }
 
@@ -757,14 +773,15 @@ final class Daemon {
     /// file disagrees (edited or deleted), renewd's copy is written back.
     private func adoptDiskState(_ r: ClockReading) {
         guard let file = StateStore.load() else { return }
-        if file.reports != state.reports || file.installID != state.installID || file.uninstall?.requestedAt != state.uninstall?.requestedAt
+        if file.reports != state.reports || file.installID != state.installID || file.aliveMarker != state.aliveMarker
+            || file.uninstall?.requestedAt != state.uninstall?.requestedAt
             || file.schedules != state.schedules
             // The anchor's date may not survive the JSON round trip bit for bit.
             || file.wallAnchor?.bootID != state.wallAnchor?.bootID || file.wallAnchor?.mono != state.wallAnchor?.mono
             || file.protections != state.protections || !sameCoolingOffRemoval(file, r)
             || file.activityByUser != state.activityByUser || file.monitorByUser != state.monitorByUser
             || file.monitoringByUser != state.monitoringByUser {
-            log("state file disagrees about reports/uninstall/schedules/protections/activity/monitor; rewriting")
+            log("state file disagrees about reports/uninstall/schedules/protections/activity/monitor/alive marker; rewriting")
             StateStore.save(state)
         }
         guard var disk = file.activeSession(at: r) else { return }

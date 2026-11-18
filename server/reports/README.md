@@ -5,7 +5,7 @@ accountability partners. renewd POSTs each report here; the Lambda emails it
 from a Gmail account you create just for this. Partners don't need an
 account, they only get emails.
 
-It also keeps track of renewd's **check-ins** (about every 4 minutes while
+It also keeps track of renewd's **check-ins** (about every 15 minutes while
 reports are on, plus one before the Mac sleeps or renewd exits) in a small
 DynamoDB table, and every minute emails the partners about any Mac that went
 quiet without warning. See [Check-ins](#check-ins).
@@ -45,13 +45,13 @@ You need an AWS account, the [AWS CLI](https://aws.amazon.com/cli/) and the
    sam build && sam deploy --guided
    ```
 
-   Answer `GmailAddress`. `SilenceMinutes` (10), `StoppingMinutes` (3) and
+   Answer `GmailAddress`. `SilenceMinutes` (120), `StoppingMinutes` (3) and
    `QuietCapHours` (168) set when check-in emails go out (see
    [Check-ins](#check-ins)); the defaults are fine.
 
    Redeploying keeps the values the stack already has, not the template's
    defaults. To change them later, pass them explicitly:
-   `sam deploy --parameter-overrides GmailAddress=<address> SilenceMinutes=10 StoppingMinutes=3 QuietCapHours=168`. Leave `AllowedRecipients` empty, or list your
+   `sam deploy --parameter-overrides GmailAddress=<address> SilenceMinutes=120 StoppingMinutes=3 QuietCapHours=168`. Leave `AllowedRecipients` empty, or list your
    partners' addresses to make the server refuse anyone else. `TimeZone` is only
    a fallback: reports carry the Mac's time zone. Say yes when SAM asks whether it's OK that the
    function URL has no authentication: the Lambda checks the token itself.
@@ -79,7 +79,11 @@ turned off or moved, or `renew uninstall`) deletes the Mac's entry. The table
 
 Every minute the Lambda emails the partners about a Mac that:
 
-- was `awake` and hasn't checked in for `SilenceMinutes` (10);
+- was `awake` and hasn't checked in for `SilenceMinutes` (120). renewd
+  reports time it wasn't running itself (`gaps`), so this only catches Renew
+  never coming back. Use 10 with Renew versions from before the power-log
+  check: on those, force-quitting renewd and restarting the Mac within the
+  wait goes unreported;
 - was `stopping` and hasn't checked in for `StoppingMinutes` (3);
 - was `sleeping` or `shutdown` and hasn't checked in for `QuietCapHours` (168, 7 days).
 
@@ -91,7 +95,10 @@ When a check-in arrives it may also send one email:
 - "Renew was stopped" when the Mac said it was shutting down but comes back
   without having restarted;
 - "Renew wasn't running" for downtime renewd's internal heartbeat found
-  (`gaps`: time the Mac was awake while renewd wasn't running).
+  (`gaps`: time the Mac was awake while renewd wasn't running, measured from
+  macOS's power log when the Mac restarted in between; `kind:
+  "recordsMissing"` when renewd's records were deleted or replaced, so the
+  length is unknown).
 
 Each silence and each gap is emailed once; email ids depend on what they're
 about, so a retry is never a second email. The reply to a check-in lists what
@@ -125,8 +132,8 @@ Logs are in CloudWatch under `/aws/lambda/<function name>` (kept 30 days).
 - **Limits.** Gmail sends about 500 emails a day; Renew groups flags into one
   report a minute at most, so you won't come near it. The Lambda runs at most
   two at once.
-- **Cost.** Well inside the AWS free tier at this volume (a check-in every 4
-  minutes and a check every minute is about 55,000 requests a month, against
+- **Cost.** Well inside the AWS free tier at this volume (a check-in every 15
+  minutes and a check every minute is about 46,000 requests a month, against
   a million free; the table holds one small item per Mac). Gmail is free.
 - **A 403 from the URL** (rather than 401) means AWS isn't letting the public
   call the function URL; check the function's resource-based policy allows

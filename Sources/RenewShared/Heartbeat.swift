@@ -5,8 +5,10 @@ import Foundation
 /// to sleep, wakes, or renewd stops. The server emails the partner when
 /// check-ins stop without warning (see `server/reports/`):
 ///
-/// - `awake` and then silence for 10 minutes: the service was stopped or
-///   removed, or the Mac lost its connection or power.
+/// - `awake` and then silence for 2 hours: Renew was removed, or the Mac
+///   has been awake but offline (or lost power). Time renewd wasn't running
+///   is reported by the internal heartbeat once it runs again, so this is
+///   only the dead man's switch.
 /// - `stopping` and then silence for 3 minutes.
 /// - `sleeping` or `shutdown` and then silence for 7 days.
 /// - `shutdown`, then back without the Mac having restarted: the service
@@ -50,8 +52,11 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     /// Since when renewd has been running whenever the Mac was awake.
     public var coveredSince: Date?
 
-    public static let interval: TimeInterval = 240
-    public static let jitter: TimeInterval = 30
+    /// Check-ins only need to show the server Renew is still there (its
+    /// silence wait is 2 hours); downtime goes out as soon as it's found
+    /// (see `Heartbeater`), not on this schedule.
+    public static let interval: TimeInterval = 900
+    public static let jitter: TimeInterval = 120
     /// The wait before trying again after a check-in fails.
     public static let retryDelay: TimeInterval = 60
     /// How recently the app must have said the Mac is powering off for a
@@ -97,6 +102,19 @@ public struct Heartbeat: Codable, Equatable, Sendable {
         guard let p = poweringOffAt, now >= p, now - p <= poweringOffWindow else { return .stopping }
         return .shutdown
     }
+
+    /// Whether the keyboard or mouse was used after the Mac went to sleep,
+    /// so it's in use even if macOS never said it woke. Dark wakes have no
+    /// input. `idle` is the time since the last input; it must be under
+    /// `inputWindow`, and the input must have come more than `inputWindow`
+    /// (awake-clock) seconds after the sleep itself, which follows "will
+    /// sleep" within `sleepWait`.
+    public static func inUseSinceSleep(awakeSinceSleep: TimeInterval, sleepWait: TimeInterval, idle: TimeInterval?) -> Bool {
+        guard let idle else { return false }
+        return awakeSinceSleep > sleepWait + inputWindow && idle < inputWindow
+    }
+
+    public static let inputWindow: TimeInterval = 10
 
     /// When the Mac booted, to the second.
     public static func bootTime() -> Date {
