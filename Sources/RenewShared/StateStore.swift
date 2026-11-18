@@ -7,8 +7,6 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// wall-clock rendering of it, refreshed at every checkpoint. Older state
     /// files don't have it; their `endsAt` is used until the next checkpoint.
     public var sessionClock: Countdown?
-    /// Where tamper alerts go (see `Alerts`). nil means off.
-    public var alertURL: String?
     /// Where email reports go (see `Report`). nil means off. The token is
     /// safe here: the state file is readable only by root.
     public var reports: ReportDestination?

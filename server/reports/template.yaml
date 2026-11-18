@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Renew report server. Emails flag reports from renewd to an accountability partner through a Gmail account, and emails them when a Mac stops checking in.
+Description: Renew report server. Emails flag reports from renewd to accountability partners through a Gmail account, and emails them when a Mac stops checking in.
 
 Parameters:
   GmailAddress:
@@ -9,7 +9,7 @@ Parameters:
   AllowedRecipients:
     Type: String
     Default: ""
-    Description: Optional comma-separated addresses the server may email. Empty allows any (the partner is set in the Renew app).
+    Description: Optional comma-separated addresses the server may email. Empty allows any (partners are set in the Renew app).
   TimeZone:
     Type: String
     Default: UTC
@@ -21,15 +21,15 @@ Parameters:
   SilenceMinutes:
     Type: Number
     Default: 10
-    Description: Email the partner when a Mac that's awake hasn't checked in for this many minutes.
+    Description: Email the partners when a Mac that's awake hasn't checked in for this many minutes.
   StoppingMinutes:
     Type: Number
     Default: 3
-    Description: Email the partner when Renew said its service stopped (without a shutdown) and it hasn't checked in for this many minutes.
+    Description: Email the partners when Renew said its service stopped (without a shutdown) and it hasn't checked in for this many minutes.
   QuietCapHours:
     Type: Number
     Default: 168
-    Description: Email the partner when a Mac that said it was sleeping or shutting down hasn't checked in for this many hours.
+    Description: Email the partners when a Mac that said it was sleeping or shutting down hasn't checked in for this many hours.
   AppPasswordParameter:
     Type: String
     Default: /renew/gmail-app-password

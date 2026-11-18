@@ -26,8 +26,6 @@ background services. The installed app then opens on **Setup**, where you:
 1. **Allow Accessibility.** Needed for Firefox and for closing tabs.
 2. **Allow each browser.** Click **Allow…** next to it, and open the browser first if
    it isn't running.
-3. Optionally **create the lock-down profile.** The app shows a removal password to
-   hand to someone else, saves the profile and opens it for installation.
 
 `sudo scripts/install.sh` does the same install from the terminal.
 
@@ -56,10 +54,10 @@ the window:
 - **Monitor**: reads that activity and flags visits to explicit or watched sites,
   or with watched words in their titles (see [Monitor](#monitor)). Off until you
   turn it on, and needs Activity on.
-- **Accountability**: your partner's email (reports and check-ins), instant
-  alerts, and a history of what your partner has been sent (see
+- **Accountability**: your partners' emails (reports and check-ins) and a
+  history of what they've been sent (see
   [Accountability](#accountability)).
-- **Setup**: service status, permissions, protections, the lock-down profile,
+- **Setup**: service status, permissions, protections,
   and uninstall (see below).
 
 Closing the window or pressing ⌘Q leaves Renew running in the menu bar.
@@ -75,7 +73,7 @@ Rule syntax:
 
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
-`renew alerts set <url>`, `renew reports set <email>`, `renew protections on all`, `renew activity on`,
+`renew reports set <email>...`, `renew protections on all`, `renew activity on`,
 `renew stats --site youtube.com`, `renew monitor on`, `renew flags`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
@@ -98,7 +96,7 @@ either way, and a running session can't be shortened or stopped either way.
 | Uninstall cooling-off | `cooling-off` | Uninstalling needs a request and a 24-hour wait (see [Uninstalling](#uninstalling)). |
 
 A protection can be turned on at any time, but turned off only between block
-sessions, and with alerts on, your partner is told when it is. Turning off the
+sessions. Turning off the
 uninstall cooling-off doesn't happen straight away: it stays on for 24 more
 hours, and until the end of any session running then (switch it back on to
 cancel), or it would be a way around the wait.
@@ -108,25 +106,12 @@ updating. Turn on the ones you want again.
 
 ### Accountability
 
-The **Accountability** page brings together everything your partner hears
-about: email reports and check-ins (**Partner**), instant alerts, and **Sent to
-your partner**, a list of the last 200 emails, alerts and check-in emails, so
-you can see what they see. Reports still waiting to go out show as *Waiting*.
+The **Accountability** page brings together everything your partners hear
+about: email reports and check-ins (**Partners**), and **Sent to your
+partners**, a list of the last 200 emails and check-in emails, so you can see
+what they see. Reports still waiting to go out show as *Waiting*.
 The history is kept by renewd in `/var/db/com.renew/partner-log.json`
 (root-only).
-
-### Instant alerts
-
-Renew can message someone you trust when it's stopped, its files are deleted or
-changed, or the Mac's clock is changed during a block session, and when an
-uninstall is requested, cancelled or done. Your partner installs the free
-[ntfy](https://ntfy.sh) app and subscribes to a hard-to-guess topic, and you enter
-`https://ntfy.sh/<topic>` in **Accountability → Instant alerts** (or
-`renew alerts set https://ntfy.sh/<topic>`). Discord and Slack webhook URLs work too.
-
-Alerts can be turned on at any time, but changed or turned off only between
-sessions, and the old destination is told when that happens. Alerts and
-[email reports](#email-reports) are the only things Renew sends off the Mac.
 
 ### Activity
 
@@ -184,7 +169,7 @@ Monitor reads the visits Activity records, so it needs Activity on.
   (longer than the visits). See them in **Monitor → Flags** or with
   `renew flags [--date YYYY-MM-DD]`.
 - **Reports:** with [email reports](#email-reports) on, your accountability
-  partner is emailed about flags.
+  partners are emailed about flags.
 
 Each user on the Mac has their own Activity and Monitor settings and only changes
 their own. For now they can be turned off or changed at any time. Settings from
@@ -205,14 +190,18 @@ as it isn't.
 
 ### Email reports
 
-Renew can email your accountability partner when the Monitor flags a visit.
-Your partner doesn't need an account or an app; they just get emails. The
+Renew can email one or more accountability partners (up to 10) when the Monitor
+flags a visit. Partners don't need an account or an app; they just get emails. The
 emails come from your own small report server: an AWS Lambda that sends from a
 Gmail account you create for it. Setting it up takes about 15 minutes; see
 [server/reports/README.md](server/reports/README.md). Its URL and token are
 saved by `server/reports/configure-mac.sh` and copied in when you install
-Renew, so in **Accountability → Partner** you only enter your partner's email
-address (or `renew reports set <partner-email>`).
+Renew, so in **Accountability → Partners** you only enter your partners' email
+addresses (or `renew reports set <email> [<email>...]`). Each email goes to all
+partners at once, so they can see each other's addresses. Before adding a
+second partner, redeploy a report server set up before then (`sam deploy`); an
+older one refuses reports sent to more than one address. Email reports and
+check-ins are the only things Renew sends off the Mac.
 
 - **What's sent:** the site (e.g. `example.com`), the page title, why it was
   flagged (explicit site, a watched list, a watched word), when, and for how
@@ -226,9 +215,11 @@ address (or `renew reports set <partner-email>`).
 - **Changes are reported too:** turning Activity or the Monitor off, no longer
   watching a list or explicit words, and removing watched sites or words each
   send an email. Adding rules, and editing a blocklist's sites, don't.
-- **Locked like alerts:** reports can be turned on at any time, but changed
-  (including the partner's address) or turned off only between block sessions,
-  and the previous partner gets a last email when that happens. `renew reports test` (or **Send test**) sends a test
+- **Locked during sessions:** reports can be turned on and partners added at
+  any time, but partners removed or reports turned off only between block
+  sessions. Saved partners can't be edited, only removed. A removed partner gets
+  a last email, and reports still waiting to be sent go to the old list of
+  partners. `renew reports test` (or **Send test**) sends a test
   email.
 
 #### Check-ins
@@ -260,11 +251,11 @@ Closing the lid, shutting down or restarting don't send anything: renewd
 checks in one last time before the Mac sleeps, and the Renew app tells renewd
 when the Mac is about to shut down. renewd only accepts that notice from the
 Renew app itself (checked by its code signature), so a script can't make
-stopping renewd look like a shutdown. Turning reports off or changing the
-partner tells the server to stop expecting check-ins (the partner already
-gets a last email), and so does `renew uninstall`.
+stopping renewd look like a shutdown. Turning reports off or changing
+partners tells the server to stop expecting check-ins (removed partners
+already get a last email), and so does `renew uninstall`.
 
-Check-ins name your partner, the Mac and the user only when renewd starts or
+Check-ins name your partners, the Mac and the user only when renewd starts or
 those change; the rest of the time they carry just this install's id, the
 state, the boot time and any downtime.
 
@@ -279,7 +270,7 @@ Good to know:
   as long as the Mac comes back within 3 minutes, but a longer shutdown is
   reported as Renew being stopped.
 - Each user only sees emails about themselves under **Sent to your
-  partner**, plus the Mac-wide alerts and check-in emails.
+  partners**, plus the Mac-wide check-in emails.
 - Someone with an admin password could read the server token and fake
   check-ins, or edit renewd's files. Check-ins catch Renew being stopped or
   removed, not a determined admin.
@@ -323,12 +314,11 @@ renewd  (LaunchDaemon, root)  ── /var/run/renew.sock (start/extend/add/statu
   ├─ owns /var/db/com.renew/state.json (root-only; edits to it can only lengthen a session)
   ├─ counts sessions down on the monotonic clock, so changing the date does nothing
   │    (time the Mac is switched off still counts)
-  ├─ sends tamper alerts, if set up
   ├─ sends email reports of flags and Monitor changes to your report server, if set up,
   │    keeping unsent ones in /var/db/com.renew/reports-outbox.json
   ├─ writes an internal heartbeat (alive.json) every 10 s, and checks in with the
   │    report server every ~4 min and on sleep, wake and exit (if reports are on);
-  │    logs what your partner was sent in partner-log.json
+  │    logs what your partners were sent in partner-log.json
   ├─ keeps the activity log in /var/db/com.renew/activity/<uid>/ (30 days),
   │    and per-site daily totals in .../summary/ (1 year)
   ├─ [monitor] checks each new visit against the user's Monitor rules and keeps
@@ -340,8 +330,6 @@ renewd --guard  (second LaunchDaemon, loaded by renewd only with keep-running on
                 ── keeps renewd loaded, repairs files, restores state.json
 
 [name]: only with that protection on (see Protections), or with Activity or the Monitor on.
-
-Stopping renewd or the guard during a session sends an alert.
 ```
 
 **With `close-browsers` on, turning off a permission doesn't get you past it.** If you switch off Renew's
@@ -385,10 +373,9 @@ Chrome for Testing window (`--headed`) is closed mid-session.
 Renew is friction, not a vault. With every protection on, an admin who goes
 through all of this can still get out (and with them off, far less is needed):
 
-- remove the configuration profile (needs its password)
 - use Terminal and `sudo` to stop every part of Renew (both daemons and the app)
-  in an order that stops each part from putting the others back (with alerts on,
-  this tells your partner)
+  in an order that stops each part from putting the others back (with email
+  reports on, your partners get a "stopped checking in" email)
 - boot into Safe Mode or Recovery and delete things, or change the clock while
   the Mac is off
 - turn off Accessibility before a session, which stops Renew seeing built-in
@@ -408,9 +395,6 @@ else hold the admin password.
   tab that was checked, and only if it still shows the blocked page.
 - Firefox support depends on its accessibility tree. Firefox wasn't installed on
   the machine this was built on, so verify it on yours.
-- `com.apple.servicemanagement` (locking the background-items toggles) may only take
-  effect when the profile is delivered by MDM on some macOS versions. The removal
-  password and browser policies work when installed by hand.
 - The block page runs on plain `http://127.0.0.1`; that's expected.
 - Locking System Settings pages relies on their window titles, which are English
   names (macOS 13 and later; macOS 27 moved the Accessibility list to "Device Control

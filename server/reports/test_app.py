@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 import app
+import render
 
 TOKEN = "test-token-123"
 
@@ -110,6 +111,9 @@ def test_oversized(smtp):
     report(to="nobody"),
     report(to="a@test.invalid\nBcc: x@test.invalid"),
     report(to="a@test.invalid, b@test.invalid"),
+    report(to=[]),
+    report(to=["a@test.invalid", "nobody"]),
+    report(to=[f"p{i}@test.invalid" for i in range(render.MAX_RECIPIENTS + 1)]),
     report(id="nope"),
     report(flags=[{"host": "a.example", "reasons": [], "start": "yesterday", "seconds": 1}]),
     report(flags=[{"host": "a.example", "reasons": [], "start": "2026-11-17T11:58:00Z", "seconds": -1}]),
@@ -191,7 +195,20 @@ def test_allowed_recipients(smtp, monkeypatch):
     monkeypatch.setenv("ALLOWED_RECIPIENTS", "Partner@Test.Invalid, other@test.invalid")
     assert app.handler(event(report()), None)["statusCode"] == 200
     assert app.handler(event(report(to="stranger@test.invalid")), None)["statusCode"] == 403
+    assert app.handler(event(report(to=["partner@test.invalid", "stranger@test.invalid"])), None)["statusCode"] == 403
     assert len(smtp.instances) == 1
+
+
+def test_repeats_dont_count_toward_the_limit(smtp):
+    to = [f"p{i}@test.invalid" for i in range(render.MAX_RECIPIENTS)] + ["P0@test.invalid"]
+    assert app.handler(event(report(to=to)), None)["statusCode"] == 200
+
+
+def test_several_partners(smtp):
+    body = report(to=["Partner@Test.Invalid", "other@test.invalid", "partner@test.invalid"])
+    assert app.handler(event(body), None)["statusCode"] == 200
+    [msg] = smtp.instances[0].sent
+    assert msg["To"] == "partner@test.invalid, other@test.invalid"
 
 
 def test_same_report_is_sent_once(smtp):

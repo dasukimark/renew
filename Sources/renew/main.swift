@@ -39,13 +39,9 @@ Usage:
   renew lists add <NAME> <SITE>...                     add sites to a list (creates it)
   renew lists remove <NAME> [SITE]...                  remove sites, or reset/delete the list
   renew check <URL> [--list NAME]... [SITE]...         test whether a URL would be blocked
-  renew alerts                                         show where tamper alerts go
-  renew alerts set <URL>                               send tamper alerts to a URL (e.g. https://ntfy.sh/<topic>)
-  renew alerts off                                     turn alerts off (between sessions only)
-  renew alerts test                                    send a test alert
   renew reports                                        show where email reports go
-  renew reports set <PARTNER-EMAIL>                    email flag reports to your accountability partner
-  renew reports set <EMAIL> --server <URL> [TOKEN]     ...through a different report server (asks for the token)
+  renew reports set <EMAIL>...                         email flag reports to your accountability partners
+  renew reports set <EMAIL>... --server <URL> [TOKEN]  ...through a different report server (asks for the token)
   renew reports off                                    turn email reports off (between sessions only)
   renew reports test                                   send a test report
   renew protections                                    show which hardening protections are on
@@ -122,8 +118,7 @@ func printStatus(_ s: Status) {
 }
 
 func printExtras(_ s: Status) {
-    print("  Alerts: \(s.alertURL ?? "off")")
-    print("  Email reports: \(s.reportsPartner.map { "to \($0)" } ?? "off")")
+    print("  Email reports: \(s.reportsPartners.map { "to \($0.joined(separator: ", "))" } ?? "off")")
     if let p = s.protections {
         print("  Protections: \(p.onNames.isEmpty ? "none" : p.onNames.joined(separator: ", "))")
     }
@@ -253,35 +248,17 @@ case "schedules":
         print("  Blocking: \(sc.rules.joined(separator: ", "))")
     }
 
-case "alerts":
-    switch args.first ?? "show" {
-    case "show":
-        print("Alerts: \(send(Request(cmd: .status)).alertURL ?? "off")")
-    case "set":
-        guard args.count == 2 else { die("usage: renew alerts set <URL>") }
-        let st = send(Request(cmd: .setAlerts, alertURL: args[1]))
-        print("Alerts go to \(st.alertURL ?? "?"). A confirmation was sent there.")
-    case "off":
-        _ = send(Request(cmd: .setAlerts, alertURL: nil))
-        print("Alerts are off.")
-    case "test":
-        _ = send(Request(cmd: .testAlert))
-        print("Test alert sent.")
-    default:
-        die("usage: renew alerts [show | set URL | off | test]")
-    }
-
 case "reports":
     switch args.first ?? "show" {
     case "show":
         let st = send(Request(cmd: .status))
-        if let to = st.reportsPartner {
-            print("Email reports: to \(to)\(st.reportsURL.map { ", through \($0)" } ?? "")")
+        if let to = st.reportsPartners {
+            print("Email reports: to \(to.joined(separator: ", "))\(st.reportsURL.map { ", through \($0)" } ?? "")")
         } else {
             print("Email reports: off\(st.reportServerBuiltIn == false ? " (no report server set up on this Mac)" : "")")
         }
     case "set":
-        // renew reports set <PARTNER-EMAIL> [--server URL [TOKEN]]
+        // renew reports set <EMAIL>... [--server URL [TOKEN]]
         var rest = Array(args.dropFirst())
         var url: String?
         var token: String?
@@ -296,9 +273,9 @@ case "reports":
                 token = String(cString: p)
             }
         }
-        guard rest.count == 1 else { die("usage: renew reports set <PARTNER-EMAIL> [--server URL [TOKEN]]") }
-        let st = send(Request(cmd: .setReports, reports: ReportDestination(partnerEmail: rest[0], url: url, token: token)))
-        print("Email reports go to \(st.reportsPartner ?? "?"). A confirmation email is on its way.")
+        guard !rest.isEmpty else { die("usage: renew reports set <EMAIL>... [--server URL [TOKEN]]") }
+        let st = send(Request(cmd: .setReports, reports: ReportDestination(partnerEmails: rest, url: url, token: token)))
+        print("Email reports go to \(st.reportsPartners?.joined(separator: ", ") ?? "?"). A confirmation email is on its way.")
     case "off":
         _ = send(Request(cmd: .setReports, reports: nil))
         print("Email reports are off.")
@@ -306,7 +283,7 @@ case "reports":
         _ = send(Request(cmd: .testReport))
         print("Test report sent. Check renewd's log if no email arrives.")
     default:
-        die("usage: renew reports [show | set PARTNER-EMAIL [--server URL [TOKEN]] | off | test]")
+        die("usage: renew reports [show | set EMAIL... [--server URL [TOKEN]] | off | test]")
     }
 
 case "protections":

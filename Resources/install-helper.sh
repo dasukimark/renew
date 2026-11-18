@@ -34,6 +34,13 @@ echo "==> Stopping any previous install"
 launchctl bootout "gui/$USER_UID/com.renew.agent" 2>/dev/null || true
 launchctl bootout system/com.renew.guard 2>/dev/null || true
 launchctl bootout system/com.renew.daemon 2>/dev/null || true
+# bootout returns before the services are gone; starting them again too soon
+# fails with "Bootstrap failed: 5".
+for _ in {1..20}; do
+  launchctl print system/com.renew.daemon >/dev/null 2>&1 || launchctl print system/com.renew.guard >/dev/null 2>&1 \
+    || launchctl print "gui/$USER_UID/com.renew.agent" >/dev/null 2>&1 || break
+  sleep 0.5
+done
 
 echo "==> Installing $APP"
 SRC_REAL="$(cd "$SRC_APP" && pwd -P)"
@@ -64,7 +71,7 @@ mkdir -p /usr/local/bin
 ln -sf "$INSTALL_DIR/bin/renew" /usr/local/bin/renew
 
 # The email report server (see server/reports/configure-mac.sh), copied into
-# renewd's root-only folder so the app only needs the partner's address.
+# renewd's root-only folder so the app only needs the partners' addresses.
 # Without one, an earlier copy stays.
 if [[ "$USER_UID" != "0" ]]; then
   USER_HOME="$(dscl . -read "/Users/$(id -un "$USER_UID")" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
@@ -85,8 +92,20 @@ ditto "$APP" "$DATA_DIR/backup/Renew.app"
 for p in "$DAEMON_PLIST" "$GUARD_PLIST" "$AGENT_PLIST"; do ditto "$p" "$DATA_DIR/backup/$(basename "$p")"; done
 
 echo "==> Starting services"
-launchctl bootstrap system "$DAEMON_PLIST"
+started=0
+for _ in {1..5}; do
+  if launchctl bootstrap system "$DAEMON_PLIST"; then started=1; break; fi
+  sleep 1
+done
+[[ $started == 1 ]] || { echo "Couldn't start Renew's background service." >&2; exit 1; }
 if [[ "$USER_UID" != "0" ]]; then
-  launchctl bootstrap "gui/$USER_UID" "$AGENT_PLIST" || launchctl kickstart -k "gui/$USER_UID/com.renew.agent" || true
+  # A copy of the app still running from before keeps showing the old
+  # version; stop it so the agent starts the new one. Last, because the app
+  # may be the one running this install.
+  pkill -f "^$APP/Contents/MacOS/" 2>/dev/null || true
+  # The agent is limited to Aqua sessions, so load it from inside the
+  # user's session (a root process outside it gets a silent no-op).
+  launchctl asuser "$USER_UID" launchctl bootstrap "gui/$USER_UID" "$AGENT_PLIST" \
+    || launchctl kickstart -k "gui/$USER_UID/com.renew.agent" || true
 fi
 echo "==> Renew installed"

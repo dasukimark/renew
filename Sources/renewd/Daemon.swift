@@ -5,8 +5,8 @@ import RenewShared
 /// "keep Renew running" protection on, it also runs the guard, keeps the Renew
 /// app alive and repairs tampering during sessions. If the app loses
 /// permission to watch a browser, the app itself closes that browser for the
-/// rest of the session. The only network traffic is the optional tamper
-/// alerts (see `Alerts`) and email reports (see `Reporter`).
+/// rest of the session. The only network traffic is the optional email
+/// reports and check-ins (see `Reporter`, `Heartbeater`).
 ///
 /// Sessions count down on the monotonic clock (see `Countdown`), so changing
 /// the date doesn't end one; a large date change is reported as tampering.
@@ -86,7 +86,7 @@ final class Daemon {
     /// `d` with its server resolved: its own, or the built-in one.
     private func target(_ d: ReportDestination?) -> ReportTarget? {
         guard let d, let server = d.server(builtIn: builtInServer()) else { return nil }
-        return ReportTarget(partnerEmail: d.partnerEmail, server: server)
+        return ReportTarget(partnerEmails: d.partnerEmails, server: server)
     }
 
     private func builtInServer() -> ReportServer? {
@@ -124,7 +124,7 @@ final class Daemon {
             }
             if state.applyDueCoolingOffRemoval(at: r) {
                 log("uninstall cooling-off turned off (its wait ended while renewd was not running)")
-                alert("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
+                notify("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
             }
             state.checkpoint(at: r)
             if state.migrateMonitoring(to: consoleUser()?.uid) {
@@ -145,9 +145,8 @@ final class Daemon {
             syncGuard()
             alive.start()
             heartbeater.startPowerNotifications()
-            if rebooted, let s = state.activeSession(at: r) {
-                alert("The Mac restarted during a block session. Renew is running again (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left).",
-                      kind: "rebooted", every: 300)
+            if rebooted, state.activeSession(at: r) != nil {
+                log("the Mac restarted during a block session")
             }
         }
 
@@ -227,13 +226,6 @@ final class Daemon {
                 log("agent uid \(uid): permissionsOK=\(r.permissionsOK) \(r.problem ?? "")")
             }
 
-        case .setAlerts:
-            if let error = setAlerts(req.alertURL, by: uid, at: r) { return fail(error) }
-
-        case .testAlert:
-            guard let url = state.alertURL else { return fail("Alerts are off. Set a destination first.") }
-            Alerts.send(to: url, "Test alert from Renew. If you're reading this, alerts work.")
-
         case .setReports:
             if let error = setReports(req.reports, by: uid, at: r) { return fail(error) }
 
@@ -257,7 +249,6 @@ final class Daemon {
                 StateStore.save(state)
                 let unlocks = now.addingTimeInterval(UninstallPolicy.delay)
                 log("uninstall requested by uid \(uid); unlocks \(unlocks)")
-                alert("Someone asked to uninstall Renew. It can be removed after \(Self.dateText(unlocks)), if no block session is running then.")
                 reporter.add(changes: ["Someone asked to uninstall Renew. It can be removed after \(Self.dateText(unlocks)), if no block session is running then."], uid: uid)
             }
 
@@ -332,7 +323,7 @@ final class Daemon {
 
         case .partnerHistory:
             // Each user sees only emails about themselves (and the Mac-wide
-            // alerts and check-ins), like their own Monitor flags.
+            // check-ins), like their own Monitor flags.
             let history = PartnerLogEntry.history(log: reporter.partnerLog.load(), waiting: reporter.waiting(),
                                                   viewer: uid == 0 ? nil : Reporter.userName(uid))
             return Response(ok: true, status: makeStatus(now, r), partnerHistory: history)
@@ -342,7 +333,6 @@ final class Daemon {
                 state.uninstall = nil
                 StateStore.save(state)
                 log("uninstall request cancelled by uid \(uid)")
-                alert("The request to uninstall Renew was cancelled.")
                 reporter.add(changes: ["The request to uninstall Renew was cancelled."], uid: uid)
             }
         }
@@ -417,10 +407,9 @@ final class Daemon {
         let jump = divergence - lastClockDivergence
         if abs(jump) >= Self.clockAlertThreshold, state.activeSession(at: r) == nil {
             // During a session `checkpoint` already reports this.
-            let direction = jump > 0 ? "forward" : "back"
             log("clock moved \(Int(jump))s with schedules set; schedules follow the real time")
-            alert("The Mac's clock was set \(direction) by \(DurationText.format(Int(abs(jump)))). Scheduled block sessions still start at the real time.",
-                  kind: "clock", every: 600)
+            notify("The Mac's clock was set \(jump > 0 ? "forward" : "back") by \(DurationText.format(Int(abs(jump)))). Scheduled block sessions still start at the real time.",
+                   kind: "clock", every: 600)
         }
 
         var times = [r.wall]
@@ -462,15 +451,15 @@ final class Daemon {
         if !change.turnedOn.isEmpty { log("protections turned on by uid \(uid): \(change.turnedOn.joined(separator: ", "))") }
         if !change.turnedOff.isEmpty {
             log("protections turned off by uid \(uid): \(change.turnedOff.joined(separator: ", "))")
-            alert("Renew protections were turned off: \(change.turnedOff.joined(separator: ", ")).")
+            reporter.add(changes: ["Renew protections were turned off: \(change.turnedOff.joined(separator: ", "))."], uid: uid)
         }
         if change.coolingOffRemovalRequested, let when = state.coolingOffRemovalDate(at: r) {
             log("uid \(uid) asked to turn off the uninstall cooling-off; it turns off \(when)")
-            alert("Someone asked to turn off Renew's uninstall cooling-off. It turns off after \(Self.dateText(when)); after that Renew can be uninstalled without waiting.")
+            reporter.add(changes: ["Someone asked to turn off Renew's uninstall cooling-off. It turns off after \(Self.dateText(when)); after that Renew can be uninstalled without waiting."], uid: uid)
         }
         if change.coolingOffRemovalCancelled {
             log("uid \(uid) cancelled turning off the uninstall cooling-off")
-            alert("The request to turn off Renew's uninstall cooling-off was cancelled.")
+            reporter.add(changes: ["The request to turn off Renew's uninstall cooling-off was cancelled."], uid: uid)
         }
         return nil
     }
@@ -524,15 +513,23 @@ final class Daemon {
         reporter.add(changes: old.loosenings(to: new), uid: uid)
     }
 
-    /// Like alerts: turned on at any time, but changed or turned off only
-    /// between sessions, and the old destination hears about it.
+    /// Turned on, or partners added, at any time; partners removed, the
+    /// server changed or reports turned off only between sessions. Partners
+    /// who stop getting reports are told, and get what was still waiting.
+    /// The same custom `url` without a token keeps the current token.
     private func setReports(_ raw: ReportDestination?, by uid: uid_t, at r: ClockReading) -> String? {
         let new: ReportDestination?
-        if let raw, !raw.partnerEmail.trimmingCharacters(in: .whitespaces).isEmpty {
-            guard ReportDestination.normalizeEmail(raw.partnerEmail) != nil else {
-                return "That doesn't look like an email address."
+        let given = raw?.partnerEmails.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? []
+        if let raw, !given.isEmpty {
+            if let bad = given.first(where: { ReportDestination.normalizeEmail($0) == nil }) {
+                return "\"\(bad)\" doesn't look like an email address."
             }
-            guard let d = ReportDestination.normalize(partnerEmail: raw.partnerEmail, url: raw.url, token: raw.token) else {
+            guard ReportDestination.normalizeEmails(given) != nil else {
+                return "Email reports can go to at most \(ReportDestination.maxPartners) people."
+            }
+            let current = state.reports
+            let token = raw.token ?? (raw.url != nil && raw.url == current?.url ? current?.token : nil)
+            guard let d = ReportDestination.normalize(partnerEmails: given, url: raw.url, token: token) else {
                 return "Give the report server's https URL and its token (no spaces)."
             }
             if d.usesBuiltInServer, builtInServer() == nil {
@@ -544,72 +541,64 @@ final class Daemon {
         }
         let old = state.reports
         guard new != old else { return nil }
-        if old != nil, state.activeSession(at: r) != nil {
-            return "Email reports can't be changed or turned off during a block session."
+        if let old, state.activeSession(at: r) != nil {
+            // Adding partners only makes things stricter.
+            let onlyAdds = new.map { $0.url == old.url && $0.token == old.token && Set(old.partnerEmails).isSubset(of: $0.partnerEmails) } ?? false
+            if !onlyAdds {
+                return "Partners can be added during a block session, but not removed, and reports can't be turned off."
+            }
         }
         let oldTarget = target(old)
+        let partnersChanged = old != nil && new != nil && Set(old!.partnerEmails) != Set(new!.partnerEmails)
         if let old {
-            reporter.handOff(from: target(old), farewell: new == nil
-                             ? "Email reports from Renew were turned off. This is the last report you'll get from this Mac."
-                             : new!.partnerEmail != old.partnerEmail
-                                 ? "Email reports from Renew now go to someone else (\(new!.partnerEmail)). This is the last report you'll get from this Mac."
-                                 : "Email reports from Renew were moved to a different report server. This is the last report you'll get through this one.",
-                             uid: uid)
+            if new == nil {
+                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were turned off. This is the last report you'll get from this Mac.", uid: uid)
+            } else if new!.url != old.url || new!.token != old.token {
+                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were moved to a different report server. This is the last report you'll get through this one.", uid: uid)
+            } else if partnersChanged {
+                // What's waiting stays with the partners it was meant for:
+                // new partners don't get visits from before they were added.
+                let removed = old.partnerEmails.filter { !new!.partnerEmails.contains($0) }
+                reporter.handOff(from: oldTarget,
+                                 farewell: removed.isEmpty ? nil : "Email reports from Renew no longer go to you. This is the last report you'll get from this Mac.",
+                                 to: oldTarget.map { ReportTarget(partnerEmails: removed, server: $0.server) },
+                                 uid: uid)
+            }
         }
         // Downtime from before reports were on isn't the new partner's business.
         if old == nil { heartbeater.gaps.removeAll() }
         state.reports = new
         StateStore.save(state)
         if old == nil, new != nil { alive.resume() }
-        log("email reports \(new == nil ? "turned off" : "set to \(new!.partnerEmail) via \(new!.url ?? "the built-in server")") by uid \(uid)")
-        if new != nil {
+        log("email reports \(new == nil ? "turned off" : "set to \(new!.partnerEmails.joined(separator: ", ")) via \(new!.url ?? "the built-in server")") by uid \(uid)")
+        if let new, partnersChanged {
+            reporter.add(changes: ["Email reports from Renew now go to: \(new.partnerEmails.joined(separator: ", "))."], uid: uid)
+        } else if new != nil {
             reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Renew also checks in about every 4 minutes; if it goes quiet while the Mac is awake, or isn't running for a while, you'll be emailed."], uid: uid)
         }
-        // Tell the old destination to stop expecting check-ins, then check
-        // in with the new one.
-        heartbeater.handOff(from: old != nil ? oldTarget : nil)
+        // Moving server or turning off: tell the old destination to stop
+        // expecting check-ins, then check in with the new one. On the same
+        // server, the next check-in just carries the new partners, so the
+        // server keeps this Mac's history (an unanswered "quiet" alert,
+        // reported downtime).
+        let sameServer = old != nil && new != nil && old!.url == new!.url && old!.token == new!.token
+        heartbeater.handOff(from: old != nil && !sameServer ? oldTarget : nil)
         return nil
     }
 
-    /// Alerts can be turned on at any time, but changed or turned off only
-    /// between sessions, and the old destination hears about it.
-    private func setAlerts(_ raw: String?, by uid: uid_t, at r: ClockReading) -> String? {
-        let new: String?
-        if let raw, !raw.trimmingCharacters(in: .whitespaces).isEmpty {
-            guard let url = Alerts.normalize(raw) else { return "That isn't a valid http(s) URL." }
-            new = url
-        } else {
-            new = nil
-        }
-        let old = state.alertURL
-        guard new != old else { return nil }
-        if old != nil, state.activeSession(at: r) != nil {
-            return "Alerts can't be changed or turned off during a block session."
-        }
-        if let old {
-            alert(new == nil ? "Alerts from Renew were turned off. This is the last message you'll get here."
-                             : "Alerts from Renew were moved to a different destination. This is the last message you'll get here.",
-                  to: old)
-        }
-        state.alertURL = new
-        StateStore.save(state)
-        log("alerts \(new == nil ? "turned off" : "set to \(new!)") by uid \(uid)")
-        if new != nil {
-            alert("Renew alerts are on. You'll hear here if Renew is stopped, its files are tampered with, or the clock is changed during a block session, and before it can be uninstalled.")
-        }
-        return nil
-    }
+    /// Uptime when each kind of notice was last sent, for `notify`'s rate limit.
+    private var lastNotice: [String: TimeInterval] = [:]
 
-    private func alert(_ message: String, to url: String? = nil, kind: String? = nil, every: TimeInterval = 0, wait: Bool = false) {
-        guard !dev || ProcessInfo.processInfo.environment["RENEW_DEV_ALERTS"] != nil else {
-            log("(dev) alert: \(message)")
-            return
+    /// Emails the partners about something no user asked for (tampering,
+    /// a wait ending), as the console user. `kind` and `every` keep a burst
+    /// of the same thing to one email.
+    private func notify(_ message: String, kind: String? = nil, every: TimeInterval = 0) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let kind, every > 0 {
+            if let last = lastNotice[kind], now - last < every { return }
+            lastNotice[kind] = now
         }
-        let partnerLog = reporter.partnerLog
-        let date = Date()
-        Alerts.send(to: url ?? state.alertURL, message, kind: kind, minInterval: every, wait: wait) { ok in
-            partnerLog.append(PartnerLogEntry(date: date, channel: .alert, status: ok ? .sent : .failed, title: message))
-        }
+        reporter.add(changes: [message], uid: consoleUID ?? consoleUser()?.uid ?? 0)
     }
 
     static func dateText(_ d: Date) -> String {
@@ -629,11 +618,7 @@ final class Daemon {
         let exitState = heartbeater.exitState()
         alive.exit(exitState == .shutdown ? .shutdown : .stopping)
         heartbeater.sendExit(exitState)
-        if let s = state.activeSession(at: r) {
-            log("SIGTERM during a session")
-            alert("Renew's background service was stopped during a block session (\(DurationText.format(Int(s.endsAt.timeIntervalSince(r.wall)))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
-                  kind: "stopped", every: 60, wait: true)
-        }
+        if state.activeSession(at: r) != nil { log("SIGTERM during a session") }
         log("renewd exiting")
         exit(0)
     }
@@ -654,7 +639,6 @@ final class Daemon {
             session: state.activeSession(at: r),
             serverTime: now,
             agents: agents.values.sorted { $0.uid < $1.uid },
-            alertURL: state.alertURL,
             uninstall: state.uninstallStatus(at: r),
             schedules: state.schedules,
             protections: state.effectiveProtections,
@@ -662,7 +646,7 @@ final class Daemon {
             activity: requestUID.map { state.activity(for: $0) } ?? .off,
             monitor: requestUID.map { state.monitor(for: $0) } ?? .off,
             reportsURL: state.reports?.url,
-            reportsPartner: state.reports?.partnerEmail,
+            reportsPartners: state.reports?.partnerEmails,
             reportServerBuiltIn: builtInServer() != nil
         )
     }
@@ -682,7 +666,7 @@ final class Daemon {
         if state.applyDueCoolingOffRemoval(at: r) {
             StateStore.save(state)
             log("uninstall cooling-off turned off (its wait is over)")
-            alert("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
+            notify("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
         }
         runSchedules(r)
         reporter.tick()
@@ -692,13 +676,13 @@ final class Daemon {
         checkpoint(r)
 
         let active = state.activeSession(at: r)
-        if (active != nil || state.alertURL != nil || state.reports != nil || state.uninstall != nil || state.schedules != nil
+        if (active != nil || state.reports != nil || state.uninstall != nil || state.schedules != nil
             || state.protections != nil || state.coolingOffRemoval != nil
             || state.activityByUser != nil || state.monitorByUser != nil)
             && !FileManager.default.fileExists(atPath: Paths.stateFile) {
             log("state file was removed; rewriting")
             StateStore.save(state)
-            if active != nil { alert("Renew's session file was deleted during a block session. Renew restored it.", kind: "state-deleted", every: 600) }
+            if active != nil { notify("Renew's session file was deleted during a block session. Renew restored it.", kind: "state-deleted", every: 600) }
         }
         server.ensureBound()
         updateConsole(now)
@@ -721,8 +705,9 @@ final class Daemon {
             if deep { lastDeepCheck = now }
             let restored = SelfRepair.repair(deep: deep)
             if !restored.isEmpty {
-                alert("Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
-                      kind: "repair", every: 600)
+                log("restored during a session: \(restored.joined(separator: ", "))")
+                notify("Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
+                       kind: "repair", every: 600)
             }
             ensureAgent(now)
             // Bring the guard back if it was stopped during the session.
@@ -753,9 +738,8 @@ final class Daemon {
             lastCheckpointSave = r.mono
             log("clock moved \(Int(shift))s during a session; session end unaffected (now \(describe(state.activeSession(at: r))))")
             if abs(shift) >= Self.clockAlertThreshold {
-                let direction = shift > 0 ? "forward" : "back"
-                alert("The Mac's clock was set \(direction) by \(DurationText.format(Int(abs(shift)))) during a block session. The session still ends on time.",
-                      kind: "clock", every: 600)
+                notify("The Mac's clock was set \(shift > 0 ? "forward" : "back") by \(DurationText.format(Int(abs(shift)))) during a block session. The session still ends on time.",
+                       kind: "clock", every: 600)
             }
         } else if r.mono &- lastCheckpointSave >= Self.checkpointInterval {
             StateStore.save(state)
@@ -768,19 +752,19 @@ final class Daemon {
     /// the later end time and the union of rules win, so editing the file
     /// can't shorten or loosen a running session.
     ///
-    /// renewd owns the alert and report destinations, the uninstall request, the
+    /// renewd owns the report destination, the uninstall request, the
     /// schedules and the protections: if the
     /// file disagrees (edited or deleted), renewd's copy is written back.
     private func adoptDiskState(_ r: ClockReading) {
         guard let file = StateStore.load() else { return }
-        if file.alertURL != state.alertURL || file.reports != state.reports || file.installID != state.installID || file.uninstall?.requestedAt != state.uninstall?.requestedAt
+        if file.reports != state.reports || file.installID != state.installID || file.uninstall?.requestedAt != state.uninstall?.requestedAt
             || file.schedules != state.schedules
             // The anchor's date may not survive the JSON round trip bit for bit.
             || file.wallAnchor?.bootID != state.wallAnchor?.bootID || file.wallAnchor?.mono != state.wallAnchor?.mono
             || file.protections != state.protections || !sameCoolingOffRemoval(file, r)
             || file.activityByUser != state.activityByUser || file.monitorByUser != state.monitorByUser
             || file.monitoringByUser != state.monitoringByUser {
-            log("state file disagrees about alerts/reports/uninstall/schedules/protections/activity/monitor; rewriting")
+            log("state file disagrees about reports/uninstall/schedules/protections/activity/monitor; rewriting")
             StateStore.save(state)
         }
         guard var disk = file.activeSession(at: r) else { return }

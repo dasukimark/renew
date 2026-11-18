@@ -17,13 +17,12 @@ import hmac
 import json
 import logging
 import os
-import re
 import smtplib
 import uuid
 from datetime import datetime
 
 import heartbeat
-from render import build_email
+from render import as_list, build_email, recipients
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -36,7 +35,6 @@ MAX_TEXT = 300
 MAX_CHANGE_TEXT = 2000
 MAX_REASONS = 50
 KINDS = {"flags", "change", "test"}
-EMAIL = re.compile(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(\.[a-z0-9-]+)+")
 
 _secrets = None
 # Report ids this container has emailed, oldest first.
@@ -126,16 +124,16 @@ def parse_report(body):
     if not isinstance(omitted, int) or isinstance(omitted, bool) or omitted < 0:
         raise Invalid("omitted must be a whole number")
 
-    to = data.get("to")
-    if not isinstance(to, str) or len(to) > 254 or not EMAIL.fullmatch(to.strip().lower()):
-        raise Invalid("to must be one email address")
+    to = recipients(data.get("to"))
+    if to is None:
+        raise Invalid("to must be an email address or a short list of them")
     zone = data.get("timeZone")
     if zone is not None and not isinstance(zone, str):
         raise Invalid("timeZone must be a string")
 
     return {
         "id": report_id,
-        "to": to.strip().lower(),
+        "to": to,
         "timeZone": (zone or "")[:64],
         "kind": kind,
         "mac": _text(data.get("mac", "a Mac"), "mac") or "a Mac",
@@ -182,7 +180,7 @@ def _checkin_sender(app_password):
     allowed = _allowed_recipients()
 
     def send(report):
-        if allowed and report["to"] not in allowed:
+        if allowed and not set(as_list(report["to"])) <= allowed:
             raise heartbeat.SendFailed("recipient not allowed")
         _send_built(report, app_password)
     return send
@@ -226,7 +224,7 @@ def handler(event, context):
         return _response(400, f"bad report: {e}")
 
     allowed = _allowed_recipients()
-    if allowed and report["to"] not in allowed:
+    if allowed and not set(report["to"]) <= allowed:
         log.warning("refused report %s to an address not in ALLOWED_RECIPIENTS", report["id"])
         return _response(403, "recipient not allowed")
 
@@ -260,7 +258,7 @@ def _heartbeat(body, app_password):
     except heartbeat.Invalid as e:
         return _response(400, f"bad heartbeat: {e}")
     allowed = _allowed_recipients()
-    if allowed and beat["to"] is not None and beat["to"] not in allowed:
+    if allowed and beat["to"] is not None and not set(beat["to"]) <= allowed:
         log.warning("refused heartbeat from %s to an address not in ALLOWED_RECIPIENTS", beat["install"])
         return _response(403, "recipient not allowed")
     try:

@@ -41,24 +41,13 @@ final class Guard {
         let deep = now.timeIntervalSince(lastDeepCheck) >= 15
         if deep { lastDeepCheck = now }
         let restored = SelfRepair.repair(deep: deep)
-        if !restored.isEmpty {
-            Alerts.send(to: state.alertURL,
-                        "Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
-                        kind: "repair", minInterval: 600)
-        }
+        if !restored.isEmpty { log("restored during a session: \(restored.joined(separator: ", "))") }
         SelfRepair.ensureLoaded(label: Paths.daemonLabel, plist: Paths.daemonPlist)
     }
 
-    /// `launchctl bootout`: report it if a session is running. Shares the
-    /// "stopped" rate limit with renewd, so stopping both sends one alert.
+    /// `launchctl bootout`: log it if a session is running.
     private func terminate() {
-        let state = StateStore.load() ?? cached
-        if let state, let s = state.activeSession {
-            log("SIGTERM during a session")
-            Alerts.send(to: state.alertURL,
-                        "Renew's background service was stopped during a block session (\(DurationText.format(Int(s.endsAt.timeIntervalSinceNow))) left). That's expected if the Mac is restarting or shutting down; otherwise someone stopped it.",
-                        kind: "stopped", minInterval: 60, wait: true)
-        }
+        if (StateStore.load() ?? cached)?.activeSession != nil { log("SIGTERM during a session") }
         log("guard exiting")
         exit(0)
     }

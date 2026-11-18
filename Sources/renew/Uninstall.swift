@@ -22,14 +22,13 @@ enum Uninstall {
         let daemon = try? DaemonClient.send(Request(cmd: .status))
         let session: SessionInfo?
         let request: UninstallStatus?
-        let alertURL: String?
         let coolingOff: Bool
         if let status = daemon?.status {
-            (session, request, alertURL) = (status.session, status.uninstall, status.alertURL)
+            (session, request) = (status.session, status.uninstall)
             coolingOff = status.enforcesCoolingOff
         } else {
             let file = StateStore.load()
-            (session, request, alertURL) = (file?.activeSession, file?.uninstallStatus(), file?.alertURL)
+            (session, request) = (file?.activeSession, file?.uninstallStatus())
             // No daemon and no state file: assume the cooling-off is on, so
             // stopping renewd and deleting its state isn't a way around it.
             coolingOff = file?.effectiveProtections.uninstallCoolingOff ?? true
@@ -70,7 +69,6 @@ enum Uninstall {
         }
 
         print("Removing Renew…")
-        Alerts.send(to: alertURL, "Renew was uninstalled. It no longer blocks anything on this Mac.", wait: true)
         // Guard first, so it can't bring the daemon back.
         Launchctl.bootout("system/\(Paths.guardLabel)")
         Launchctl.bootout("system/\(Paths.daemonLabel)")
@@ -85,12 +83,7 @@ enum Uninstall {
             }
         }
 
-        print("""
-        Renew is uninstalled.
-
-        If you installed the Renew configuration profile, remove it in
-        System Settings → General → Device Management (it needs its removal password).
-        """)
+        print("Renew is uninstalled.")
 
         // Stop the app last: when the app itself runs this uninstall, stopping
         // it earlier could take this process down with it.
@@ -113,10 +106,10 @@ enum Uninstall {
     private static func sendFinalReports() {
         guard let state = StateStore.load(), let dest = state.reports else { return }
         guard let server = dest.server(builtIn: ReportServer.builtIn()) else {
-            print("  (no report server found; your accountability partner wasn't emailed)")
+            print("  (no report server found; your accountability partners weren't emailed)")
             return
         }
-        let current = ReportTarget(partnerEmail: dest.partnerEmail, server: server)
+        let current = ReportTarget(partnerEmails: dest.partnerEmails, server: server)
         let console = shell("/usr/bin/stat", ["-f", "%Su", "/dev/console"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
         let user = ProcessInfo.processInfo.environment["SUDO_USER"] ?? (console.isEmpty || console == "root" ? NSUserName() : console)
         var groups: [(ReportTarget, [Report])] = []
@@ -124,13 +117,13 @@ enum Uninstall {
             let target = entry.target ?? current
             if let i = groups.firstIndex(where: { $0.0 == target }) { groups[i].1.append(entry.report) } else { groups.append((target, [entry.report])) }
         }
-        let last = Report(mac: Alerts.macName, user: user, kind: .change, sentAt: Date(),
+        let last = Report(mac: Report.macName, user: user, kind: .change, sentAt: Date(),
                           changes: ["Renew was uninstalled from this Mac. It no longer blocks or monitors anything, and this is the last report you'll get from it."])
         if let i = groups.firstIndex(where: { $0.0 == current }) { groups[i].1.append(last) } else { groups.append((current, [last])) }
-        print("Emailing your accountability partner…")
+        print("Emailing your accountability partners…")
         for (target, reports) in groups {
             let sent = ReportClient.sendAndWait(reports, to: target)
-            if sent < reports.count { print("  couldn't send \(reports.count - sent) report(s) to \(target.partnerEmail)") }
+            if sent < reports.count { print("  couldn't send \(reports.count - sent) report(s) to \(target.partnerEmails.joined(separator: ", "))") }
         }
         // So the report server stops expecting check-ins and doesn't email
         // that Renew went quiet.

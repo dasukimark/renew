@@ -51,6 +51,11 @@ final class Heartbeater: @unchecked Sendable {
     private var notifier: io_object_t = 0
     /// The sleep waiting for its check-in before it's allowed.
     private var pendingSleep: Int?
+    /// Between "will sleep" and the next full wake. macOS briefly wakes a
+    /// sleeping Mac for maintenance (dark wake) without telling power
+    /// clients; an `awake` check-in then, right before it sleeps again
+    /// unannounced, makes the server email that Renew went quiet.
+    private var asleep = false
 
     init(queue: DispatchQueue, dev: Bool, destination: @escaping () -> ReportTarget?,
          installID: @escaping () -> UUID, userName: @escaping () -> String) {
@@ -69,7 +74,7 @@ final class Heartbeater: @unchecked Sendable {
     /// telling previous destinations to stop expecting check-ins.
     func tick() {
         retryRemovals()
-        guard !sending, Self.uptime >= nextBeat, let target = destination() else { return }
+        guard !sending, !asleep, Self.uptime >= nextBeat, let target = destination() else { return }
         send(.awake, to: target)
     }
 
@@ -156,7 +161,7 @@ final class Heartbeater: @unchecked Sendable {
     // MARK: sending
 
     private func details(for target: ReportTarget) -> Heartbeat.Details {
-        Heartbeat.Details(to: target.partnerEmail, mac: Alerts.macName, user: userName())
+        Heartbeat.Details(to: target.partnerEmails, mac: Report.macName, user: userName())
     }
 
     private func make(_ state: Heartbeat.State, for target: ReportTarget) -> Heartbeat {
@@ -188,7 +193,7 @@ final class Heartbeater: @unchecked Sendable {
                     self.lastAccepted = beat.sentAt
                     self.nextBeat = Self.uptime + delay
                     if let to = beat.to, let mac = beat.mac, let user = beat.user, let zone = beat.timeZone {
-                        self.acceptedDetails = Heartbeat.Details(to: to, mac: mac, user: user, timeZone: zone)
+                        self.acceptedDetails = Heartbeat.Details(to: to.emails, mac: mac, user: user, timeZone: zone)
                     }
                     if let sent = beat.gaps, !sent.isEmpty {
                         self.gaps.remove(Set(sent.map(\.id)))
@@ -204,7 +209,7 @@ final class Heartbeater: @unchecked Sendable {
     }
 
     private func logDev(_ state: Heartbeat.State, to target: ReportTarget) {
-        log("(dev) heartbeat '\(state.rawValue)' to \(target.partnerEmail)")
+        log("(dev) heartbeat '\(state.rawValue)' to \(target.partnerEmails.joined(separator: ", "))")
     }
 
     // MARK: power
@@ -241,6 +246,7 @@ final class Heartbeater: @unchecked Sendable {
         case Self.canSystemSleep:
             IOAllowPowerChange(rootPort, argument)
         case Self.systemWillSleep:
+            asleep = true
             pendingSleep = argument
             guard let target = destination() else { return allowSleep(argument) }
             // Even if a check-in is on its way, the server must hear this one.
@@ -248,6 +254,8 @@ final class Heartbeater: @unchecked Sendable {
             send(.sleeping, to: target) { [weak self] in self?.allowSleep(argument) }
             queue.asyncAfter(deadline: .now() + Self.sleepWait) { [weak self] in self?.allowSleep(argument) }
         case Self.systemHasPoweredOn:
+            // Only full wakes get here, not maintenance wakes.
+            asleep = false
             log("heartbeat: the Mac woke")
             beatNow()
         case Self.systemWillPowerOff, Self.systemWillRestart:

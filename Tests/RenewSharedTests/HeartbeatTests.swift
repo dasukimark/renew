@@ -9,14 +9,14 @@ private func tempPath(_ name: String) -> String {
     return dir + "/" + name
 }
 
-private let target = ReportTarget(partnerEmail: "partner@test.invalid",
+private let target = ReportTarget(partnerEmails: ["partner@test.invalid"],
                                   server: ReportServer(url: "https://reports.test.invalid", token: "t"))
 
 @Suite("Heartbeats")
 struct HeartbeatTests {
     @Test func encodesWhatTheServerExpects() throws {
         let install = UUID()
-        let beat = Heartbeat(install: install, to: "partner@test.invalid", mac: "Test Mac", user: "tester",
+        let beat = Heartbeat(install: install, to: Recipients(["partner@test.invalid"]), mac: "Test Mac", user: "tester",
                              timeZone: "UTC", sentAt: Date(timeIntervalSince1970: 1_794_931_200), state: .sleeping,
                              boot: Date(timeIntervalSince1970: 1_794_902_400), lastAccepted: nil)
         let json = try JSONSerialization.jsonObject(with: Report.encoder.encode(beat)) as! [String: Any]
@@ -31,12 +31,17 @@ struct HeartbeatTests {
         #expect(json["bootID"] as? String == ClockReading.bootID)
         let back = try Report.decoder.decode(Heartbeat.self, from: Report.encoder.encode(beat))
         #expect(back == beat)
+
+        var several = beat
+        several.to = Recipients(["a@test.invalid", "b@test.invalid"])
+        let list = try JSONSerialization.jsonObject(with: Report.encoder.encode(several)) as! [String: Any]
+        #expect(list["to"] as? [String] == ["a@test.invalid", "b@test.invalid"])
     }
 
     @Test func detailsOnlyWhenGiven() throws {
-        let details = Heartbeat.Details(to: target.partnerEmail, mac: "Test Mac", user: "tester", timeZone: "UTC")
+        let details = Heartbeat.Details(to: target.partnerEmails, mac: "Test Mac", user: "tester", timeZone: "UTC")
         let full = Heartbeat.make(.awake, install: UUID(), details: details, lastAccepted: nil)
-        #expect(full.to == "partner@test.invalid" && full.mac == "Test Mac")
+        #expect(full.to == Recipients(["partner@test.invalid"]) && full.mac == "Test Mac")
         #expect(full.boot.timeIntervalSince1970 > 0 && full.boot <= Date())
         let slim = Heartbeat.make(.awake, install: UUID(), details: nil, lastAccepted: nil, gaps: [])
         let json = try JSONSerialization.jsonObject(with: Report.encoder.encode(slim)) as! [String: Any]

@@ -61,7 +61,7 @@ final class Reporter: @unchecked Sendable {
     /// false when there's nowhere to send it.
     func sendTest(uid: uid_t) -> Bool {
         guard let target = destination() else { return false }
-        let report = Report(mac: Alerts.macName, user: Self.userName(uid), kind: .test, sentAt: Date(),
+        let report = Report(mac: Report.macName, user: Self.userName(uid), kind: .test, sentAt: Date(),
                             changes: ["Test report from Renew. If you're reading this, email reports work."])
         if logOnly { logDev(report); return true }
         let partnerLog = partnerLog
@@ -84,7 +84,7 @@ final class Reporter: @unchecked Sendable {
         let now = Self.uptime
         for (uid, batch) in batches where batch.due <= now {
             batches[uid] = nil
-            enqueue(Report.flags(from: batch.flags, mac: Alerts.macName, user: Self.userName(uid), at: Date()))
+            enqueue(Report.flags(from: batch.flags, mac: Report.macName, user: Self.userName(uid), at: Date()))
         }
         sendNext()
     }
@@ -92,23 +92,24 @@ final class Reporter: @unchecked Sendable {
     /// Moves unfinished batches into the outbox, before renewd exits.
     func flushBatches() {
         for (uid, batch) in batches {
-            enqueue(Report.flags(from: batch.flags, mac: Alerts.macName, user: Self.userName(uid), at: Date()), send: false)
+            enqueue(Report.flags(from: batch.flags, mac: Report.macName, user: Self.userName(uid), at: Date()), send: false)
         }
         batches.removeAll()
     }
 
-    /// Reports are about to be moved or turned off. What's waiting for the
-    /// current destination, then `farewell`, stays owed to it (`old`) and is
-    /// sent through the outbox like any report, one at a time with retries.
-    func handOff(from old: ReportTarget?, farewell: String, uid: uid_t) {
+    /// Reports are about to be moved, turned off, or go to different
+    /// partners. What's waiting for the current destination stays owed to it
+    /// (`old`), and `farewell`, if any, goes to `farewellTarget` (default
+    /// `old`), all through the outbox like any report, one at a time with retries.
+    func handOff(from old: ReportTarget?, farewell: String?, to farewellTarget: ReportTarget? = nil, uid: uid_t) {
         flushBatches()
-        if logOnly { return logDev(change([farewell], uid: uid)) }
+        if logOnly { return farewell.map { logDev(change([$0], uid: uid)) } ?? () }
         let moved = outbox.retargetCurrent(to: old)
         guard let old else {
             if moved > 0 { log("reports: no report server to send \(moved) waiting report(s) to; dropped them") }
             return
         }
-        outbox.append(change([farewell], uid: uid), target: old)
+        if let farewell { outbox.append(change([farewell], uid: uid), target: farewellTarget ?? old) }
         maybePending = true
         failures = 0
         nextAttempt = 0
@@ -118,7 +119,7 @@ final class Reporter: @unchecked Sendable {
     // MARK: sending
 
     private func change(_ changes: [String], uid: uid_t) -> Report {
-        Report(mac: Alerts.macName, user: Self.userName(uid), kind: .change, sentAt: Date(), changes: changes)
+        Report(mac: Report.macName, user: Self.userName(uid), kind: .change, sentAt: Date(), changes: changes)
     }
 
     private func enqueue(_ report: Report, send: Bool = true) {

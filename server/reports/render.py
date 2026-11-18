@@ -14,6 +14,31 @@ from datetime import timedelta, timezone
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+EMAIL = re.compile(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(\.[a-z0-9-]+)+")
+MAX_RECIPIENTS = 10
+
+
+def recipients(value):
+    """`to` as renewd sends it, one address or a list, cleaned and without
+    repeats. None unless it's 1 to MAX_RECIPIENTS different valid addresses
+    (repeats are dropped before counting, as renewd does)."""
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, list) or len(items) > 5 * MAX_RECIPIENTS:
+        return None
+    out = []
+    for address in items:
+        if not isinstance(address, str) or len(address) > 254 or not EMAIL.fullmatch(address.strip().lower()):
+            return None
+        if address.strip().lower() not in out:
+            out.append(address.strip().lower())
+    return out if 1 <= len(out) <= MAX_RECIPIENTS else None
+
+
+def as_list(to):
+    """Recipients as a list; check-ins stored before several partners hold one string."""
+    return [to] if isinstance(to, str) else list(to or [])
+
+
 DOT = "․"
 _INNER_DOT = re.compile(r"(?<=\w)\.(?=\w)")
 _SCHEME = re.compile(r"(?i)\b(https?|ftp)://")
@@ -253,7 +278,7 @@ addresses are never included.<br>Report {html.escape(report['id'])}
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f"Renew <{sender}>"
-    msg["To"] = report["to"]
+    msg["To"] = ", ".join(as_list(report["to"]))
     # One Message-ID per report, so a report sent twice is one email.
     msg["Message-ID"] = f"<{report['id']}@renew.reports>"
     msg.set_content("\n".join(text))

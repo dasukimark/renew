@@ -27,10 +27,10 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     /// This Mac's Renew install (`PersistedState.installID`), so the server
     /// tracks it across restarts and partner changes.
     public var install: UUID
-    /// The partner, the Mac's name, the user and the time zone: sent only
+    /// The partners, the Mac's name, the user and the time zone: sent only
     /// when renewd starts, when one of them changes, or when the server asks
     /// (`HeartbeatReply.needDetails`). The server keeps them in between.
-    public var to: String?
+    public var to: Recipients?
     public var mac: String?
     public var user: String?
     public var timeZone: String?
@@ -61,7 +61,7 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     /// Mac restarting, even without a shutdown notice (see `AliveRecord.assess`).
     public static let restartWindow: TimeInterval = 180
 
-    public init(id: UUID = UUID(), install: UUID, to: String?, mac: String?, user: String?,
+    public init(id: UUID = UUID(), install: UUID, to: Recipients?, mac: String?, user: String?,
                 timeZone: String? = TimeZone.current.identifier, sentAt: Date, state: State,
                 boot: Date, interval: Int = Int(Heartbeat.interval), lastAccepted: Date? = nil,
                 gaps: [DowntimeGap]? = nil, coveredSince: Date? = nil) {
@@ -109,12 +109,12 @@ public struct Heartbeat: Codable, Equatable, Sendable {
 
     /// Who and what a check-in is about. Sent only when it changes.
     public struct Details: Equatable, Sendable {
-        public var to: String
+        public var to: [String]
         public var mac: String
         public var user: String
         public var timeZone: String
 
-        public init(to: String, mac: String, user: String, timeZone: String = TimeZone.current.identifier) {
+        public init(to: [String], mac: String, user: String, timeZone: String = TimeZone.current.identifier) {
             self.to = to
             self.mac = mac
             self.user = user
@@ -126,7 +126,7 @@ public struct Heartbeat: Codable, Equatable, Sendable {
     public static func make(_ state: State, install: UUID, details: Details?,
                             lastAccepted: Date?, now: Date = Date(), interval: TimeInterval = Heartbeat.interval,
                             gaps: [DowntimeGap]? = nil, coveredSince: Date? = nil) -> Heartbeat {
-        Heartbeat(install: install, to: details?.to, mac: details?.mac, user: details?.user,
+        Heartbeat(install: install, to: details.map { Recipients($0.to) }, mac: details?.mac, user: details?.user,
                   timeZone: details?.timeZone, sentAt: now,
                   state: state, boot: bootTime(), interval: Int(interval.rounded()), lastAccepted: lastAccepted,
                   gaps: gaps.flatMap { $0.isEmpty ? nil : $0 }, coveredSince: coveredSince)
