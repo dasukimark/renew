@@ -111,7 +111,9 @@ private struct MonitorFlagsView: View {
                          url: f.url, browser: f.browser) {
                     ForEach(f.flags, id: \.self) { flag in
                         FlagBadge(text: flag.label, color: .red)
-                            .help(flag.kind == .domain ? "Matched \(flag.match)" : "Title contains “\(flag.match)”")
+                            .help(flag.kind == .domain ? "Matched \(flag.match)"
+                                  : flag.isScore ? "Title has several suggestive words: \(flag.match)"
+                                  : "Title contains “\(flag.match)”")
                     }
                 }
             }
@@ -233,7 +235,7 @@ private struct MonitorSettingsView: View {
                 Toggle(isOn: binding(\.flagExplicitTerms)) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Explicit words")
-                        Text("\(ExplicitTerms.preset.count) common explicit words and adult site names.")
+                        Text("Common explicit words and adult site names, including disguised spellings and suggestive combinations.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

@@ -233,7 +233,7 @@ public struct Report: Codable, Equatable, Sendable {
                 case let list?: text = "on list '\(list)'"
                 }
             case .term:
-                text = "word: \(f.match)"
+                text = f.isScore ? "likely explicit (\(f.match))" : "word: \(f.match)"
             }
             if !out.contains(text) { out.append(text) }
         }

@@ -169,8 +169,11 @@ public struct ActivityFlag: Codable, Hashable, Sendable {
 
     public var kind: Kind
     /// For `.domain`: the watch list that matched (`explicit`, `custom`, or a blocklist name).
+    /// For `.term`: `scoreList` when no single word matched but enough
+    /// suggestive words added up (see `isScore`); otherwise nil.
     public var list: String?
-    /// The rule or domain that matched, or the word found in the title.
+    /// The rule or domain that matched, the word found in the title, or for
+    /// a score flag the words that added up ("a, b, c").
     public var match: String
 
     public init(kind: Kind, list: String? = nil, match: String) {
@@ -183,11 +186,17 @@ public struct ActivityFlag: Codable, Hashable, Sendable {
 
     public static func domain(_ list: String, _ match: String) -> ActivityFlag { ActivityFlag(kind: .domain, list: list, match: match) }
     public static func term(_ match: String) -> ActivityFlag { ActivityFlag(kind: .term, match: match) }
+    /// A score flag is stored as a `.term` flag tagged with `scoreList`, so
+    /// builds that predate scores still read it (as "Word: …") instead of
+    /// dropping the visit.
+    public static func score(_ words: String) -> ActivityFlag { ActivityFlag(kind: .term, list: scoreList, match: words) }
+    public static let scoreList = "score"
+    public var isScore: Bool { kind == .term && list == Self.scoreList }
 
-    /// "Explicit site", "Social list", "Watched site", or "Word: …".
+    /// "Explicit site", "Social list", "Watched site", "Word: …" or "Likely explicit: …".
     public var label: String {
         switch kind {
-        case .term: return "Word: \(match)"
+        case .term: return isScore ? "Likely explicit: \(match)" : "Word: \(match)"
         case .domain:
             switch list {
             case MonitorSettings.explicitListName?: return "Explicit site"
@@ -304,31 +313,21 @@ public struct DomainSet: Sendable {
     }
 }
 
-/// Explicit words and phrases flagged in page titles when
-/// `MonitorSettings.flagExplicitTerms` is on. Matched as whole words, so
-/// "Essex" or "analysis" never match.
-public enum ExplicitTerms {
-    public static let preset: [String] = [
-        "porn", "porno", "pornography", "pornographic", "xxx", "nsfw", "nude", "nudes", "nudity", "naked",
-        "topless", "sex", "sexting", "sex tape", "sex cam", "live sex", "hentai", "milf", "milfs", "onlyfans",
-        "fansly", "camgirl", "camgirls", "erotic", "erotica", "fetish", "bdsm", "bondage", "orgasm",
-        "masturbate", "masturbation", "blowjob", "blow job", "handjob", "creampie", "gangbang", "threesome",
-        "striptease", "boobs", "tits", "pussy", "dildo", "anal", "hardcore", "horny", "r34", "rule34",
-        "rule 34", "xvideos", "xhamster", "pornhub", "redtube", "youporn", "brazzers", "chaturbate",
-        "stripchat", "leaked nudes",
-    ]
-}
-
-/// Finds whole words or phrases in text, ignoring case and accents.
+/// Finds whole words or phrases in text, ignoring case and accents. Terms
+/// of `minDisguisedLength`+ characters also match disguised spellings
+/// (`TitleNormalizer.variants`); shorter ones match only as written, so a
+/// word like "ed" doesn't start matching "3D".
 public struct TermMatcher: Sendable {
-    private let terms: [(term: String, words: [String])]
+    private let terms: [(term: String, words: [String], disguisable: Bool)]
+
+    public static let minDisguisedLength = 4
 
     public init(_ terms: [String]) {
         var seen = Set<String>()
         self.terms = terms.compactMap {
             let words = Self.words($0)
             guard !words.isEmpty, seen.insert(words.joined(separator: " ")).inserted else { return nil }
-            return ($0, words)
+            return ($0, words, words.joined().count >= Self.minDisguisedLength)
         }
     }
 
@@ -336,10 +335,15 @@ public struct TermMatcher: Sendable {
 
     /// Every term found in `text`, in the order they were given.
     public func matches(in text: String) -> [String] {
-        guard !terms.isEmpty else { return [] }
-        let words = Self.words(text)
-        guard !words.isEmpty else { return [] }
-        return terms.filter { Self.contains(words, $0.words) }.map(\.term)
+        terms.isEmpty ? [] : matches(variants: TitleNormalizer.variants(text))
+    }
+
+    /// The same, for words already normalized by `TitleNormalizer.variants`.
+    func matches(variants: [[String]]) -> [String] {
+        guard let plain = variants.first else { return [] }
+        return terms.filter { t in
+            Self.contains(plain, t.words) || (t.disguisable && variants.dropFirst().contains { Self.contains($0, t.words) })
+        }.map(\.term)
     }
 
     /// Lowercased, accent-free runs of letters and digits.
@@ -350,7 +354,7 @@ public struct TermMatcher: Sendable {
             .map(String.init)
     }
 
-    private static func contains(_ words: [String], _ phrase: [String]) -> Bool {
+    static func contains(_ words: [String], _ phrase: [String]) -> Bool {
         guard phrase.count <= words.count else { return false }
         if phrase.count == 1 { return words.contains(phrase[0]) }
         for i in 0...(words.count - phrase.count) where words[i] == phrase[0] {
@@ -364,6 +368,7 @@ public struct TermMatcher: Sendable {
 public struct ActivityMatcher: Sendable {
     private let explicit: DomainSet?
     private let watched: [(list: String, rules: RuleSet)]
+    private let explicitTerms: ExplicitScorer?
     private let terms: TermMatcher
 
     /// Blocklist rules come from `settings.listRules`; `explicitDomains` is
@@ -377,11 +382,12 @@ public struct ActivityMatcher: Sendable {
         }
         if !s.customDomains.isEmpty { watched.append((MonitorSettings.customListName, RuleSet(strings: s.customDomains))) }
         self.watched = watched
-        terms = TermMatcher((s.flagExplicitTerms ? ExplicitTerms.preset : []) + s.customTerms)
+        explicitTerms = s.flagExplicitTerms ? .preset : nil
+        terms = TermMatcher(s.customTerms)
     }
 
     /// Whether nothing at all is watched.
-    public var isEmpty: Bool { explicit == nil && watched.isEmpty && terms.isEmpty }
+    public var isEmpty: Bool { explicit == nil && watched.isEmpty && explicitTerms == nil && terms.isEmpty }
 
     public func flags(url: String, title: String) -> [ActivityFlag] {
         var out: [ActivityFlag] = []
@@ -391,7 +397,16 @@ public struct ActivityMatcher: Sendable {
                 if let rule = rules.match(url) { out.append(.domain(list, rule.description)) }
             }
         }
-        for t in terms.matches(in: title) { out.append(.term(t)) }
+        // Normalized once for both the built-in words and your own.
+        let variants = explicitTerms == nil && terms.isEmpty ? [] : TitleNormalizer.variants(title)
+        var found = Set<String>()
+        if let r = explicitTerms?.evaluate(variants: variants, masked: TitleNormalizer.maskedWords(title)) {
+            for t in r.strong { out.append(.term(t)); found.insert(TermMatcher.words(t).joined(separator: " ")) }
+            if r.strong.isEmpty && r.flagged { out.append(.score(r.contributors.joined(separator: ", "))) }
+        }
+        for t in terms.matches(variants: variants) where !found.contains(TermMatcher.words(t).joined(separator: " ")) {
+            out.append(.term(t))
+        }
         return Array(out.prefix(ActivityFlag.maxPerVisit))
     }
 }
