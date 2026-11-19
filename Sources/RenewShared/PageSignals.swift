@@ -61,9 +61,7 @@ public struct PageSignals: Codable, Equatable, Sendable {
             for label in candidates where !labels.contains(label.id) && (main || label.scope != .post) {
                 if label.phrases.contains(where: { TermMatcher.contains(plain, $0) }) { labels.append(label.id) }
             }
-            if strong.count < maxItems {
-                for w in scorer.strongMatches(variants: variants) where !strong.contains(w) { strong.append(w) }
-            }
+            for w in scorer.strongMatches(variants: variants) where !strong.contains(w) { strong.append(w) }
         }
         return PageSignals(labels: labels, strongWords: strong).capped()
     }
@@ -142,4 +140,75 @@ public struct SiteLabel: Sendable {
 
     /// The label with `id`, or nil (an id from a newer build).
     public static func named(_ id: String) -> SiteLabel? { all.first { $0.id == id } }
+}
+
+/// Read bookkeeping for the pages a reader has in front: when each was
+/// last read, and which pieces of its text were already checked, so a page
+/// read again (a feed loading more as you scroll) only has its new text
+/// classified. Returns only what the new text holds: `VisitTracker` merges
+/// findings within a visit.
+///
+/// Forget a page (`keep(only:)`, `reset()`) whenever its visit may end (the
+/// page leaves the front, the user goes away), so a new visit gets its text
+/// checked afresh. Not locked: use it from one serial queue.
+public final class PageReadState {
+    private struct Entry {
+        var lastRead: Date
+        var parts: Set<Int> = []
+    }
+    private var pages: [String: Entry] = [:]
+    /// How often one page is read again while it stays in front.
+    public let interval: TimeInterval
+    /// Checked pieces remembered per page; past this they're forgotten and
+    /// checked again, which repeats findings the visit already has.
+    public static let maxParts = 20_000
+    public static let maxPages = 50
+
+    public init(interval: TimeInterval) {
+        self.interval = interval
+    }
+
+    /// Whether `key` is due a read; if so, counts it as read now. A page
+    /// not seen before is due straight away.
+    public func take(_ key: String, now: Date = Date()) -> Bool {
+        if let e = pages[key], now.timeIntervalSince(e.lastRead) < interval { return false }
+        pages[key, default: Entry(lastRead: now)].lastRead = now
+        if pages.count > Self.maxPages, let oldest = pages.min(by: { $0.value.lastRead < $1.value.lastRead }) {
+            pages[oldest.key] = nil
+        }
+        return true
+    }
+
+    /// Takes back a read that found nothing, so the page is tried again on the next check.
+    public func giveBack(_ key: String) { pages[key]?.lastRead = .distantPast }
+
+    /// What the text of `key` (on `host`) read just now holds that earlier
+    /// reads didn't (see `PageSignals.find(host:parts:others:)`).
+    public func findings(_ key: String, host: String, parts: [String], others: [String] = []) -> PageSignals {
+        var entry = pages[key] ?? Entry(lastRead: Date())
+        if entry.parts.count > Self.maxParts { entry.parts.removeAll() }
+        // Where a piece is (main post or not) counts: a post label counts
+        // differently in each.
+        func fresh(_ texts: [String], main: Bool) -> [String] {
+            texts.filter { t in
+                var h = Hasher()
+                h.combine(main)
+                h.combine(t)
+                return entry.parts.insert(h.finalize()).inserted
+            }
+        }
+        let newMain = fresh(parts, main: true)
+        let newOthers = fresh(others, main: false)
+        pages[key] = entry
+        guard !newMain.isEmpty || !newOthers.isEmpty else { return PageSignals() }
+        return PageSignals.find(host: host, parts: newMain, others: newOthers)
+    }
+
+    /// Forgets every page but `keys`.
+    public func keep(only keys: Set<String>) {
+        pages = pages.filter { keys.contains($0.key) }
+    }
+
+    /// Forgets every page.
+    public func reset() { pages.removeAll() }
 }

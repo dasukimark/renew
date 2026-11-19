@@ -141,13 +141,21 @@ final class BrowserWatcher: NSObject {
     /// Whether the Monitor wants mixed sites read (`MonitorSettings.flagExplicitTerms`),
     /// as renewd last reported it.
     private var checkMixed = false
-    /// Mixed pages in the front browser, so each is read at most every few
-    /// seconds. Only used on `browserQueue`.
-    private let pageReads = PageReadThrottle()
+    /// The mixed page in the front browser: when it was read and what of
+    /// its text was checked. Only used on `browserQueue`.
+    private let pageReads = PageReadState(interval: PageTextReader.rereadAfter)
     /// Browsers whose tree was switched on to read a mixed page, and the one
     /// showing a mixed page now.
     private var pagePrimed: Set<pid_t> = []
-    private var mixedFront: pid_t?
+    private var mixedFront: pid_t? {
+        didSet {
+            // Its visit ends: the next one has the page checked afresh.
+            if mixedFront == nil, oldValue != nil {
+                let reads = pageReads
+                browserQueue.async { reads.reset() }
+            }
+        }
+    }
 
     init(localSession: SessionInfo?) {
         self.localSession = localSession
@@ -334,18 +342,22 @@ final class BrowserWatcher: NSObject {
         browserQueue.async { [weak self] in
             var results = targets.map { Self.inspect($0, rules: rules, server: server) }
             if let t = readMixed, let i = results.firstIndex(where: { $0.target.pid == t.pid }),
-               case .clean(_, var page?) = results[i], SiteCategory.of(url: page.url) == .mixed,
-               pageReads.take(page.url, now: now) {
-                if t.kind == .chromium { embeddedQueue.sync { EmbeddedWebReader.primeBrowser(pid: t.pid) } }
-                // Chromium builds its tree a moment after it's switched on:
-                // with nothing found yet, try again on the next check.
-                if let found = PageTextReader.signals(pid: t.pid, url: page.url) {
-                    page.signals = found
-                } else {
-                    pageReads.giveBack(page.url)
-                    page.signals = PageSignals()
+               case .clean(_, var page?) = results[i], SiteCategory.of(url: page.url) == .mixed {
+                // Only the page in front is remembered: another one there ended its visit.
+                let key = "\(t.pid)|\(page.url)"
+                pageReads.keep(only: [key])
+                if pageReads.take(key, now: now) {
+                    if t.kind == .chromium { embeddedQueue.sync { EmbeddedWebReader.primeBrowser(pid: t.pid) } }
+                    // Chromium builds its tree a moment after it's switched on:
+                    // with nothing found yet, try again on the next check.
+                    if let found = PageTextReader.signals(pid: t.pid, url: page.url, state: pageReads, key: key) {
+                        page.signals = found
+                    } else {
+                        pageReads.giveBack(key)
+                        page.signals = PageSignals()
+                    }
+                    results[i] = .clean(t, page: page)
                 }
-                results[i] = .clean(t, page: page)
             }
             DispatchQueue.main.async {
                 self?.busy = false
@@ -659,7 +671,10 @@ final class BrowserWatcher: NSObject {
         }
         let away = recording && Self.userLeftAt() != nil
         let record = recording && !away
-        if recording && (away || candidate == nil) { recorder.observe(.embedded, []) }
+        if recording && (away || candidate == nil) {
+            recorder.observe(.embedded, [])
+            embeddedQueue.async { EmbeddedWebReader.forgetPageText() }
+        }
         let now = Date()
         if !live && (!record || now.timeIntervalSince(lastEmbeddedMonitorRead) < Self.embeddedMonitorInterval) { return }
         guard !embeddedBusy, let app = candidate else { return }

@@ -27,8 +27,12 @@ enum EmbeddedWebReader {
     /// them alone.
     private static var browsersManual: Set<pid_t> = []
     private static var browsersEnhanced: Set<pid_t> = []
-    /// Mixed pages in embedded apps, so each is read at most every few seconds.
-    private static let textReads = PageReadThrottle()
+    /// Mixed pages in the front embedded app: when each was read and what
+    /// of its text was checked.
+    private static let textReads = PageReadState(interval: PageTextReader.rereadAfter)
+
+    /// Their visits ended (no embedded app in front, the user went away).
+    static func forgetPageText() { textReads.reset() }
 
     private struct Switched: OptionSet {
         let rawValue: Int
@@ -133,6 +137,7 @@ enum EmbeddedWebReader {
         var queue: [(el: AXUIElement, depth: Int)] = windows.map { ($0, 0) }
         var head = 0
         var pages: [Page] = []
+        var readKeys = Set<String>()
         while head < queue.count && head < maxNodes {
             let (el, depth) = queue[head]
             head += 1
@@ -144,12 +149,17 @@ enum EmbeddedWebReader {
                         title = ax.string(el, attr)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     }
                     var page = Page(url: u, title: title)
+                    let key = "\(pid)|\(u)"
                     if readMixed, let host = NormalizedURL(u)?.host, SiteCategory.of(url: u) == .mixed,
-                       textReads.take(u) {
+                       readKeys.insert(key).inserted, textReads.take(key) {
                         var reader = AXReader(timeout: 0.5, deadline: Date().addingTimeInterval(PageTextReader.deadline))
                         let text = PageTextReader.textParts(of: el, ax: &reader)
-                        if text.main.isEmpty && text.others.isEmpty { textReads.giveBack(u) }
-                        page.signals = PageSignals.find(host: host, parts: text.main, others: text.others)
+                        if text.main.isEmpty && text.others.isEmpty {
+                            textReads.giveBack(key)
+                            page.signals = PageSignals()
+                        } else {
+                            page.signals = textReads.findings(key, host: host, parts: text.main, others: text.others)
+                        }
                     }
                     pages.append(page)
                 }
@@ -159,6 +169,8 @@ enum EmbeddedWebReader {
                 for k in kids { queue.append((k, depth + 1)) }
             }
         }
+        // Pages no longer showing ended their visits.
+        if readMixed { textReads.keep(only: readKeys) } else { textReads.reset() }
         return pages
     }
 }
