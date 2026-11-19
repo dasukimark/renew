@@ -542,7 +542,7 @@ final class Daemon: @unchecked Sendable {
         if old.watchLists != new.watchLists || old.listRules != new.listRules || old.customDomains != new.customDomains
             || old.flagExplicitTerms != new.flagExplicitTerms || old.customTerms != new.customTerms {
             let rules = new.listRules.values.reduce(0) { $0 + $1.count }
-            log("Monitor rules changed by uid \(uid): lists \(new.watchLists) (\(rules) rules), \(new.customDomains.count) sites, explicit words \(new.flagExplicitTerms ? "on" : "off"), \(new.customTerms.count) words")
+            log("Monitor rules changed by uid \(uid): lists \(new.watchLists) (\(rules) rules), \(new.customDomains.count) sites, explicit content \(new.flagExplicitTerms ? "on" : "off"), \(new.customTerms.count) words")
         }
         reporter.add(changes: old.loosenings(to: new), uid: uid)
     }

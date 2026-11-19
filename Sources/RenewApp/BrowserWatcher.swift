@@ -13,6 +13,8 @@ private struct BrowserTarget {
 private struct SeenPage {
     let url: String
     let title: String
+    /// What reading the page found (mixed sites only, see `PageTextReader`).
+    var signals: PageSignals? = nil
 }
 
 private enum Inspection {
@@ -136,6 +138,16 @@ final class BrowserWatcher: NSObject {
     private static let idleAfter: TimeInterval = 5 * 60
     /// Only the copy that watches browsers records (see `AppDelegate`).
     private var started = false
+    /// Whether the Monitor wants mixed sites read (`MonitorSettings.flagExplicitTerms`),
+    /// as renewd last reported it.
+    private var checkMixed = false
+    /// Mixed pages in the front browser, so each is read at most every few
+    /// seconds. Only used on `browserQueue`.
+    private let pageReads = PageReadThrottle()
+    /// Browsers whose tree was switched on to read a mixed page, and the one
+    /// showing a mixed page now.
+    private var pagePrimed: Set<pid_t> = []
+    private var mixedFront: pid_t?
 
     init(localSession: SessionInfo?) {
         self.localSession = localSession
@@ -154,6 +166,9 @@ final class BrowserWatcher: NSObject {
         // Until renewd answers, enforce what it last said, alongside the cached session.
         protections = localSession != nil ? Self.localProtections() : ProtectionsCache.load()
         activity = localSession != nil ? Self.localActivity() : ActivityCache.load()
+        if localSession != nil {
+            checkMixed = ["on", "1", "true"].contains((ProcessInfo.processInfo.environment["RENEW_MIXED"] ?? "").lowercased())
+        }
         recorder.settings = activity
         recorder.start()
         setSession(localSession ?? SessionCache.load())
@@ -195,6 +210,9 @@ final class BrowserWatcher: NSObject {
     func shutdown() {
         guard started else { return }
         recorder.shutdown()
+        let primed = pagePrimed
+        pagePrimed.removeAll()
+        if !primed.isEmpty { embeddedQueue.sync { for pid in primed { EmbeddedWebReader.releaseBrowser(pid: pid) } } }
     }
 
     // MARK: daemon sync
@@ -241,6 +259,7 @@ final class BrowserWatcher: NSObject {
             if let status {
                 self.protections = status.protections ?? .off
                 self.activity = status.effectiveActivity
+                self.checkMixed = status.monitor.map { $0.enabled && $0.flagExplicitTerms } ?? false
                 self.setSession(status.session, serverTime: status.serverTime)
                 SessionCache.save(status.session)
             } else if self.session != nil, !self.sessionLive {
@@ -258,12 +277,20 @@ final class BrowserWatcher: NSObject {
         if session != nil, !sessionLive { setSession(nil) }
         let live = session != nil
         let recording = recorder.enabled
+        // Stop exposing a browser's pages as soon as no mixed site is in front.
+        if mixedFront != nil, !recording || !checkMixed
+            || NSWorkspace.shared.frontmostApplication?.processIdentifier != mixedFront {
+            mixedFront = nil
+        }
+        releasePagePriming()
         guard live || recording else { return }
         if live && protections.lockSystemSettings { checkSettings() }
 
         let now = Date()
         let leftAt = recording ? Self.userLeftAt() : nil
         let away = leftAt != nil
+        if mixedFront != nil, away { mixedFront = nil }
+        releasePagePriming()
         if let leftAt { recorder.away(since: leftAt) }
         // Outside sessions only recording needs the browser, and less often.
         if !live && (away || now.timeIntervalSince(lastMonitorRead) < Self.monitorInterval) { return }
@@ -301,8 +328,25 @@ final class BrowserWatcher: NSObject {
         let rules = live ? ruleSet : RuleSet([])
         let server = self.server!
         let record = recording && !away
+        let readMixed = record && checkMixed ? frontTarget : nil
+        let pageReads = self.pageReads
+        let embeddedQueue = self.embeddedQueue
         browserQueue.async { [weak self] in
-            let results = targets.map { Self.inspect($0, rules: rules, server: server) }
+            var results = targets.map { Self.inspect($0, rules: rules, server: server) }
+            if let t = readMixed, let i = results.firstIndex(where: { $0.target.pid == t.pid }),
+               case .clean(_, var page?) = results[i], SiteCategory.of(url: page.url) == .mixed,
+               pageReads.take(page.url, now: now) {
+                if t.kind == .chromium { embeddedQueue.sync { EmbeddedWebReader.primeBrowser(pid: t.pid) } }
+                // Chromium builds its tree a moment after it's switched on:
+                // with nothing found yet, try again on the next check.
+                if let found = PageTextReader.signals(pid: t.pid, url: page.url) {
+                    page.signals = found
+                } else {
+                    pageReads.giveBack(page.url)
+                    page.signals = PageSignals()
+                }
+                results[i] = .clean(t, page: page)
+            }
             DispatchQueue.main.async {
                 self?.busy = false
                 self?.apply(results, front: record ? frontTarget : nil)
@@ -369,13 +413,23 @@ final class BrowserWatcher: NSObject {
     /// when its page should be recorded. Everything that closes or covers
     /// something only happens during a session.
     private func apply(_ results: [Inspection], front: BrowserTarget?) {
+        // Chromium browsers whose page was read had their tree switched on.
+        for case .clean(let t, let page?) in results where page.signals != nil && t.kind == .chromium {
+            pagePrimed.insert(t.pid)
+        }
         // The user may have switched apps while the browser was being read.
         if let front, NSWorkspace.shared.frontmostApplication?.processIdentifier == front.pid {
             var seen: [ActivityRecorder.Seen] = []
             for r in results where r.target.pid == front.pid {
                 switch r {
                 case .clean(_, let page?):
-                    seen.append(.init(source: front.bundleID, browser: front.name, url: page.url, title: page.title))
+                    seen.append(.init(source: front.bundleID, browser: front.name, url: page.url, title: page.title,
+                                      signals: page.signals))
+                    if checkMixed, SiteCategory.of(url: page.url) == .mixed {
+                        mixedFront = front.pid
+                    } else if mixedFront == front.pid {
+                        mixedFront = nil
+                    }
                 case .blocked(_, let page, _, _):
                     seen.append(.init(source: front.bundleID, browser: front.name, url: page.url, title: page.title, blocked: true))
                 default:
@@ -383,7 +437,10 @@ final class BrowserWatcher: NSObject {
                 }
             }
             recorder.observe(.browser, seen)
+        } else {
+            mixedFront = nil
         }
+        releasePagePriming()
 
         let live = sessionLive
         var permissionChanged = false
@@ -423,6 +480,15 @@ final class BrowserWatcher: NSObject {
             }
         }
         if permissionChanged { sync() }
+    }
+
+    /// Switches off the trees of browsers primed for page reading, except
+    /// the one showing a mixed site now.
+    private func releasePagePriming() {
+        let release = pagePrimed.filter { $0 != mixedFront }
+        guard !release.isEmpty else { return }
+        pagePrimed.subtract(release)
+        embeddedQueue.async { for pid in release { EmbeddedWebReader.releaseBrowser(pid: pid) } }
     }
 
     private func popUpAndCloseTab(_ t: BrowserTarget, url: String, rule: Rule) {
@@ -600,9 +666,10 @@ final class BrowserWatcher: NSObject {
         lastEmbeddedMonitorRead = now
         let pid = app.processIdentifier
         let rules = live ? ruleSet : RuleSet([])
+        let readMixed = record && checkMixed
         embeddedBusy = true
         embeddedQueue.async { [weak self] in
-            let pages = EmbeddedWebReader.pages(pid: pid)
+            let pages = EmbeddedWebReader.pages(pid: pid, readMixed: readMixed)
             let hit = pages.lazy.compactMap { p in rules.match(p.url).map { (p.url, $0) } }.first
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -612,7 +679,8 @@ final class BrowserWatcher: NSObject {
                     let name = app.localizedName ?? app.bundleIdentifier ?? "An app"
                     let source = "app:" + (app.bundleIdentifier ?? "\(pid)")
                     self.recorder.observe(.embedded, pages.filter(\.isWebsite).map {
-                        ActivityRecorder.Seen(source: source, browser: name, url: $0.url, title: $0.title, blocked: $0.url == hit?.0)
+                        ActivityRecorder.Seen(source: source, browser: name, url: $0.url, title: $0.title, blocked: $0.url == hit?.0,
+                                              signals: $0.signals)
                     })
                 }
                 guard live, self.sessionLive else { return }

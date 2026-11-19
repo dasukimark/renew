@@ -22,11 +22,20 @@ public enum ExplicitTerms {
     ]
 
     /// Medium: sexual slang. Two of these, or one with suggestive context,
-    /// flag a title; one alone doesn't.
+    /// flag a title; one alone doesn't, except on mixed sites
+    /// (`ExplicitScorer.Policy.mixed`).
     public static let medium: [String] = [
-        "cock|cocks", "dick|dicks", "cum|cumming|cumshot", "slut|sluts|slutty", "whore|whores", "ass",
-        "sexy", "kinky", "lewd", "stripper|strippers", "escort|escorts", "busty", "booty", "lingerie", "thot",
-        "twerk|twerking", "bj", "stepmom", "stepsister|stepsis", "stepbro", "stepdaughter", "uncensored",
+        "slut|sluts|slutty", "whore|whores", "sexy", "kinky", "lewd", "busty", "lingerie", "thot",
+        "twerk|twerking",
+    ]
+
+    /// Ambiguous medium: slang with common innocent meanings ("kick-ass",
+    /// "Ford Escort", "summa cum laude", "paint stripper", a family post about
+    /// a stepmom). Counts like medium, but always needs a second signal,
+    /// mixed sites included.
+    public static let ambiguous: [String] = [
+        "ass", "escort|escorts", "uncensored", "booty", "stripper|strippers", "bj", "cum|cumming|cumshot",
+        "dick|dicks", "cock|cocks", "stepmom", "stepsister|stepsis", "stepbro", "stepdaughter",
     ]
 
     /// Profanity: sexual swearing. Counts like medium, but swearing in total
@@ -204,25 +213,30 @@ public struct ExplicitScorer: Sendable {
     private struct Group: Sendable {
         var forms: [(text: String, words: [String])]
         var tier: ExplicitTier
+        /// An ambiguous medium word: never counts for more than `tier.weight`.
+        var ambiguous = false
     }
     private let groups: [Group]
     /// Single-word forms, for a hash lookup per title word.
     private let single: [String: (group: Int, form: Int)]
     /// Multi-word forms, checked phrase by phrase.
     private let phrases: [(group: Int, form: Int, words: [String])]
+    private let strongPhrases: [(group: Int, form: Int, words: [String])]
     private let safeWords: Set<String>
 
     /// Each list item is one word, its forms joined by `|`. The first list a
     /// form appears in wins.
-    public init(strong: [String], medium: [String] = [], profanity: [String] = [], suggestive: [String] = [],
-                media: [String] = [], mild: [String] = [], safeWords: Set<String> = []) {
+    public init(strong: [String], medium: [String] = [], ambiguous: [String] = [], profanity: [String] = [],
+                suggestive: [String] = [], media: [String] = [], mild: [String] = [], safeWords: Set<String> = []) {
         var seen = Set<String>()
         var groups: [Group] = []
         var single: [String: (Int, Int)] = [:]
         var phrases: [(Int, Int, [String])] = []
-        let tiers: [([String], ExplicitTier)] = [(strong, .strong), (medium, .medium), (profanity, .profanity),
-                                                 (suggestive, .suggestive), (media, .media), (mild, .mild)]
-        for (items, tier) in tiers {
+        let tiers: [([String], ExplicitTier, Bool)] = [
+            (strong, .strong, false), (medium, .medium, false), (ambiguous, .medium, true),
+            (profanity, .profanity, false), (suggestive, .suggestive, false), (media, .media, false), (mild, .mild, false),
+        ]
+        for (items, tier, isAmbiguous) in tiers {
             for item in items {
                 var forms: [(String, [String])] = []
                 for text in item.split(separator: "|").map(String.init) {
@@ -232,34 +246,78 @@ public struct ExplicitScorer: Sendable {
                     else { phrases.append((groups.count, forms.count, words)) }
                     forms.append((text, words))
                 }
-                if !forms.isEmpty { groups.append(Group(forms: forms, tier: tier)) }
+                if !forms.isEmpty { groups.append(Group(forms: forms, tier: tier, ambiguous: isAmbiguous)) }
             }
         }
         self.groups = groups
         self.single = single
         self.phrases = phrases
+        strongPhrases = phrases.filter { groups[$0.0].tier == .strong }
         self.safeWords = safeWords
     }
 
     /// The built-in word lists.
     public static let preset = ExplicitScorer(
-        strong: ExplicitTerms.preset, medium: ExplicitTerms.medium, profanity: ExplicitTerms.profanity,
+        strong: ExplicitTerms.preset, medium: ExplicitTerms.medium, ambiguous: ExplicitTerms.ambiguous,
+        profanity: ExplicitTerms.profanity,
         suggestive: ExplicitTerms.suggestive, media: ExplicitTerms.media, mild: ExplicitTerms.mild,
         safeWords: ExplicitTerms.safeWords)
 
-    public func evaluate(_ title: String) -> Result {
+    /// How strictly a title is scored.
+    public struct Policy: Equatable, Sendable {
+        /// What one medium word counts for.
+        public var mediumWeight: Double
+        /// The most suggestive and media words can add up to.
+        public var maxContextTotal: Double
+
+        /// Everywhere but mixed sites.
+        public static let standard = Policy(mediumWeight: ExplicitTier.medium.weight,
+                                            maxContextTotal: ExplicitScorer.maxContextTotal)
+        /// Mixed sites (`SiteCategory.mixed`): one medium word (not an
+        /// ambiguous one) flags, and
+        /// suggestive words can add up to a flag. Swearing stays capped below
+        /// the threshold.
+        public static let mixed = Policy(mediumWeight: 1.0, maxContextTotal: 1.0)
+    }
+
+    public func evaluate(_ title: String, policy: Policy = .standard) -> Result {
         evaluate(variants: TitleNormalizer.variants(title, safeWords: safeWords),
-                 masked: TitleNormalizer.maskedWords(title))
+                 masked: TitleNormalizer.maskedWords(title), policy: policy)
+    }
+
+    /// The distinct strong words in `text` (a whole page's text, say), as
+    /// listed, disguised spellings included.
+    public func strongMatches(in text: String) -> [String] {
+        strongMatches(variants: TitleNormalizer.variants(text, safeWords: safeWords))
+    }
+
+    /// The same, for words already normalized with this scorer's safe words.
+    /// Only looks up strong words, so it stays cheap over thousands of page parts.
+    func strongMatches(variants: [[String]]) -> [String] {
+        var found: [Int: String] = [:]
+        for v in variants {
+            for w in v {
+                if let e = single[w], groups[e.group].tier == .strong, found[e.group] == nil {
+                    found[e.group] = groups[e.group].forms[e.form].text
+                }
+            }
+            for (g, f, words) in strongPhrases where found[g] == nil && TermMatcher.contains(v, words) {
+                found[g] = groups[g].forms[f].text
+            }
+        }
+        return found.sorted { $0.key < $1.key }.map(\.value)
     }
 
     /// Scores already-normalized words, so a caller that also needs them
     /// (`ActivityMatcher`) normalizes the title once. `variants` must use
-    /// this scorer's safe words.
-    func evaluate(variants: [[String]], masked: [String]) -> Result {
-        var hits: [Int: (tier: ExplicitTier, text: String)] = [:]
-        func hit(_ group: Int, _ form: Int, as tier: ExplicitTier) {
-            if let old = hits[group], old.tier >= tier { return }
-            hits[group] = (tier, groups[group].forms[form].text)
+    /// this scorer's safe words. `extra` adds other findings (a site's label
+    /// on a feed) to the score, each with its weight.
+    func evaluate(variants: [[String]], masked: [String], policy: Policy = .standard,
+                  extra: [(text: String, weight: Double)] = []) -> Result {
+        var hits: [Int: (tier: ExplicitTier, text: String, masked: Bool)] = [:]
+        func hit(_ group: Int, _ form: Int, as tier: ExplicitTier, masked: Bool = false) {
+            if let old = hits[group], old.tier > tier || (old.tier == tier && (masked || !old.masked)) { return }
+            hits[group] = (tier, groups[group].forms[form].text, masked)
         }
         for v in variants {
             for w in v { if let e = single[w] { hit(e.group, e.form, as: groups[e.group].tier) } }
@@ -270,26 +328,32 @@ public struct ExplicitScorer: Sendable {
         for m in masked {
             let fitting = single.filter { TitleNormalizer.fits(m, $0.key) }.map(\.value)
             if let e = fitting.min(by: { groups[$0.group].tier < groups[$1.group].tier }) {
-                hit(e.group, e.form, as: min(groups[e.group].tier, .medium))
+                hit(e.group, e.form, as: min(groups[e.group].tier, .medium), masked: true)
             }
         }
 
         var strong: [String] = []
         var contributors: [String] = []
         var other = 0.0, swearing = 0.0, context = 0.0
-        // Strongest first; within a tier, in list order.
+        // Strongest first; within a tier, in list order. A masked word is
+        // never trusted beyond `tier.weight`, like an ambiguous one.
         let found = hits.sorted { a, b in a.value.tier != b.value.tier ? a.value.tier > b.value.tier : a.key < b.key }
-        for (tier, text) in found.map(\.value) {
+        for (group, hit) in found {
+            let (tier, text) = (hit.tier, hit.text)
             switch tier {
             case .strong: strong.append(text)
-            case .medium: other += tier.weight
+            case .medium: other += groups[group].ambiguous || hit.masked ? tier.weight : policy.mediumWeight
             case .profanity, .mild: swearing += tier.weight
             case .suggestive, .media: context += tier.weight
             }
             if tier != .strong { contributors.append(text) }
         }
+        for e in extra {
+            other += e.weight
+            contributors.append(e.text)
+        }
         let score = Double(strong.count) + other + min(swearing, Self.maxSwearingTotal)
-            + min(context, Self.maxContextTotal)
+            + min(context, policy.maxContextTotal)
         return Result(strong: strong, contributors: contributors, score: score,
                       flagged: !strong.isEmpty || score + 1e-9 >= Self.threshold)
     }

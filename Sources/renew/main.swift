@@ -54,7 +54,7 @@ Usage:
   renew monitor watch <LIST>...                        flag visits to these lists' sites ("explicit" = preset)
   renew monitor sites add|remove <SITE>...             flag visits to other sites
   renew monitor words add|remove <WORD>...             flag page titles containing a word or phrase
-  renew monitor words preset on|off                    flag page titles containing common explicit words
+  renew monitor explicit on|off                        flag explicit content (titles, and pages on mixed sites)
   renew flags [--date YYYY-MM-DD]                      show the visits the Monitor flagged (default: today)
   sudo renew uninstall                                 uninstall Renew (only between sessions)
   renew uninstall                                      with the cooling-off on: request uninstall (unlocks after 24 hours)
@@ -324,7 +324,7 @@ case "monitor":
         print("Monitor: \(m.enabled ? "on" : "off")\(m.enabled && st.activity?.enabled == false ? " (but Activity is off, so nothing is checked: `renew activity on`)" : "")")
         print("  Flagged lists: \(m.watchLists.isEmpty ? "none" : m.watchLists.joined(separator: ", "))")
         print("  Other sites:   \(m.customDomains.isEmpty ? "none" : m.customDomains.joined(separator: ", "))")
-        print("  Explicit words in titles: \(m.flagExplicitTerms ? "on" : "off")")
+        print("  Explicit content: \(m.flagExplicitTerms ? "on (titles, and pages on mixed sites)" : "off")")
         print("  Other words:   \(m.customTerms.isEmpty ? "none" : m.customTerms.joined(separator: ", "))")
     }
     func change(_ edit: (inout MonitorSettings) -> Void) {
@@ -355,6 +355,9 @@ case "monitor":
             if rest[0] == "add" { m.customDomains += valid.filter { !m.customDomains.contains($0) } }
             else { m.customDomains.removeAll { valid.contains($0) } }
         }
+    case "explicit":
+        guard rest.count == 1, ["on", "off"].contains(rest[0]) else { die("usage: renew monitor explicit on|off") }
+        change { $0.flagExplicitTerms = rest[0] == "on" }
     case "words", "terms":
         if rest.count == 2, rest[0] == "preset", ["on", "off"].contains(rest[1]) {
             change { $0.flagExplicitTerms = rest[1] == "on" }
@@ -369,7 +372,7 @@ case "monitor":
             die("usage: renew monitor words add|remove <WORD>... | renew monitor words preset on|off")
         }
     default:
-        die("usage: renew monitor [show | on | off | watch LIST... | sites add|remove SITE... | words add|remove WORD... | words preset on|off]")
+        die("usage: renew monitor [show | on | off | watch LIST... | sites add|remove SITE... | words add|remove WORD... | explicit on|off]")
     }
 
 case "activity":

@@ -1,5 +1,6 @@
 import ApplicationServices
 import Foundation
+import RenewShared
 
 /// Reads the pages shown by web views inside ordinary apps (the built-in
 /// browsers of T3 Code, Claude, Codex and other Electron apps, and apps using
@@ -21,17 +22,56 @@ enum EmbeddedWebReader {
     private static let maxDepth = 80
     /// Apps Renew switched AXEnhancedUserInterface on for.
     private static var enhanced: Set<pid_t> = []
+    /// Browsers whose tree Renew switched on to read a mixed site's page,
+    /// by switch, kept apart so `release(except:)` (for embedded apps) leaves
+    /// them alone.
+    private static var browsersManual: Set<pid_t> = []
+    private static var browsersEnhanced: Set<pid_t> = []
+    /// Mixed pages in embedded apps, so each is read at most every few seconds.
+    private static let textReads = PageReadThrottle()
+
+    private struct Switched: OptionSet {
+        let rawValue: Int
+        static let manual = Switched(rawValue: 1)
+        static let enhanced = Switched(rawValue: 2)
+    }
+
+    /// Switches on `pid`'s Accessibility tree: AXManualAccessibility, or
+    /// AXEnhancedUserInterface (if `allowEnhanced`) for apps that reject it.
+    /// Returns the switches Renew turned on; ones already on are left alone,
+    /// so whoever turned them on keeps them.
+    private static func switchOn(_ pid: pid_t, allowEnhanced: Bool) -> Switched {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        func isOn(_ attr: String) -> Bool {
+            var v: CFTypeRef?
+            return AXUIElementCopyAttributeValue(app, attr as CFString, &v) == .success && (v as? Bool) == true
+        }
+        if isOn("AXManualAccessibility") { return [] }
+        let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        if manual != .attributeUnsupported { return .manual }
+        guard allowEnhanced, !isOn("AXEnhancedUserInterface") else { return [] }
+        // Chromium reports an error here but still turns its tree on.
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        return .enhanced
+    }
+
+    private static func switchOff(_ pid: pid_t, _ switches: Switched) {
+        guard !switches.isEmpty else { return }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        if switches.contains(.manual) {
+            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanFalse)
+        }
+        if switches.contains(.enhanced) {
+            AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+        }
+    }
 
     /// Asks the app to expose its Accessibility tree. Repeated on every scan
     /// because Electron forgets it when a renderer restarts.
     static func prime(pid: pid_t) {
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.5)
-        let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        guard manual == .attributeUnsupported, !enhanced.contains(pid) else { return }
-        // Chromium reports an error here but still turns its tree on.
-        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        enhanced.insert(pid)
+        if switchOn(pid, allowEnhanced: !enhanced.contains(pid)).contains(.enhanced) { enhanced.insert(pid) }
     }
 
     /// Turns AXEnhancedUserInterface back off wherever Renew turned it on,
@@ -43,14 +83,31 @@ enum EmbeddedWebReader {
     /// Turns AXEnhancedUserInterface back off for one app, if Renew turned it on.
     static func release(pid: pid_t) {
         guard enhanced.remove(pid) != nil else { return }
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.5)
-        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+        switchOff(pid, .enhanced)
+    }
+
+    /// Asks a Chromium browser to expose its pages' content, so
+    /// `PageTextReader` can read a mixed site. Undone by `releaseBrowser`
+    /// as soon as no mixed site is in front.
+    static func primeBrowser(pid: pid_t) {
+        let on = switchOn(pid, allowEnhanced: !browsersEnhanced.contains(pid))
+        if on.contains(.manual) { browsersManual.insert(pid) }
+        if on.contains(.enhanced) { browsersEnhanced.insert(pid) }
+    }
+
+    /// Switches back off whatever `primeBrowser` switched on for a browser.
+    static func releaseBrowser(pid: pid_t) {
+        var off: Switched = []
+        if browsersManual.remove(pid) != nil { off.insert(.manual) }
+        if browsersEnhanced.remove(pid) != nil { off.insert(.enhanced) }
+        switchOff(pid, off)
     }
 
     struct Page: Equatable {
         let url: String
         let title: String
+        /// What reading the page found (mixed sites only, when asked).
+        var signals: PageSignals? = nil
         var isWebsite: Bool { url.lowercased().hasPrefix("http://") || url.lowercased().hasPrefix("https://") }
     }
 
@@ -64,7 +121,10 @@ enum EmbeddedWebReader {
     /// inside it, so the walk enters web areas, except real websites (http,
     /// https): their content is large and never contains another page that
     /// matters.
-    static func pages(pid: pid_t) -> [Page] {
+    /// With `readMixed`, websites on mixed sites (see `SiteCategory`) are
+    /// also read for `PageSignals`, each at most every
+    /// `PageTextReader.rereadAfter` seconds.
+    static func pages(pid: pid_t, readMixed: Bool = false) -> [Page] {
         prime(pid: pid)
         let app = AXUIElementCreateApplication(pid)
         var ax = AXReader(timeout: 0.5)
@@ -83,7 +143,15 @@ enum EmbeddedWebReader {
                     for attr in [kAXTitleAttribute, kAXDescriptionAttribute] where title.isEmpty {
                         title = ax.string(el, attr)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     }
-                    pages.append(Page(url: u, title: title))
+                    var page = Page(url: u, title: title)
+                    if readMixed, let host = NormalizedURL(u)?.host, SiteCategory.of(url: u) == .mixed,
+                       textReads.take(u) {
+                        var reader = AXReader(timeout: 0.5, deadline: Date().addingTimeInterval(PageTextReader.deadline))
+                        let text = PageTextReader.textParts(of: el, ax: &reader)
+                        if text.main.isEmpty && text.others.isEmpty { textReads.giveBack(u) }
+                        page.signals = PageSignals.find(host: host, parts: text.main, others: text.others)
+                    }
+                    pages.append(page)
                 }
                 if u.lowercased().hasPrefix("http") { continue }
             }

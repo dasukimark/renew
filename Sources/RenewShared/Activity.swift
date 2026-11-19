@@ -50,7 +50,10 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
     public var listRules: [String: [String]]
     /// Extra sites to flag, in blocklist rule syntax.
     public var customDomains: [String]
-    /// Flag page titles containing a word from `ExplicitTerms.preset`.
+    /// Flag explicit content: page titles with words from `ExplicitTerms`,
+    /// and on mixed sites (`SiteCategory.mixed`) stricter title scoring and
+    /// reading the page for the site's own NSFW labels and strong explicit
+    /// words (`PageSignals`). Shown as "Flag explicit content".
     public var flagExplicitTerms: Bool
     /// Extra words or phrases to flag in page titles.
     public var customTerms: [String]
@@ -170,7 +173,9 @@ public struct ActivityFlag: Codable, Hashable, Sendable {
     public var kind: Kind
     /// For `.domain`: the watch list that matched (`explicit`, `custom`, or a blocklist name).
     /// For `.term`: `scoreList` when no single word matched but enough
-    /// suggestive words added up (see `isScore`); otherwise nil.
+    /// suggestive words added up (see `isScore`), `labelList` for a site's
+    /// own NSFW marking, `pageList` for explicit words in the page text;
+    /// otherwise nil.
     public var list: String?
     /// The rule or domain that matched, the word found in the title, or for
     /// a score flag the words that added up ("a, b, c").
@@ -193,10 +198,26 @@ public struct ActivityFlag: Codable, Hashable, Sendable {
     public static let scoreList = "score"
     public var isScore: Bool { kind == .term && list == Self.scoreList }
 
-    /// "Explicit site", "Social list", "Watched site", "Word: …" or "Likely explicit: …".
+    /// A site's own NSFW/18+ marking on the page (`SiteLabel`), stored like
+    /// a score flag for the same reason.
+    public static func siteLabel(_ id: String) -> ActivityFlag { ActivityFlag(kind: .term, list: labelList, match: id) }
+    public static let labelList = "label"
+    public var isSiteLabel: Bool { kind == .term && list == Self.labelList }
+
+    /// Strong explicit words in the page text ("a, b, c").
+    public static func pageWords(_ words: String) -> ActivityFlag { ActivityFlag(kind: .term, list: pageList, match: words) }
+    public static let pageList = "page"
+    public var isPageWords: Bool { kind == .term && list == Self.pageList }
+
+    /// "Explicit site", "Social list", "Watched site", "Word: …", "Likely explicit: …",
+    /// "Site label: …" or "Page words: …".
     public var label: String {
         switch kind {
-        case .term: return isScore ? "Likely explicit: \(match)" : "Word: \(match)"
+        case .term:
+            if isScore { return "Likely explicit: \(match)" }
+            if isSiteLabel { return "Site label: \(match)" }
+            if isPageWords { return "Page words: \(match)" }
+            return "Word: \(match)"
         case .domain:
             switch list {
             case MonitorSettings.explicitListName?: return "Explicit site"
@@ -221,9 +242,11 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
     public var title: String
     /// A running block session replaced the page with the block page.
     public var blocked: Bool
+    /// What page reading found on a mixed site, if anything.
+    public var signals: PageSignals?
 
     public init(id: UUID? = UUID(), start: Date, end: Date, browser: String, url: String, host: String, title: String,
-                blocked: Bool = false) {
+                blocked: Bool = false, signals: PageSignals? = nil) {
         self.id = id
         self.start = start
         self.end = end
@@ -232,11 +255,12 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
         self.host = host
         self.title = title
         self.blocked = blocked
+        self.signals = signals.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     // Old log lines also carry `flags` (from when the app flagged visits);
     // they're ignored; the Monitor keeps its own log.
-    private enum CodingKeys: String, CodingKey { case id, start, end, browser, url, host, title, blocked }
+    private enum CodingKeys: String, CodingKey { case id, start, end, browser, url, host, title, blocked, signals }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -248,6 +272,20 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
         host = try c.decode(String.self, forKey: .host)
         title = try c.decode(String.self, forKey: .title)
         blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
+        signals = try c.decodeIfPresent(PageSignals.self, forKey: .signals)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(id, forKey: .id)
+        try c.encode(start, forKey: .start)
+        try c.encode(end, forKey: .end)
+        try c.encode(browser, forKey: .browser)
+        try c.encode(url, forKey: .url)
+        try c.encode(host, forKey: .host)
+        try c.encode(title, forKey: .title)
+        try c.encode(blocked, forKey: .blocked)
+        if let signals, !signals.isEmpty { try c.encode(signals, forKey: .signals) }
     }
 
     public var duration: TimeInterval { end.timeIntervalSince(start) }
@@ -268,6 +306,7 @@ public struct ActivityEvent: Codable, Equatable, Sendable {
         e.title = String(title.prefix(Self.maxTitleLength))
         e.browser = String(browser.prefix(Self.maxNameLength))
         e.host = String(host.prefix(253))
+        e.signals = signals.map { $0.capped() }.flatMap { $0.isEmpty ? nil : $0 }
         guard !e.host.isEmpty else { return nil }
         if e.duration > Self.maxDuration { e.end = e.start.addingTimeInterval(Self.maxDuration) }
         return e
@@ -365,11 +404,22 @@ public struct TermMatcher: Sendable {
 }
 
 /// Decides which flags a page gets under the Monitor's settings.
+///
+/// Work sites (`SiteCategory.work`) are never flagged. Mixed sites get
+/// stricter title scoring and their page findings (`PageSignals`) checked
+/// when `flagExplicitTerms` is on.
 public struct ActivityMatcher: Sendable {
     private let explicit: DomainSet?
     private let watched: [(list: String, rules: RuleSet)]
     private let explicitTerms: ExplicitScorer?
     private let terms: TermMatcher
+
+    /// Strong words in a page's text needed to flag it.
+    public static let minPageWords = 3
+    /// What site labels on a feed (post labels and hints) add to the title
+    /// score, all together: never enough to flag on their own, so the title
+    /// must also have explicit words.
+    public static let feedLabelWeight = 0.5
 
     /// Blocklist rules come from `settings.listRules`; `explicitDomains` is
     /// the bundled preset, or nil if it isn't loaded.
@@ -387,20 +437,48 @@ public struct ActivityMatcher: Sendable {
     }
 
     /// Whether nothing at all is watched.
-    public var isEmpty: Bool { explicit == nil && watched.isEmpty && explicitTerms == nil && terms.isEmpty }
+    public var isEmpty: Bool {
+        explicit == nil && watched.isEmpty && explicitTerms == nil && terms.isEmpty
+    }
 
-    public func flags(url: String, title: String) -> [ActivityFlag] {
+    public func flags(url: String, title: String, signals: PageSignals? = nil) -> [ActivityFlag] {
+        let n = NormalizedURL(url)
+        let category = SiteCategory.of(url: url)
+        if category == .work { return [] }
+        let mixed = explicitTerms != nil && category == .mixed
+
         var out: [ActivityFlag] = []
-        if let n = NormalizedURL(url) {
+        if let n {
             if let hit = explicit?.match(host: n.host) { out.append(.domain(MonitorSettings.explicitListName, hit)) }
             for (list, rules) in watched {
                 if let rule = rules.match(url) { out.append(.domain(list, rule.description)) }
             }
         }
+
+        // The site's own labels: page-wide ones, or post ones on a single
+        // post, flag; post ones on a feed, and hints, only add to the score.
+        var feedLabels: [String] = []
+        if mixed, let signals {
+            let single = PostURL.isSinglePost(url)
+            for id in signals.labels {
+                switch SiteLabel.named(id)?.scope {
+                case .page?: out.append(.siteLabel(id))
+                case .post?, nil: if single { out.append(.siteLabel(id)) } else { feedLabels.append(id) }
+                case .hint?: feedLabels.append(id)
+                }
+            }
+            if signals.strongWords.count >= Self.minPageWords {
+                out.append(.pageWords(signals.strongWords.joined(separator: ", ")))
+            }
+        }
+
         // Normalized once for both the built-in words and your own.
         let variants = explicitTerms == nil && terms.isEmpty ? [] : TitleNormalizer.variants(title)
         var found = Set<String>()
-        if let r = explicitTerms?.evaluate(variants: variants, masked: TitleNormalizer.maskedWords(title)) {
+        if let r = explicitTerms?.evaluate(variants: variants, masked: TitleNormalizer.maskedWords(title),
+                                           policy: mixed ? .mixed : .standard,
+                                           extra: feedLabels.isEmpty ? [] : [(feedLabels.map { "site label: \($0)" }
+                                               .joined(separator: ", "), Self.feedLabelWeight)]) {
             for t in r.strong { out.append(.term(t)); found.insert(TermMatcher.words(t).joined(separator: " ")) }
             if r.strong.isEmpty && r.flagged { out.append(.score(r.contributors.joined(separator: ", "))) }
         }
@@ -421,13 +499,17 @@ public struct PageObservation: Equatable, Sendable {
     public var url: String
     public var title: String
     public var blocked: Bool
+    /// What page reading found, if the page was read this time.
+    public var signals: PageSignals?
 
-    public init(source: String, browser: String, url: String, title: String, blocked: Bool = false) {
+    public init(source: String, browser: String, url: String, title: String, blocked: Bool = false,
+                signals: PageSignals? = nil) {
         self.source = source
         self.browser = browser
         self.url = url
         self.title = title
         self.blocked = blocked
+        self.signals = signals
     }
 }
 
@@ -463,13 +545,16 @@ public struct VisitTracker: Sendable {
             if var o = open[key] {
                 if !p.title.isEmpty { o.event.title = p.title }
                 o.event.blocked = o.event.blocked || p.blocked
+                if let found = p.signals, !found.isEmpty {
+                    o.event.signals = (o.event.signals ?? PageSignals()).merged(with: found)
+                }
                 o.event.end = now
                 open[key] = o
             } else {
                 counter += 1
                 open[key] = Open(event: ActivityEvent(start: now, end: now, browser: p.browser, url: p.url, host: host,
                                                       title: p.title.isEmpty ? host : p.title,
-                                                      blocked: p.blocked),
+                                                      blocked: p.blocked, signals: p.signals?.capped()),
                                  order: counter)
             }
         }

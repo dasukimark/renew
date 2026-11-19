@@ -233,7 +233,10 @@ public struct Report: Codable, Equatable, Sendable {
                 case let list?: text = "on list '\(list)'"
                 }
             case .term:
-                text = f.isScore ? "likely explicit (\(f.match))" : "word: \(f.match)"
+                if f.isScore { text = "likely explicit (\(f.match))" }
+                else if f.isSiteLabel { text = "site's own label: \(f.match)" }
+                else if f.isPageWords { text = "explicit words on the page (\(f.match))" }
+                else { text = "word: \(f.match)" }
             }
             if !out.contains(text) { out.append(text) }
         }
@@ -258,7 +261,7 @@ public struct Report: Codable, Equatable, Sendable {
 extension MonitorSettings {
     /// What changed from `self` to `new` that flags less, as sentences for a
     /// report: the Monitor turned off, watched lists removed, explicit words
-    /// turned off, sites or words removed. Adding rules isn't listed, and
+    /// (explicit content) turned off, sites or words removed. Adding rules isn't listed, and
     /// neither are edits to a watched blocklist's rules (`listRules`), which
     /// come from editing the blocklist.
     public func loosenings(to new: MonitorSettings) -> [String] {
@@ -269,7 +272,7 @@ extension MonitorSettings {
                        ? "Explicit sites are no longer watched."
                        : "The list '\(list)' is no longer watched.")
         }
-        if flagExplicitTerms && !new.flagExplicitTerms { out.append("Explicit words in page titles are no longer watched.") }
+        if flagExplicitTerms && !new.flagExplicitTerms { out.append("Explicit content is no longer flagged.") }
         let sites = customDomains.filter { !new.customDomains.contains($0) }
         if !sites.isEmpty { out.append("Watched sites removed: \(Self.listed(sites)).") }
         let words = customTerms.filter { !new.customTerms.contains($0) }
