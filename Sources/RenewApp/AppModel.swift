@@ -9,7 +9,6 @@ final class AppModel: ObservableObject {
         case quick = "Quick Block"
         case lists = "Blocklists"
         case activity = "Activity"
-        case monitor = "Monitor"
         case accountability = "Accountability"
         case setup = "Setup"
         var id: String { rawValue }
@@ -19,7 +18,6 @@ final class AppModel: ObservableObject {
             case .quick: return "bolt"
             case .lists: return "list.bullet.rectangle"
             case .activity: return "chart.bar.xaxis"
-            case .monitor: return "flag"
             case .accountability: return "person.2"
             case .setup: return "gearshape"
             }
@@ -27,10 +25,10 @@ final class AppModel: ObservableObject {
     }
 
     @Published var section: Section = .sessions
-    /// The tab shown on the Activity and Monitor pages, here so one page can
-    /// open the other's settings.
+    /// The tab shown on the Activity and Accountability pages, here so one
+    /// page can open another's tab.
     @Published var activityTab: ActivityView.Tab = .dashboard
-    @Published var monitorTab: MonitorView.Tab = .flags
+    @Published var accountabilityTab: AccountabilityView.Tab = .partners
     @Published private(set) var status: Status?
     @Published private(set) var daemonReachable = false
     @Published private(set) var now = Date()
@@ -342,6 +340,22 @@ final class AppModel: ObservableObject {
     /// False if the running service predates the Monitor.
     var monitorSupported: Bool { status?.monitor != nil }
 
+    /// Whether someone holds this Mac accountable, as renewd sees it (see
+    /// `PersistedState.hasAccountabilityPartner`). The Monitor needs one to
+    /// be turned on.
+    var hasPartner: Bool { status?.hasAccountabilityPartner ?? false }
+
+    /// A partner who isn't on the way out: not waiting to approve their
+    /// removal. Only then is turning monitoring on worth suggesting.
+    var hasSettledPartner: Bool {
+        reportsPartners.contains { !pendingReportPartners.contains($0) } || !retainedReportPartners.isEmpty
+    }
+
+    /// While a partner relies on the Monitor, it can't be turned off or
+    /// watch less, and Activity can't be turned off. renewd decides and
+    /// enforces this.
+    var monitoringLocked: Bool { status?.monitoringLocked ?? false }
+
     /// Sends `m` with the current rules of each watched blocklist, since
     /// renewd can't read your lists itself.
     func setMonitor(_ m: MonitorSettings, completion: ((Bool) -> Void)? = nil) {
@@ -358,7 +372,7 @@ final class AppModel: ObservableObject {
         let current = monitor
         guard current.watchLists.contains(where: { $0 != MonitorSettings.explicitListName }) else { return }
         let fresh = current.withListRules(from: lists).normalized()
-        guard fresh.listRules != current.listRules else { return }
+        guard current.listRulesNeedSync(to: fresh, locked: monitoringLocked) else { return }
         monitorListSyncInFlight = true
         log("a watched blocklist changed; updating the Monitor's copy")
         queue.async { [weak self] in

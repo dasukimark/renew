@@ -2,7 +2,7 @@ import SwiftUI
 import RenewShared
 
 /// Activity: the record of pages visited, as a dashboard and a log. Flags
-/// live on the Monitor page.
+/// live on the Accountability page (Monitoring and Flags tabs).
 struct ActivityView: View {
     @ObservedObject var model: AppModel
 

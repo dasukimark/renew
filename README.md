@@ -51,12 +51,12 @@ the window:
 - **Activity**: records the pages you visit. A dashboard of time per site with
   daily totals and averages, and the log of pages you've visited (see
   [Activity](#activity)). Off until you turn it on.
-- **Monitor**: reads that activity and flags visits to explicit or watched sites,
-  or with watched words in their titles (see [Monitor](#monitor)). Off until you
-  turn it on, and needs Activity on.
-- **Accountability**: your partners' emails (reports and check-ins) and a
-  history of what they've been sent (see
-  [Accountability](#accountability)).
+- **Accountability**: three tabs. **Partners**: your partners' emails (reports
+  and check-ins) and a history of what they've been sent (see
+  [Accountability](#accountability)). **Monitoring**: what the Monitor watches;
+  it reads Activity and flags visits to explicit or watched sites, or with
+  watched words in their titles (see [Monitor](#monitor)). **Flags**: what it
+  flagged. The Monitor needs a partner and Activity on.
 - **Setup**: service status, permissions, protections,
   and uninstall (see below).
 
@@ -107,11 +107,12 @@ updating. Turn on the ones you want again.
 ### Accountability
 
 The **Accountability** page brings together everything your partners hear
-about: email reports and check-ins (**Partners**), and **Sent to your
-partners**, a list of the last 200 emails and check-in emails, so you can see
+about. Its **Partners** tab has email reports and check-ins, and **Sent to
+your partners**, a list of the last 200 emails and check-in emails, so you can see
 what they see. Reports still waiting to go out show as *Waiting*.
 The history is kept by renewd in `/var/db/com.renew/partner-log.json`
-(root-only).
+(root-only). The **Monitoring** and **Flags** tabs are the Monitor's settings
+and what it flagged (see [Monitor](#monitor)).
 
 ### Activity
 
@@ -151,8 +152,25 @@ record; it doesn't judge anything (that's the [Monitor](#monitor)).
 
 ### Monitor
 
-Off until you turn it on in **Monitor → Settings** (or `renew monitor on`). The
-Monitor reads the visits Activity records, so it needs Activity on.
+Off until you turn it on in **Accountability → Monitoring** (or `renew monitor
+on`). The Monitor reads the visits Activity records, so it needs Activity on.
+
+- **Needs a partner:** monitoring is for telling someone, so it can't be turned
+  on until you have an accountability partner. The **Partners** tab offers to
+  turn it on (watching explicit sites and explicit content) once you add one.
+- **Locked while you have a partner:** the Monitor can't be turned off, and
+  nothing it watches can be removed: no unchecking a list, turning off
+  **Flag explicit content**, or removing a site or word. Activity can't be
+  turned off either while the Monitor is on, since that would stop it
+  (turning the Monitor on with a partner turns Activity on too). A watched
+  blocklist's sites stay watched even if the blocklist is edited or deleted.
+  Partners are the Mac's, like email reports (which include every user's
+  flags), so they lock every user's Monitor. Adding
+  to what's watched always works. renewd enforces this, so `renew monitor off`
+  and `renew activity off` are refused too. To loosen monitoring, remove your
+  partners (they're asked to approve); once none are left, the lock lifts.
+  Monitoring that was on before a partner was required stays editable until
+  you add one.
 
 - **Flags:** a visit is flagged when its site is on a watched list or its title
   contains a watched word. Nothing is watched until you choose it: **Explicit
@@ -166,7 +184,7 @@ Monitor reads the visits Activity records, so it needs Activity on.
 - **Flags are never rewritten.** Changing a rule only affects visits from then on.
 - **Where:** renewd keeps flags apart from the activity log, in
   `/var/db/com.renew/monitor/<uid>/`, one root-only file per day, for a year
-  (longer than the visits). See them in **Monitor → Flags** or with
+  (longer than the visits). See them in **Accountability → Flags** or with
   `renew flags [--date YYYY-MM-DD]`.
 - **Reports:** with [email reports](#email-reports) on, your accountability
   partners are emailed about flags.
@@ -188,7 +206,7 @@ Monitor reads the visits Activity records, so it needs Activity on.
 - **Mixed sites** (Reddit, X, YouTube, Patreon, Vimeo, Tumblr, Bluesky,
   Facebook, Instagram, TikTok, Pixiv and others, plus Redlib, Nitter, Invidious
   and Piped front ends) get a closer look with **Flag explicit content** on
-  (**Monitor → Settings**, or `renew monitor explicit on`). On those sites
+  (**Accountability → Monitoring**, or `renew monitor explicit on`). On those sites
   only:
   - **Titles** flag more readily: one clearly sexual slang word (like
     "sexy") flags, and suggestive words can add up to a flag. Words with
@@ -262,9 +280,12 @@ check-ins are the only things Renew sends off the Mac.
   `/var/db/com.renew/reports-outbox.json` (root-only) and retries (after 30 s,
   1 min, 5 min, then every 15 min) until the server accepts them, so turning
   off Wi-Fi only delays a report.
-- **Changes are reported too:** turning Activity or the Monitor off, no longer
-  watching a list or explicit words, and removing watched sites or words each
-  send an email. Adding rules, and editing a blocklist's sites, don't.
+- **Monitoring is locked:** while you have a partner, the Monitor can't be
+  turned off or watch less, and Activity can't be turned off (see
+  [Monitor](#monitor)). Blocklists can still be edited, but while locked,
+  removing sites from a watched blocklist (or deleting it) doesn't take them
+  away from the Monitor; added sites are watched too. Blocklist edits aren't
+  reported.
 - **Removing needs approval:** reports can be turned on and partners added at
   any time. Removing a partner or turning reports off (only between block
   sessions) emails your partners an approval link, and **nothing changes until

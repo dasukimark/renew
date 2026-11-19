@@ -280,11 +280,59 @@ extension MonitorSettings {
         return out
     }
 
+    public static let lockedMessage = "Monitoring can't be turned off or watch less while you have an accountability partner. Remove your partners first (they'll be asked to approve)."
+    public static let needsPartnerMessage = "Add an accountability partner before turning on the Monitor."
+
+    /// Why going from `self` to `new` isn't allowed, or nil if it is. With
+    /// a partner and the Monitor on, nothing may loosen (see `loosenings`);
+    /// adding is always fine. Without one, the Monitor can't be turned on,
+    /// but settings left on from before can still be edited or turned off.
+    public func refusal(changingTo new: MonitorSettings, hasPartner: Bool) -> String? {
+        if hasPartner {
+            return enabled && !loosenings(to: new).isEmpty ? Self.lockedMessage : nil
+        }
+        return !enabled && new.enabled ? Self.needsPartnerMessage : nil
+    }
+
+    /// These settings with the rules of each watched blocklist kept from
+    /// `old` as well: while monitoring is locked, editing or deleting a
+    /// watched blocklist adds to what the Monitor watches but never takes
+    /// sites away from it.
+    public func keepingListRules(from old: MonitorSettings) -> MonitorSettings {
+        var s = self
+        for name in watchLists where name != Self.explicitListName {
+            let kept = old.listRules[name] ?? []
+            let added = (listRules[name] ?? []).filter { !kept.contains($0) }
+            if !kept.isEmpty || !added.isEmpty { s.listRules[name] = kept + added }
+        }
+        return s
+    }
+
+    /// Whether sending `fresh` list rules (from the blocklists) would change
+    /// what the Monitor watches. While locked, only added sites do.
+    public func listRulesNeedSync(to fresh: MonitorSettings, locked: Bool) -> Bool {
+        guard locked else { return fresh.listRules != listRules }
+        return fresh.listRules.contains { name, rules in
+            let current = Set(listRules[name] ?? [])
+            return rules.contains { !current.contains($0) }
+        }
+    }
+
     /// The first `limit` items, then how many more, so a report sentence
     /// stays short enough to show in full.
     static func listed(_ items: [String], limit: Int = 15) -> String {
         let shown = items.prefix(limit).joined(separator: ", ")
         return items.count > limit ? "\(shown) and \(items.count - limit) more" : shown
+    }
+}
+
+extension ActivitySettings {
+    public static let lockedMessage = "Activity can't be turned off while the Monitor is on and you have an accountability partner: the Monitor checks what Activity records. Remove your partners first (they'll be asked to approve)."
+
+    /// Why going from `self` to `new` isn't allowed, or nil if it is:
+    /// turning Activity off would quietly stop a Monitor a partner relies on.
+    public func refusal(changingTo new: ActivitySettings, monitor: MonitorSettings, hasPartner: Bool) -> String? {
+        enabled && !new.enabled && hasPartner && monitor.enabled ? Self.lockedMessage : nil
     }
 }
 

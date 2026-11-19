@@ -190,6 +190,14 @@ public struct Status: Codable, Sendable {
     public var monitor: MonitorSettings?
     /// The combined settings daemons sent before the split. Only read.
     public var monitoring: LegacyMonitoringSettings?
+    /// Whether the Mac has an accountability partner (see
+    /// `PersistedState.hasAccountabilityPartner`). nil from daemons that
+    /// predate the monitoring lock.
+    public var hasAccountabilityPartner: Bool?
+    /// Whether the asking user's Monitor is locked: it can't be turned off
+    /// or watch less, and Activity can't be turned off. nil from daemons
+    /// that predate the lock.
+    public var monitoringLocked: Bool?
 
     /// Whether Activity is on, falling back to an older daemon's combined
     /// setting, so recording carries on until renewd is updated too.
@@ -214,8 +222,11 @@ public struct Status: Codable, Sendable {
                 protections: Protections? = nil, coolingOffRemovalAt: Date? = nil,
                 activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil,
                 reportsPartners: [String]? = nil, pendingReportPartners: [String]? = nil,
-                retainedReportPartners: [String]? = nil, reportServerBuiltIn: Bool? = nil) {
+                retainedReportPartners: [String]? = nil, reportServerBuiltIn: Bool? = nil,
+                hasAccountabilityPartner: Bool? = nil, monitoringLocked: Bool? = nil) {
         self.session = session
+        self.hasAccountabilityPartner = hasAccountabilityPartner
+        self.monitoringLocked = monitoringLocked
         self.reportServerBuiltIn = reportServerBuiltIn
         self.reportsURL = reportsURL
         self.reportsPartners = reportsPartners

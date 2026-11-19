@@ -1,38 +1,11 @@
 import SwiftUI
 import RenewShared
 
-/// The Monitor: reads recorded activity as it arrives and flags visits that
-/// match its rules. renewd does the checking; this shows the flags and edits
-/// the rules.
-struct MonitorView: View {
-    @ObservedObject var model: AppModel
+// The Monitor: reads recorded activity as it arrives and flags visits that
+// match its rules. renewd does the checking; these are the Monitoring and
+// Flags tabs of the Accountability page (see `AccountabilityView`).
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case flags = "Flags"
-        case settings = "Settings"
-        var id: String { rawValue }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $model.monitorTab) {
-                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 240)
-            .padding(.vertical, 10)
-            Divider()
-            switch model.monitorTab {
-            case .flags: MonitorFlagsView(model: model)
-            case .settings: MonitorSettingsView(model: model)
-            }
-        }
-        .navigationTitle("Monitor")
-    }
-}
-
-/// Shown on the Monitor page while it has nothing to check or is off.
+/// Shown on the Flags tab while the Monitor has nothing to check or is off.
 private struct MonitorStatusBanner: View {
     @ObservedObject var model: AppModel
 
@@ -45,15 +18,19 @@ private struct MonitorStatusBanner: View {
             }
         } else if model.monitorSupported && !model.monitor.enabled {
             InfoBanner(title: "The Monitor is off",
-                       message: "Turn it on to flag visits to explicit or watched sites, and pages whose titles contain watched words.",
-                       button: "Settings…") { model.monitorTab = .settings }
+                       message: model.hasPartner
+                           ? "Turn it on to flag visits to explicit or watched sites, and pages whose titles contain watched words."
+                           : "Add an accountability partner, then turn it on to flag visits to explicit or watched sites.",
+                       button: model.hasPartner ? "Monitoring…" : "Partners…") {
+                model.accountabilityTab = model.hasPartner ? .monitoring : .partners
+            }
         }
     }
 }
 
 // MARK: flags
 
-private struct MonitorFlagsView: View {
+struct MonitorFlagsView: View {
     @ObservedObject var model: AppModel
 
     @State private var day = Date()
@@ -153,7 +130,7 @@ private struct MonitorFlagsView: View {
 
 // MARK: settings
 
-private struct MonitorSettingsView: View {
+struct MonitorSettingsView: View {
     @ObservedObject var model: AppModel
     @State private var domainDraft = ""
     @State private var termDraft = ""
@@ -161,9 +138,31 @@ private struct MonitorSettingsView: View {
 
     private var settings: MonitorSettings { model.monitor }
     private var editable: Bool { model.daemonReachable && model.monitorSupported && !model.busy }
+    /// With a partner and the Monitor on, nothing can be turned off or
+    /// removed (renewd refuses it too); adding still works.
+    private var locked: Bool { model.monitoringLocked }
+    /// Without a partner the Monitor can't be turned on, so there's nothing
+    /// to set up yet. Settings left on from before stay editable.
+    private var needsPartner: Bool { !model.hasPartner && !settings.enabled }
 
     var body: some View {
         Form {
+            if needsPartner && model.daemonReachable && model.monitorSupported {
+                Section {
+                    InfoBanner(title: "Add a partner first",
+                               message: "Monitoring tells an accountability partner what it flags, so it needs one to turn on.",
+                               button: "Partners…") { model.accountabilityTab = .partners }
+                }
+            }
+            if locked {
+                Section {
+                    Label("Locked while you have an accountability partner. You can add to what's watched, but not remove anything. To loosen monitoring, remove your partners on the Partners tab (they'll be asked to approve).",
+                          systemImage: "lock.fill")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Section {
                 Toggle(isOn: binding(\.enabled)) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -175,6 +174,7 @@ private struct MonitorSettingsView: View {
                     }
                 }
                 .toggleStyle(.switch)
+                .disabled(locked || needsPartner)
                 if model.isInstalled && model.daemonReachable && !model.monitorSupported {
                     Text("The running background service predates the Monitor. Update Renew to turn it on.")
                         .font(.caption)
@@ -199,89 +199,106 @@ private struct MonitorSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section {
-                listToggle(MonitorSettings.explicitListName, title: "Explicit sites",
-                           detail: explicitCount.map { "Preset: \($0.formatted()) adult sites from the open StevenBlack/hosts list" }
-                               ?? "Preset list of adult sites from the open StevenBlack/hosts list")
-                ForEach(model.sortedListNames, id: \.self) { name in
-                    let count = model.lists[name]?.count ?? 0
-                    listToggle(name, title: "\(name.capitalized) blocklist", detail: count == 1 ? "1 site" : "\(count) sites")
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Other sites")
-                    HStack {
-                        TextField("Add a site, e.g. example.com", text: $domainDraft)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(addDomain)
-                        Button("Add", action: addDomain)
-                            .disabled(domainDraft.trimmingCharacters(in: .whitespaces).isEmpty || !editable)
+            Group {
+                Section {
+                    listToggle(MonitorSettings.explicitListName, title: "Explicit sites",
+                               detail: explicitCount.map { "Preset: \($0.formatted()) adult sites from the open StevenBlack/hosts list" }
+                                   ?? "Preset list of adult sites from the open StevenBlack/hosts list")
+                    ForEach(model.sortedListNames, id: \.self) { name in
+                        let count = model.lists[name]?.count ?? 0
+                        listToggle(name, title: "\(name.capitalized) blocklist", detail: count == 1 ? "1 site" : "\(count) sites")
                     }
-                    if !settings.customDomains.isEmpty {
-                        FlowLayout {
-                            ForEach(settings.customDomains, id: \.self) { d in
-                                RemovableChip(text: d) { update { $0.customDomains.removeAll { $0 == d } } }
-                                    .disabled(!editable)
+                    // Watched lists whose blocklist was deleted: the Monitor
+                    // still has their sites, so they stay visible (and can be
+                    // unchecked when not locked).
+                    ForEach(deletedWatchedLists, id: \.self) { name in
+                        let count = settings.listRules[name]?.count ?? 0
+                        listToggle(name, title: "\(name.capitalized) blocklist (deleted)",
+                                   detail: "The Monitor keeps its \(count == 1 ? "1 site" : "\(count) sites")")
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Other sites")
+                        HStack {
+                            TextField("Add a site, e.g. example.com", text: $domainDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(addDomain)
+                            Button("Add", action: addDomain)
+                                .disabled(domainDraft.trimmingCharacters(in: .whitespaces).isEmpty || !editable)
+                        }
+                        if !settings.customDomains.isEmpty {
+                            FlowLayout {
+                                ForEach(settings.customDomains, id: \.self) { d in
+                                    RemovableChip(text: d, remove: locked ? nil : { update { $0.customDomains.removeAll { $0 == d } } })
+                                        .disabled(!editable)
+                                }
                             }
                         }
                     }
+                } header: {
+                    Text("Flag visits to")
+                } footer: {
+                    Text("Uses the same rules as blocklists: a site includes its subdomains, and `keyword:` rules match anywhere in the address. Changes to a watched blocklist reach the Monitor the next time Renew syncs.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } header: {
-                Text("Flag visits to")
-            } footer: {
-                Text("Uses the same rules as blocklists: a site includes its subdomains, and `keyword:` rules match anywhere in the address. Changes to a watched blocklist reach the Monitor the next time Renew syncs.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
 
-            Section {
-                Toggle(isOn: binding(\.flagExplicitTerms)) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Flag explicit content")
-                        Text("Page titles with explicit words or adult site names, including disguised spellings and suggestive combinations. On sites like Reddit, X and YouTube, also reads the visible text of the page for the site's own NSFW labels and explicit words. Page text never leaves the Mac.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                Section {
+                    Toggle(isOn: binding(\.flagExplicitTerms)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Flag explicit content")
+                            Text("Page titles with explicit words or adult site names, including disguised spellings and suggestive combinations. On sites like Reddit, X and YouTube, also reads the visible text of the page for the site's own NSFW labels and explicit words. Page text never leaves the Mac.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .toggleStyle(.switch)
+                    .disabled(locked && settings.flagExplicitTerms)
+                } header: {
+                    Text("Explicit content")
+                } footer: {
+                    Text("Work sites (Slack, Jira, GitHub, Google Docs, Gmail…) are never flagged.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .toggleStyle(.switch)
-            } header: {
-                Text("Explicit content")
-            } footer: {
-                Text("Work sites (Slack, Jira, GitHub, Google Docs, Gmail…) are never flagged.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
 
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        TextField("Add a word or phrase", text: $termDraft)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(addTerm)
-                        Button("Add", action: addTerm)
-                            .disabled(MonitorSettings.cleanTerm(termDraft).isEmpty || !editable)
-                    }
-                    if !settings.customTerms.isEmpty {
-                        FlowLayout {
-                            ForEach(settings.customTerms, id: \.self) { t in
-                                RemovableChip(text: t) { update { $0.customTerms.removeAll { $0 == t } } }
-                                    .disabled(!editable)
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            TextField("Add a word or phrase", text: $termDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(addTerm)
+                            Button("Add", action: addTerm)
+                                .disabled(MonitorSettings.cleanTerm(termDraft).isEmpty || !editable)
+                        }
+                        if !settings.customTerms.isEmpty {
+                            FlowLayout {
+                                ForEach(settings.customTerms, id: \.self) { t in
+                                    RemovableChip(text: t, remove: locked ? nil : { update { $0.customTerms.removeAll { $0 == t } } })
+                                        .disabled(!editable)
+                                }
                             }
                         }
                     }
+                } header: {
+                    Text("Other words")
+                } footer: {
+                    Text("Flags page titles containing any of these. Words match whole words, ignoring case and accents, so “sex” doesn't match “Essex”.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } header: {
-                Text("Other words")
-            } footer: {
-                Text("Flags page titles containing any of these. Words match whole words, ignoring case and accents, so “sex” doesn't match “Essex”.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
+            .disabled(needsPartner)
         }
         .formStyle(.grouped)
         .disabled(!model.daemonReachable || !model.monitorSupported)
         .onAppear {
             ExplicitDomains.count { explicitCount = $0 > 0 ? $0 : nil }
         }
+    }
+
+    private var deletedWatchedLists: [String] {
+        let existing = Set(model.sortedListNames.map { $0.lowercased() })
+        return settings.watchLists.filter { $0 != MonitorSettings.explicitListName && !existing.contains($0) }
     }
 
     private func binding(_ key: WritableKeyPath<MonitorSettings, Bool>) -> Binding<Bool> {
@@ -304,6 +321,7 @@ private struct MonitorSettingsView: View {
             }
         }
         .toggleStyle(.checkbox)
+        .disabled(locked && settings.watchLists.contains(name))
     }
 
     private func update(_ change: (inout MonitorSettings) -> Void) {

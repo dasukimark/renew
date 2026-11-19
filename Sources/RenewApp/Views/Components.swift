@@ -336,9 +336,14 @@ struct ActivityToggle: View {
         Toggle("Record browsing", isOn: Binding(get: { model.activity.enabled },
                                                 set: { model.setActivity(ActivitySettings(enabled: $0)) }))
             .toggleStyle(.switch)
-            .disabled(!model.daemonReachable || !model.activitySupported || model.busy)
-            .help(ActivityCopy.what + "\n\n" + ActivityCopy.kept)
+            .disabled(!model.daemonReachable || !model.activitySupported || model.busy || locked)
+            .help(locked ? "Activity can't be turned off while the Monitor is on and you have an accountability partner. To turn it off, remove your partners in Accountability (they'll be asked to approve)."
+                  : ActivityCopy.what + "\n\n" + ActivityCopy.kept)
     }
+
+    /// The Monitor checks what Activity records, so a partner's Monitor
+    /// keeps Activity on.
+    private var locked: Bool { model.monitoringLocked && model.activity.enabled }
 }
 
 /// Shown above Activity's dashboard and log: that it's off (with a button
@@ -381,22 +386,25 @@ struct FlagBadge: View {
     }
 }
 
-/// A site or word with a remove button.
+/// A chip with a remove button, or without one when `remove` is nil
+/// (the item can't be removed right now).
 struct RemovableChip: View {
     let text: String
-    let remove: () -> Void
+    var remove: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 4) {
             Text(text).font(.callout)
-            Button(action: remove) {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            if let remove {
+                Button(action: remove) {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Remove")
             }
-            .buttonStyle(.borderless)
-            .help("Remove")
         }
         .padding(.leading, 8)
-        .padding(.trailing, 4)
+        .padding(.trailing, remove == nil ? 8 : 4)
         .padding(.vertical, 4)
         .background(Color.secondary.opacity(0.12), in: Capsule())
     }

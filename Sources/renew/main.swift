@@ -46,11 +46,14 @@ Usage:
   renew reports test                                   send a test report
   renew protections                                    show which hardening protections are on
   renew protections on|off <NAME>...                   turn protections on, or off (between sessions only)
-  renew activity on|off                                record the pages you visit, or stop
+  renew activity on|off                                record the pages you visit, or stop (can't stop while
+                                                       the Monitor is on and you have a partner)
   renew activity [--date YYYY-MM-DD]                   show the pages you visited (default: today)
   renew stats [--days N] [--from D] [--to D] [--site S]  time per site: totals and daily averages (default: 7 days)
   renew monitor                                        show what the Monitor flags
-  renew monitor on|off                                 turn the Monitor on or off (needs Activity on)
+  renew monitor on|off                                 turn the Monitor on (needs a partner and Activity on)
+                                                       or off; with a partner it can't be turned off or
+                                                       watch less, only add (remove partners first)
   renew monitor watch <LIST>...                        flag visits to these lists' sites ("explicit" = preset)
   renew monitor sites add|remove <SITE>...             flag visits to other sites
   renew monitor words add|remove <WORD>...             flag page titles containing a word or phrase
@@ -157,7 +160,7 @@ func syncSchedules() {
 func syncMonitorLists() {
     guard let status = (try? DaemonClient.send(Request(cmd: .status)))?.status, let m = status.monitor else { return }
     let fresh = m.withListRules(from: ListStore.all()).normalized()
-    guard fresh.listRules != m.listRules else { return }
+    guard m.listRulesNeedSync(to: fresh, locked: status.monitoringLocked ?? false) else { return }
     do {
         let r = try DaemonClient.send(Request(cmd: .setMonitorListRules, monitor: fresh))
         if r.ok {

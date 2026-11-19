@@ -61,6 +61,22 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// once and moved to the console user (see `migrateMonitoring`).
     public var monitoring: LegacyMonitoringSettings?
 
+    /// Whether anyone is holding this Mac accountable: partners getting
+    /// email reports (including ones waiting to approve their removal), or
+    /// partners who declined their removal and are still monitored. While
+    /// there is one, the Monitor can't be turned off or watch less.
+    public var hasAccountabilityPartner: Bool {
+        !(reports?.partnerEmails.isEmpty ?? true)
+            || (retainedMonitoring ?? []).contains { !$0.partnerEmails.isEmpty }
+    }
+
+    /// Whether `uid`'s Monitor is locked: on, with a partner relying on it.
+    /// Partners are the Mac's, like email reports, which carry every user's
+    /// flags, so they lock every user's Monitor.
+    public func monitoringLocked(for uid: uid_t) -> Bool {
+        hasAccountabilityPartner && monitor(for: uid).enabled
+    }
+
     public func activity(for uid: uid_t) -> ActivitySettings {
         activityByUser?[String(uid)] ?? .off
     }

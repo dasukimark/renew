@@ -1,9 +1,43 @@
 import SwiftUI
 import RenewShared
 
+/// Accountability: your partners, what the Monitor watches for them, and
+/// what it flagged. Monitoring only makes sense with someone to tell, so it
+/// lives here: it needs a partner to turn on, and while there is one it
+/// can't be turned off or watch less.
+struct AccountabilityView: View {
+    @ObservedObject var model: AppModel
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case partners = "Partners"
+        case monitoring = "Monitoring"
+        case flags = "Flags"
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $model.accountabilityTab) {
+                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 360)
+            .padding(.vertical, 10)
+            Divider()
+            switch model.accountabilityTab {
+            case .partners: PartnersView(model: model)
+            case .monitoring: MonitorSettingsView(model: model)
+            case .flags: MonitorFlagsView(model: model)
+            }
+        }
+        .navigationTitle("Accountability")
+    }
+}
+
 /// Everything your accountability partners hear about: email reports (with
 /// check-ins), and a history of what they were told.
-struct AccountabilityView: View {
+private struct PartnersView: View {
     @ObservedObject var model: AppModel
     @State private var newPartner = ""
     @State private var reportURLDraft = ""
@@ -13,11 +47,18 @@ struct AccountabilityView: View {
 
     var body: some View {
         Form {
+            if showTurnOnMonitoring {
+                Section {
+                    InfoBanner(title: "Turn on monitoring",
+                               message: "Flag visits to explicit sites and explicit content, and email your partners about them. Once it's on, it can't be turned off or watch less while you have a partner.",
+                               button: "Turn On") { turnOnMonitoring() }
+                        .disabled(model.busy)
+                }
+            }
             partnerSection
             historySection
         }
         .formStyle(.grouped)
-        .navigationTitle("Accountability")
         .onAppear {
             reportURLDraft = model.reportsURL ?? ""
             model.loadPartnerHistory()
@@ -45,6 +86,24 @@ struct AccountabilityView: View {
         } message: {
             Text("Your partners are emailed a link to approve. Reports keep going to them until one approves; if they decline, nothing changes.")
         }
+    }
+
+    // MARK: monitoring
+
+    /// Only with a partner who isn't being removed, and a service that
+    /// keeps Activity on with the Monitor (it reports the lock).
+    private var showTurnOnMonitoring: Bool {
+        model.hasSettledPartner && model.daemonReachable && model.monitorSupported && model.activitySupported
+            && model.status?.monitoringLocked != nil && !model.monitor.enabled
+    }
+
+    /// renewd turns Activity on with it: the Monitor checks what it records.
+    private func turnOnMonitoring() {
+        var m = model.monitor
+        m.enabled = true
+        if !m.watchLists.contains(MonitorSettings.explicitListName) { m.watchLists.append(MonitorSettings.explicitListName) }
+        m.flagExplicitTerms = true
+        model.setMonitor(m)
     }
 
     // MARK: partners (email reports)
