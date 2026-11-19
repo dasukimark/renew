@@ -296,17 +296,17 @@ final class Daemon: @unchecked Sendable {
 
         case .setActivity:
             guard let a = req.activity else { return fail("Missing Activity setting.") }
-            setActivity(a, by: uid)
+            if let error = setActivity(a, by: uid) { return fail(error) }
 
         case .setMonitor:
             guard let m = req.monitor else { return fail("Missing Monitor settings.") }
-            setMonitor(m, by: uid)
+            if let error = setMonitor(m, by: uid) { return fail(error) }
 
         case .setMonitorListRules:
             guard let rules = req.monitor?.listRules else { return fail("Missing list rules.") }
             var m = state.monitor(for: uid)
             m.listRules = rules
-            setMonitor(m, by: uid)
+            if let error = setMonitor(m, by: uid) { return fail(error) }
 
         case .recordActivity:
             let events = req.events ?? []
@@ -499,16 +499,23 @@ final class Daemon: @unchecked Sendable {
         return nil
     }
 
-    /// Each user changes only their own settings, at any time.
-    private func setActivity(_ requested: ActivitySettings, by uid: uid_t) {
+    /// Each user changes only their own settings, but can't turn Activity
+    /// off while their Monitor is on and they have a partner.
+    private func setActivity(_ requested: ActivitySettings, by uid: uid_t) -> String? {
         let old = state.activity(for: uid)
-        guard requested.enabled != old.enabled else { return }
+        guard requested.enabled != old.enabled else { return nil }
+        if let refusal = old.refusal(changingTo: requested, monitor: state.monitor(for: uid),
+                                     hasPartner: state.hasAccountabilityPartner) {
+            log("refused turning Activity off for uid \(uid): monitoring is locked by a partner")
+            return refusal
+        }
         // renewd keeps the time it went off itself; a client's value is ignored.
         let new = ActivitySettings(enabled: requested.enabled, offSince: requested.enabled ? nil : Date())
         state.setActivity(new, for: uid)
         StateStore.save(state)
         log("Activity recording turned \(new.enabled ? "on" : "off") by uid \(uid)")
         if !new.enabled { reporter.add(changes: ["Activity recording was turned off, so nothing is checked by the Monitor."], uid: uid) }
+        return nil
     }
 
     /// Copies flags the app saved inside visits before the Monitor had its
@@ -527,13 +534,31 @@ final class Daemon: @unchecked Sendable {
         }
     }
 
-    /// Each user changes only their own settings, at any time. With email
-    /// reports on, the partner is told when the Monitor is turned off or
-    /// watches less (see `MonitorSettings.loosenings`).
-    private func setMonitor(_ requested: MonitorSettings, by uid: uid_t) {
-        let new = requested.normalized()
-        let old = state.monitor(for: uid)
-        guard new != old else { return }
+    /// Each user changes only their own settings. With a partner the
+    /// Monitor can't be turned off or watch less, and without one it can't
+    /// be turned on (see `MonitorSettings.refusal`). While locked, a watched
+    /// blocklist's sites can be added to but not taken away. Turning it on
+    /// with a partner turns Activity on too, so the lock always has visits
+    /// to check. Loosenings still allowed are reported (see
+    /// `MonitorSettings.loosenings`).
+    private func setMonitor(_ requested: MonitorSettings, by uid: uid_t) -> String? {
+        // Compared normalized, so entries today's rules would drop from the
+        // stored settings don't look like something being removed.
+        let old = state.monitor(for: uid).normalized()
+        let stored = state.monitor(for: uid)
+        let hasPartner = state.hasAccountabilityPartner
+        var new = requested.normalized()
+        if let refusal = old.refusal(changingTo: new, hasPartner: hasPartner) {
+            log("refused a Monitor change for uid \(uid): \(refusal)")
+            return refusal
+        }
+        if hasPartner && old.enabled { new = new.keepingListRules(from: old).normalized() }
+        let turnActivityOn = hasPartner && new.enabled && !state.activity(for: uid).enabled
+        guard new != stored || turnActivityOn else { return nil }
+        if turnActivityOn {
+            state.setActivity(ActivitySettings(enabled: true), for: uid)
+            log("Activity recording turned on by uid \(uid) with the Monitor")
+        }
         state.setMonitor(new, for: uid)
         monitorEngine.invalidate(uid)
         StateStore.save(state)
@@ -546,6 +571,7 @@ final class Daemon: @unchecked Sendable {
             log("Monitor rules changed by uid \(uid): lists \(new.watchLists) (\(rules) rules), \(new.customDomains.count) sites, explicit content \(new.flagExplicitTerms ? "on" : "off"), \(new.customTerms.count) words")
         }
         reporter.add(changes: old.loosenings(to: new), uid: uid)
+        return nil
     }
 
     /// Turned on, or partners added, at any time; partners removed, the
@@ -952,7 +978,9 @@ final class Daemon: @unchecked Sendable {
             pendingReportPartners: waitingPartners.intersection(state.reports?.partnerEmails ?? []).sorted(),
             retainedReportPartners: Set((state.retainedMonitoring ?? []).flatMap(\.partnerEmails))
                 .subtracting(state.reports?.partnerEmails ?? []).sorted(),
-            reportServerBuiltIn: builtInServer() != nil
+            reportServerBuiltIn: builtInServer() != nil,
+            hasAccountabilityPartner: state.hasAccountabilityPartner,
+            monitoringLocked: requestUID.map { state.monitoringLocked(for: $0) } ?? false
         )
     }
 

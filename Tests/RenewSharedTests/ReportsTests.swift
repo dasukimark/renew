@@ -267,4 +267,98 @@ struct ReportsTests {
         edited.listRules = ["games": ["play.example"]]
         #expect(old.loosenings(to: edited).isEmpty)
     }
+
+    @Test func partnerLocksMonitoringButAllowsAdding() {
+        let old = MonitorSettings(enabled: true, watchLists: ["explicit", "games"], listRules: ["games": ["play.example"]],
+                                  customDomains: ["a.example"], flagExplicitTerms: true, customTerms: ["casino"])
+        var off = old
+        off.enabled = false
+        var unwatched = old
+        unwatched.watchLists = ["games"]
+        var noExplicit = old
+        noExplicit.flagExplicitTerms = false
+        var noSite = old
+        noSite.customDomains = []
+        var noWord = old
+        noWord.customTerms = []
+        for loosened in [off, unwatched, noExplicit, noSite, noWord] {
+            #expect(old.refusal(changingTo: loosened, hasPartner: true) == MonitorSettings.lockedMessage)
+        }
+
+        var more = old
+        more.watchLists.append("video")
+        more.customDomains.append("b.example")
+        more.customTerms.append("dice")
+        #expect(old.refusal(changingTo: more, hasPartner: true) == nil)
+
+        var edited = old
+        edited.listRules = ["games": []]
+        #expect(old.refusal(changingTo: edited, hasPartner: true) == nil)
+
+        // While the Monitor is off it watches nothing, so its rules can be edited.
+        var paused = old
+        paused.enabled = false
+        var pausedFewer = paused
+        pausedFewer.customTerms = []
+        #expect(paused.refusal(changingTo: pausedFewer, hasPartner: true) == nil)
+    }
+
+    @Test func monitorNeedsPartnerToTurnOn() {
+        let off = MonitorSettings(watchLists: ["explicit"])
+        var on = off
+        on.enabled = true
+        #expect(off.refusal(changingTo: on, hasPartner: false) == MonitorSettings.needsPartnerMessage)
+        #expect(off.refusal(changingTo: on, hasPartner: true) == nil)
+        // Settings left on from before a partner was required stay editable.
+        var fewer = on
+        fewer.watchLists = []
+        #expect(on.refusal(changingTo: off, hasPartner: false) == nil)
+        #expect(on.refusal(changingTo: fewer, hasPartner: false) == nil)
+    }
+
+    @Test func activityStaysOnWhilePartnerReliesOnMonitor() {
+        let on = ActivitySettings(enabled: true)
+        let off = ActivitySettings.off
+        let monitorOn = MonitorSettings(enabled: true)
+        #expect(on.refusal(changingTo: off, monitor: monitorOn, hasPartner: true) == ActivitySettings.lockedMessage)
+        #expect(on.refusal(changingTo: off, monitor: .off, hasPartner: true) == nil)
+        #expect(on.refusal(changingTo: off, monitor: monitorOn, hasPartner: false) == nil)
+        #expect(off.refusal(changingTo: on, monitor: monitorOn, hasPartner: true) == nil)
+    }
+
+    @Test func accountabilityPartnerIncludesRetained() {
+        var state = PersistedState()
+        #expect(!state.hasAccountabilityPartner)
+        state.reports = ReportDestination(partnerEmails: ["a@example.com"], url: nil, token: nil)
+        #expect(state.hasAccountabilityPartner)
+        state.reports = nil
+        state.retainedMonitoring = [ReportTarget(partnerEmails: ["b@example.com"],
+                                                 server: ReportServer(url: "https://reports.example", token: "t"))]
+        #expect(state.hasAccountabilityPartner)
+    }
+
+    @Test func lockedMonitorKeepsWatchedBlocklistSites() {
+        let old = MonitorSettings(enabled: true, watchLists: ["games"], listRules: ["games": ["a.example", "b.example"]])
+        var shrunk = old
+        shrunk.listRules = ["games": ["b.example", "c.example"]]
+        #expect(shrunk.keepingListRules(from: old).listRules == ["games": ["a.example", "b.example", "c.example"]])
+        var deleted = old
+        deleted.listRules = [:]
+        #expect(deleted.keepingListRules(from: old).listRules == old.listRules)
+
+        // While locked only added sites need sending; otherwise any change does.
+        #expect(!old.listRulesNeedSync(to: deleted, locked: true))
+        #expect(old.listRulesNeedSync(to: deleted, locked: false))
+        #expect(old.listRulesNeedSync(to: shrunk, locked: true))
+        #expect(!old.listRulesNeedSync(to: old, locked: false))
+    }
+
+    @Test func lockIsPerUsersMonitorButPartnersAreTheMacs() {
+        var state = PersistedState()
+        state.setMonitor(MonitorSettings(enabled: true), for: 501)
+        #expect(!state.monitoringLocked(for: 501))
+        state.reports = ReportDestination(partnerEmails: ["a@example.com"])
+        #expect(state.monitoringLocked(for: 501))
+        #expect(!state.monitoringLocked(for: 502))
+    }
 }
