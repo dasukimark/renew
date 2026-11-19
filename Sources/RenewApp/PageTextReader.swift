@@ -14,12 +14,14 @@ enum PageTextReader {
     static let maxNodes = 4_000
     static let maxCharacters = 60_000
     static let deadline: TimeInterval = 1
-    /// How often one page is read again while it stays in front (feeds load more as you scroll).
-    static let rereadAfter: TimeInterval = 5
+    /// How often one page is read again while it stays in front (feeds
+    /// load more as you scroll). A newly opened page is read straight away.
+    static let rereadAfter: TimeInterval = 15
 
     /// What the front window of `pid` shows at `url`, or nil if its page
     /// couldn't be found or has no text yet (a Chromium tree just switched on).
-    static func signals(pid: pid_t, url: String) -> PageSignals? {
+    /// Only what's new since `state` last read `key` is returned.
+    static func signals(pid: pid_t, url: String, state: PageReadState, key: String) -> PageSignals? {
         guard let host = NormalizedURL(url)?.host else { return nil }
         let app = AXUIElementCreateApplication(pid)
         var ax = AXReader(timeout: 0.5, deadline: Date().addingTimeInterval(deadline))
@@ -27,7 +29,7 @@ enum PageTextReader {
               let area = webArea(in: window, url: url, ax: &ax) else { return nil }
         let text = textParts(of: area, ax: &ax)
         guard !text.main.isEmpty || !text.others.isEmpty else { return nil }
-        return PageSignals.find(host: host, parts: text.main, others: text.others)
+        return state.findings(key, host: host, parts: text.main, others: text.others)
     }
 
     /// An address without its fragment, trailing slash and case, to compare
@@ -108,21 +110,4 @@ enum PageTextReader {
         }
         return (main, others)
     }
-}
-
-/// Lets each page be read at most every `PageTextReader.rereadAfter`
-/// seconds. Not locked: use it from one serial queue.
-final class PageReadThrottle {
-    private var last: [String: Date] = [:]
-
-    /// Whether `url` is due a read; if so, counts it as read now.
-    func take(_ url: String, now: Date = Date()) -> Bool {
-        guard now.timeIntervalSince(last[url] ?? .distantPast) >= PageTextReader.rereadAfter else { return false }
-        last[url] = now
-        if last.count > 200 { last = last.filter { now.timeIntervalSince($0.value) < 60 } }
-        return true
-    }
-
-    /// Takes back a read that found nothing, so the page is tried again on the next check.
-    func giveBack(_ url: String) { last[url] = nil }
 }

@@ -88,6 +88,50 @@ struct PageSignalsTests {
         #expect(words.strongWords == ["porn"])
     }
 
+    @Test func readStateReportsOnlyNewText() {
+        let state = PageReadState(interval: 15)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        let key = "1|https://x.com/home"
+        #expect(state.take(key, now: t0))
+        #expect(!state.take(key, now: t0 + 5))
+        #expect(state.findings(key, host: "x.com", parts: ["NSFW", "hello"]).labels == ["NSFW tag"])
+        #expect(state.take(key, now: t0 + 15))
+        // Read again with more loaded: only the new text's findings.
+        #expect(state.findings(key, host: "x.com", parts: ["NSFW", "hello", "porn"])
+                == PageSignals(strongWords: ["porn"]))
+        // Nothing new: nothing found.
+        #expect(state.findings(key, host: "x.com", parts: ["NSFW", "porn"]).isEmpty)
+        // A post label first seen in a reply, then on the post itself, counts.
+        let post = "1|https://x.com/a/status/1"
+        #expect(state.findings(post, host: "x.com", parts: [], others: ["potentially sensitive content"]).labels.isEmpty)
+        #expect(state.findings(post, host: "x.com", parts: ["potentially sensitive content"]).labels
+                == ["sensitive media warning"])
+    }
+
+    @Test func forgottenPagesAreCheckedAfresh() {
+        let state = PageReadState(interval: 15)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        let a = "1|https://x.com/home", b = "2|https://x.com/home"
+        _ = state.take(a, now: t0)
+        #expect(state.findings(a, host: "x.com", parts: ["NSFW"]).labels == ["NSFW tag"])
+        // Another browser showing the same page has its own record.
+        #expect(state.findings(b, host: "x.com", parts: ["NSFW"]).labels == ["NSFW tag"])
+        state.keep(only: [b])
+        #expect(state.take(a, now: t0 + 1))
+        #expect(state.findings(a, host: "x.com", parts: ["NSFW"]).labels == ["NSFW tag"])
+        state.reset()
+        #expect(state.findings(b, host: "x.com", parts: ["NSFW"]).labels == ["NSFW tag"])
+        // A read that found nothing is retried straight away.
+        _ = state.take(b, now: t0)
+        state.giveBack(b)
+        #expect(state.take(b, now: t0 + 1))
+    }
+
+    @Test func manyStrongPartsAreAllChecked() {
+        let parts = (0..<30).map { "part \($0) porn" } + ["hentai"]
+        #expect(PageSignals.find(host: "x.com", parts: parts).strongWords.contains("hentai"))
+    }
+
     @Test func strongOnlyLookupMatchesFullScoring() {
         let s = ExplicitScorer.preset
         for text in ["free porn xxx videos", "hot sexy girls", "big ass", "hentai and porn", "the weather"] {

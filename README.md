@@ -205,7 +205,9 @@ Monitor reads the visits Activity records, so it needs Activity on.
     or more different strong words flag the visit ("Page words: …"); each
     piece of text on the page is read on its own. The page text is dropped straight away;
     only the labels and words found are kept with the visit. The front page is
-    read at most every 5 seconds. Chrome-based browsers only expose page text
+    read when it opens and again every 15 seconds while it stays in front;
+    text already checked during the same visit isn't checked again. (A post
+    scrolled past between two reads can be missed.) Chrome-based browsers only expose page text
     with their accessibility tree on, so Renew turns it on while a mixed site
     is in front and off again as soon as one isn't (unless something else had
     already turned it on).
