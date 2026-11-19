@@ -140,7 +140,6 @@ final class AppModel: ObservableObject {
             daemonReachable = true
             reloadIfFilesChanged()
             syncSchedules()
-            syncMonitorLists()
         } else {
             daemonReachable = false
         }
@@ -340,6 +339,10 @@ final class AppModel: ObservableObject {
     /// False if the running service predates the Monitor.
     var monitorSupported: Bool { status?.monitor != nil }
 
+    /// False if the running service predates monitoring lists (it watched
+    /// blocklists instead), so changing its settings would drop the lists.
+    var monitorListsSupported: Bool { status?.monitorLists == true }
+
     /// Whether someone holds this Mac accountable, as renewd sees it (see
     /// `PersistedState.hasAccountabilityPartner`). The Monitor needs one to
     /// be turned on.
@@ -356,32 +359,8 @@ final class AppModel: ObservableObject {
     /// enforces this.
     var monitoringLocked: Bool { status?.monitoringLocked ?? false }
 
-    /// Sends `m` with the current rules of each watched blocklist, since
-    /// renewd can't read your lists itself.
     func setMonitor(_ m: MonitorSettings, completion: ((Bool) -> Void)? = nil) {
-        send(Request(cmd: .setMonitor, monitor: m.withListRules(from: lists)), completion: completion)
-    }
-
-    private var monitorListSyncInFlight = false
-
-    /// Re-sends the Monitor's copy of the watched blocklists when one has
-    /// changed since renewd got it. Only the list rules are sent, so this
-    /// can't undo a settings change made in the meantime.
-    private func syncMonitorLists() {
-        guard monitorSupported, !monitorListSyncInFlight else { return }
-        let current = monitor
-        guard current.watchLists.contains(where: { $0 != MonitorSettings.explicitListName }) else { return }
-        let fresh = current.withListRules(from: lists).normalized()
-        guard current.listRulesNeedSync(to: fresh, locked: monitoringLocked) else { return }
-        monitorListSyncInFlight = true
-        log("a watched blocklist changed; updating the Monitor's copy")
-        queue.async { [weak self] in
-            _ = try? DaemonClient.send(Request(cmd: .setMonitorListRules, monitor: fresh), timeout: 5)
-            DispatchQueue.main.async {
-                self?.monitorListSyncInFlight = false
-                self?.requestSync?()
-            }
-        }
+        send(Request(cmd: .setMonitor, monitor: m), completion: completion)
     }
 
     /// Reads the Monitor's flags for `day`, like `loadActivity`.

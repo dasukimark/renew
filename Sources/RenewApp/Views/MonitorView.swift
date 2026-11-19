@@ -19,8 +19,8 @@ private struct MonitorStatusBanner: View {
         } else if model.monitorSupported && !model.monitor.enabled {
             InfoBanner(title: "The Monitor is off",
                        message: model.hasPartner
-                           ? "Turn it on to flag visits to explicit or watched sites, and pages whose titles contain watched words."
-                           : "Add an accountability partner, then turn it on to flag visits to explicit or watched sites.",
+                           ? "Turn it on to flag explicit content, visits to sites on your monitoring lists, and pages whose titles contain watched words."
+                           : "Add an accountability partner, then turn it on to flag explicit content and sites on your monitoring lists.",
                        button: model.hasPartner ? "Monitoring…" : "Partners…") {
                 model.accountabilityTab = model.hasPartner ? .monitoring : .partners
             }
@@ -134,10 +134,16 @@ struct MonitorSettingsView: View {
     @ObservedObject var model: AppModel
     @State private var domainDraft = ""
     @State private var termDraft = ""
+    @State private var siteDrafts: [String: String] = [:]
+    @State private var expanded: Set<String> = []
+    @State private var creatingList = false
+    @State private var newListName = ""
+    @State private var deletingList: String?
     @State private var explicitCount: Int?
 
     private var settings: MonitorSettings { model.monitor }
-    private var editable: Bool { model.daemonReachable && model.monitorSupported && !model.busy }
+    private var supported: Bool { model.monitorSupported && model.monitorListsSupported }
+    private var editable: Bool { model.daemonReachable && supported && !model.busy }
     /// With a partner and the Monitor on, nothing can be turned off or
     /// removed (renewd refuses it too); adding still works.
     private var locked: Bool { model.monitoringLocked }
@@ -147,7 +153,7 @@ struct MonitorSettingsView: View {
 
     var body: some View {
         Form {
-            if needsPartner && model.daemonReachable && model.monitorSupported {
+            if needsPartner && model.daemonReachable && supported {
                 Section {
                     InfoBanner(title: "Add a partner first",
                                message: "Monitoring tells an accountability partner what it flags, so it needs one to turn on.",
@@ -175,8 +181,10 @@ struct MonitorSettingsView: View {
                 }
                 .toggleStyle(.switch)
                 .disabled(locked || needsPartner)
-                if model.isInstalled && model.daemonReachable && !model.monitorSupported {
-                    Text("The running background service predates the Monitor. Update Renew to turn it on.")
+                if model.isInstalled && model.daemonReachable && !supported {
+                    Text(model.monitorSupported
+                         ? "The running background service predates monitoring lists. Update Renew to change these settings."
+                         : "The running background service predates the Monitor. Update Renew to turn it on.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -201,62 +209,50 @@ struct MonitorSettingsView: View {
 
             Group {
                 Section {
-                    listToggle(MonitorSettings.explicitListName, title: "Explicit sites",
-                               detail: explicitCount.map { "Preset: \($0.formatted()) adult sites from the open StevenBlack/hosts list" }
-                                   ?? "Preset list of adult sites from the open StevenBlack/hosts list")
-                    ForEach(model.sortedListNames, id: \.self) { name in
-                        let count = model.lists[name]?.count ?? 0
-                        listToggle(name, title: "\(name.capitalized) blocklist", detail: count == 1 ? "1 site" : "\(count) sites")
-                    }
-                    // Watched lists whose blocklist was deleted: the Monitor
-                    // still has their sites, so they stay visible (and can be
-                    // unchecked when not locked).
-                    ForEach(deletedWatchedLists, id: \.self) { name in
-                        let count = settings.listRules[name]?.count ?? 0
-                        listToggle(name, title: "\(name.capitalized) blocklist (deleted)",
-                                   detail: "The Monitor keeps its \(count == 1 ? "1 site" : "\(count) sites")")
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Other sites")
-                        HStack {
-                            TextField("Add a site, e.g. example.com", text: $domainDraft)
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit(addDomain)
-                            Button("Add", action: addDomain)
-                                .disabled(domainDraft.trimmingCharacters(in: .whitespaces).isEmpty || !editable)
-                        }
-                        if !settings.customDomains.isEmpty {
-                            FlowLayout {
-                                ForEach(settings.customDomains, id: \.self) { d in
-                                    RemovableChip(text: d, remove: locked ? nil : { update { $0.customDomains.removeAll { $0 == d } } })
-                                        .disabled(!editable)
-                                }
-                            }
+                    Toggle(isOn: binding(\.flagExplicit)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Flag explicit content")
+                            Text("Visits to known adult sites (\(explicitCount.map { "a preset of \($0.formatted()) sites" } ?? "a preset list") from the open StevenBlack/hosts list), page titles with explicit words or adult site names, including disguised spellings and suggestive combinations, and on sites like Reddit, X and YouTube the page's own NSFW labels and explicit words. Page text never leaves the Mac.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .toggleStyle(.switch)
+                    .disabled(locked && settings.flagExplicit)
                 } header: {
-                    Text("Flag visits to")
+                    Text("Explicit content")
                 } footer: {
-                    Text("Uses the same rules as blocklists: a site includes its subdomains, and `keyword:` rules match anywhere in the address. Changes to a watched blocklist reach the Monitor the next time Renew syncs.")
+                    Text("Work sites (Slack, Jira, GitHub, Google Docs, Gmail…) are never flagged.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Section {
-                    Toggle(isOn: binding(\.flagExplicitTerms)) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Flag explicit content")
-                            Text("Page titles with explicit words or adult site names, including disguised spellings and suggestive combinations. On sites like Reddit, X and YouTube, also reads the visible text of the page for the site's own NSFW labels and explicit words. Page text never leaves the Mac.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                    ForEach(settings.sortedListNames, id: \.self) { name in
+                        listRow(name)
                     }
-                    .toggleStyle(.switch)
-                    .disabled(locked && settings.flagExplicitTerms)
+                    HStack {
+                        Button("New List…") { newListName = ""; creatingList = true }
+                        Menu("Add a Starter") {
+                            ForEach(MonitorSettings.starterLists, id: \.self) { name in
+                                let count = MonitorSettings.starter(name)?.count ?? 0
+                                Button("\(name.capitalized) (\(count) sites)") { addStarter(name) }
+                            }
+                        }
+                        .fixedSize()
+                        Spacer()
+                    }
+                    .disabled(!editable)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Other sites")
+                        siteField(text: $domainDraft, add: addDomain)
+                        chips(settings.customDomains) { d in update { $0.customDomains.removeAll { $0 == d } } }
+                    }
                 } header: {
-                    Text("Explicit content")
+                    Text("Monitoring lists")
                 } footer: {
-                    Text("Work sites (Slack, Jira, GitHub, Google Docs, Gmail…) are never flagged.")
+                    Text("Monitoring lists are separate from blocklists: they're sites you still visit but want flagged for your partner. A site includes its subdomains, and `keyword:` rules match anywhere in the address.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -270,14 +266,7 @@ struct MonitorSettingsView: View {
                             Button("Add", action: addTerm)
                                 .disabled(MonitorSettings.cleanTerm(termDraft).isEmpty || !editable)
                         }
-                        if !settings.customTerms.isEmpty {
-                            FlowLayout {
-                                ForEach(settings.customTerms, id: \.self) { t in
-                                    RemovableChip(text: t, remove: locked ? nil : { update { $0.customTerms.removeAll { $0 == t } } })
-                                        .disabled(!editable)
-                                }
-                            }
-                        }
+                        chips(settings.customTerms) { t in update { $0.customTerms.removeAll { $0 == t } } }
                     }
                 } header: {
                     Text("Other words")
@@ -290,38 +279,86 @@ struct MonitorSettingsView: View {
             .disabled(needsPartner)
         }
         .formStyle(.grouped)
-        .disabled(!model.daemonReachable || !model.monitorSupported)
+        .disabled(!model.daemonReachable || !supported)
         .onAppear {
             ExplicitDomains.count { explicitCount = $0 > 0 ? $0 : nil }
         }
+        .alert("New monitoring list", isPresented: $creatingList) {
+            TextField("Name", text: $newListName)
+            Button("Create", action: createList)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Give the list a short name, like “reddit” or “streaming”.")
+        }
+        .confirmationDialog("Delete the monitoring list “\(deletingList ?? "")”?",
+                            isPresented: Binding(get: { deletingList != nil }, set: { if !$0 { deletingList = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let name = deletingList {
+                    update { $0.lists[name] = nil }
+                    expanded.remove(name)
+                    siteDrafts[name] = nil
+                }
+                deletingList = nil
+            }
+        } message: {
+            Text("Its sites stop being flagged. Flags already found are kept.")
+        }
     }
 
-    private var deletedWatchedLists: [String] {
-        let existing = Set(model.sortedListNames.map { $0.lowercased() })
-        return settings.watchLists.filter { $0 != MonitorSettings.explicitListName && !existing.contains($0) }
+    private func listRow(_ name: String) -> some View {
+        let sites = settings.lists[name] ?? []
+        let isExpanded = Binding<Bool>(
+            get: { expanded.contains(name) },
+            set: { if $0 { expanded.insert(name) } else { expanded.remove(name) } })
+        return DisclosureGroup(isExpanded: isExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                siteField(text: Binding(get: { siteDrafts[name] ?? "" }, set: { siteDrafts[name] = $0 })) {
+                    addSites(to: name)
+                }
+                chips(sites) { site in update { $0.lists[name]?.removeAll { $0 == site } } }
+            }
+            .padding(.vertical, 4)
+        } label: {
+            HStack {
+                Text(name.capitalized)
+                Text(sites.count == 1 ? "1 site" : "\(sites.count) sites")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                // While locked only an empty list (watching nothing) can go.
+                if !locked || sites.isEmpty {
+                    Button { deletingList = name } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .help("Delete list")
+                        .disabled(!editable)
+                }
+            }
+        }
+    }
+
+    private func siteField(text: Binding<String>, add: @escaping () -> Void) -> some View {
+        HStack {
+            TextField("Add a site, e.g. example.com", text: text)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(add)
+            Button("Add", action: add)
+                .disabled(text.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || !editable)
+        }
+    }
+
+    @ViewBuilder private func chips(_ items: [String], remove: @escaping (String) -> Void) -> some View {
+        if !items.isEmpty {
+            FlowLayout {
+                ForEach(items, id: \.self) { item in
+                    RemovableChip(text: item, remove: locked ? nil : { remove(item) })
+                        .disabled(!editable)
+                }
+            }
+        }
     }
 
     private func binding(_ key: WritableKeyPath<MonitorSettings, Bool>) -> Binding<Bool> {
         Binding(get: { settings[keyPath: key] }, set: { on in update { $0[keyPath: key] = on } })
-    }
-
-    private func listToggle(_ name: String, title: String, detail: String) -> some View {
-        let binding = Binding<Bool>(
-            get: { settings.watchLists.contains(name) },
-            set: { on in
-                update {
-                    $0.watchLists.removeAll { $0 == name }
-                    if on { $0.watchLists.append(name) }
-                }
-            })
-        return Toggle(isOn: binding) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .toggleStyle(.checkbox)
-        .disabled(locked && settings.watchLists.contains(name))
     }
 
     private func update(_ change: (inout MonitorSettings) -> Void) {
@@ -331,15 +368,52 @@ struct MonitorSettingsView: View {
         model.setMonitor(m)
     }
 
-    private func addDomain() {
-        let (valid, rejected) = canonicalRules(parseSites(domainDraft))
+    /// Valid sites typed in `text`, or nil (with an error shown) if any isn't.
+    private func parsedSites(_ text: String) -> [String]? {
+        let (valid, rejected) = canonicalRules(parseSites(text))
         if !rejected.isEmpty {
             model.errorMessage = "Not a valid site: \(rejected.joined(separator: ", "))"
-            return
+            return nil
         }
-        guard !valid.isEmpty else { return }
+        return valid
+    }
+
+    private func addDomain() {
+        guard let valid = parsedSites(domainDraft), !valid.isEmpty else { return }
         update { m in m.customDomains += valid.filter { !m.customDomains.contains($0) } }
         domainDraft = ""
+    }
+
+    private func addSites(to name: String) {
+        guard let valid = parsedSites(siteDrafts[name] ?? ""), !valid.isEmpty else { return }
+        update { $0.addSites(valid, to: name) }
+        siteDrafts[name] = ""
+    }
+
+    private func createList() {
+        guard let name = MonitorSettings.cleanListName(newListName) else {
+            if !newListName.trimmingCharacters(in: .whitespaces).isEmpty {
+                model.errorMessage = "“\(newListName)” can't be used as a list name. Pick a name other than “explicit” or “custom”, up to \(MonitorSettings.maxListNameLength) characters."
+            }
+            return
+        }
+        guard settings.lists[name] == nil else {
+            expanded.insert(name)
+            return
+        }
+        guard settings.lists.count < MonitorSettings.maxLists else {
+            model.errorMessage = "You can have at most \(MonitorSettings.maxLists) monitoring lists."
+            return
+        }
+        siteDrafts[name] = nil
+        expanded.insert(name)
+        update { $0.lists[name] = [] }
+    }
+
+    /// Copies a starter's sites, merging into a list of the same name.
+    private func addStarter(_ name: String) {
+        guard let sites = MonitorSettings.starter(name) else { return }
+        update { $0.addSites(sites, to: name) }
     }
 
     private func addTerm() {

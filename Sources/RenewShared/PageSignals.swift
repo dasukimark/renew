@@ -1,7 +1,7 @@
 import Foundation
 
 /// What Renew found in the visible text of a page on a mixed site (see
-/// `SiteCategory`), with `MonitorSettings.flagExplicitTerms` on. Only these
+/// `SiteCategory`), with `MonitorSettings.flagExplicit` on. Only these
 /// findings leave the app: the page text itself is never kept or sent.
 public struct PageSignals: Codable, Equatable, Sendable {
     /// Ids of the site's own NSFW/18+ markings found (`SiteLabel.id`).

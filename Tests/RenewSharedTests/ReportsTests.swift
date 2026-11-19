@@ -228,8 +228,8 @@ struct ReportsTests {
     }
 
     @Test func loosenedMonitorRulesAreReported() {
-        let old = MonitorSettings(enabled: true, watchLists: ["explicit", "games"], listRules: ["games": ["play.example"]],
-                                  customDomains: ["a.example", "b.example"], flagExplicitTerms: true, customTerms: ["casino", "poker"])
+        let old = MonitorSettings(enabled: true, lists: ["games": ["play.example", "dice.example"], "news": ["n.example"]],
+                                  customDomains: ["a.example", "b.example"], flagExplicit: true, customTerms: ["casino", "poker"])
         #expect(old.loosenings(to: old).isEmpty)
 
         var off = old
@@ -237,81 +237,80 @@ struct ReportsTests {
         #expect(old.loosenings(to: off) == ["The Monitor was turned off."])
 
         var fewer = old
-        fewer.watchLists = ["games"]
-        fewer.flagExplicitTerms = false
+        fewer.lists = ["games": ["dice.example"]]
+        fewer.flagExplicit = false
         fewer.customDomains = ["b.example"]
         fewer.customTerms = ["poker"]
         #expect(old.loosenings(to: fewer) == [
-            "Explicit sites are no longer watched.",
+            "Sites removed from 'games': play.example.",
+            "The monitoring list 'news' was deleted.",
             "Explicit content is no longer flagged.",
             "Watched sites removed: a.example.",
             "Watched words removed: casino.",
         ])
-
-        var noGames = old
-        noGames.watchLists = ["explicit"]
-        #expect(old.loosenings(to: noGames) == ["The list 'games' is no longer watched."])
     }
 
-    @Test func tighterOrBlocklistEditsAreNotReported() {
-        let old = MonitorSettings(enabled: false, watchLists: ["games"], listRules: ["games": ["play.example", "more.example"]])
+    @Test func tighterChangesAreNotReported() {
+        let old = MonitorSettings(enabled: false, lists: ["games": ["play.example"]])
         var more = old
         more.enabled = true
-        more.watchLists = ["games", "explicit"]
+        more.lists = ["games": ["play.example", "more.example"], "video": []]
         more.customDomains = ["c.example"]
         more.customTerms = ["dice"]
-        more.flagExplicitTerms = true
+        more.flagExplicit = true
         #expect(old.loosenings(to: more).isEmpty)
-
-        var edited = old
-        edited.listRules = ["games": ["play.example"]]
-        #expect(old.loosenings(to: edited).isEmpty)
     }
 
     @Test func partnerLocksMonitoringButAllowsAdding() {
-        let old = MonitorSettings(enabled: true, watchLists: ["explicit", "games"], listRules: ["games": ["play.example"]],
-                                  customDomains: ["a.example"], flagExplicitTerms: true, customTerms: ["casino"])
+        let old = MonitorSettings(enabled: true, lists: ["games": ["play.example"]],
+                                  customDomains: ["a.example"], flagExplicit: true, customTerms: ["casino"])
         var off = old
         off.enabled = false
-        var unwatched = old
-        unwatched.watchLists = ["games"]
+        var deletedList = old
+        deletedList.lists = [:]
+        var shorterList = old
+        shorterList.lists = ["games": []]
         var noExplicit = old
-        noExplicit.flagExplicitTerms = false
+        noExplicit.flagExplicit = false
         var noSite = old
         noSite.customDomains = []
         var noWord = old
         noWord.customTerms = []
-        for loosened in [off, unwatched, noExplicit, noSite, noWord] {
+        for loosened in [off, deletedList, shorterList, noExplicit, noSite, noWord] {
             #expect(old.refusal(changingTo: loosened, hasPartner: true) == MonitorSettings.lockedMessage)
         }
 
         var more = old
-        more.watchLists.append("video")
+        more.lists["video"] = ["v.example"]
+        more.lists["games"]?.append("more.example")
         more.customDomains.append("b.example")
         more.customTerms.append("dice")
         #expect(old.refusal(changingTo: more, hasPartner: true) == nil)
 
-        var edited = old
-        edited.listRules = ["games": []]
-        #expect(old.refusal(changingTo: edited, hasPartner: true) == nil)
+        // An empty list watches nothing, so it can go even while locked.
+        var withEmpty = old
+        withEmpty.lists["typo"] = []
+        #expect(withEmpty.loosenings(to: old).isEmpty)
+        #expect(withEmpty.refusal(changingTo: old, hasPartner: true) == nil)
 
         // While the Monitor is off it watches nothing, so its rules can be edited.
         var paused = old
         paused.enabled = false
         var pausedFewer = paused
         pausedFewer.customTerms = []
+        pausedFewer.lists = [:]
         #expect(paused.refusal(changingTo: pausedFewer, hasPartner: true) == nil)
     }
 
     @Test func monitorNeedsPartnerToTurnOn() {
-        let off = MonitorSettings(watchLists: ["explicit"])
+        let off = MonitorSettings(flagExplicit: true)
         var on = off
         on.enabled = true
         #expect(off.refusal(changingTo: on, hasPartner: false) == MonitorSettings.needsPartnerMessage)
         #expect(off.refusal(changingTo: on, hasPartner: true) == nil)
         // Settings left on from before a partner was required stay editable.
         var fewer = on
-        fewer.watchLists = []
+        fewer.flagExplicit = false
         #expect(on.refusal(changingTo: off, hasPartner: false) == nil)
         #expect(on.refusal(changingTo: fewer, hasPartner: false) == nil)
     }
@@ -335,22 +334,6 @@ struct ReportsTests {
         state.retainedMonitoring = [ReportTarget(partnerEmails: ["b@example.com"],
                                                  server: ReportServer(url: "https://reports.example", token: "t"))]
         #expect(state.hasAccountabilityPartner)
-    }
-
-    @Test func lockedMonitorKeepsWatchedBlocklistSites() {
-        let old = MonitorSettings(enabled: true, watchLists: ["games"], listRules: ["games": ["a.example", "b.example"]])
-        var shrunk = old
-        shrunk.listRules = ["games": ["b.example", "c.example"]]
-        #expect(shrunk.keepingListRules(from: old).listRules == ["games": ["a.example", "b.example", "c.example"]])
-        var deleted = old
-        deleted.listRules = [:]
-        #expect(deleted.keepingListRules(from: old).listRules == old.listRules)
-
-        // While locked only added sites need sending; otherwise any change does.
-        #expect(!old.listRulesNeedSync(to: deleted, locked: true))
-        #expect(old.listRulesNeedSync(to: deleted, locked: false))
-        #expect(old.listRulesNeedSync(to: shrunk, locked: true))
-        #expect(!old.listRulesNeedSync(to: old, locked: false))
     }
 
     @Test func lockIsPerUsersMonitorButPartnersAreTheMacs() {

@@ -138,7 +138,7 @@ final class BrowserWatcher: NSObject {
     private static let idleAfter: TimeInterval = 5 * 60
     /// Only the copy that watches browsers records (see `AppDelegate`).
     private var started = false
-    /// Whether the Monitor wants mixed sites read (`MonitorSettings.flagExplicitTerms`),
+    /// Whether the Monitor wants mixed sites read (`MonitorSettings.flagExplicit`),
     /// as renewd last reported it.
     private var checkMixed = false
     /// The mixed page in the front browser: when it was read and what of
@@ -267,7 +267,7 @@ final class BrowserWatcher: NSObject {
             if let status {
                 self.protections = status.protections ?? .off
                 self.activity = status.effectiveActivity
-                self.checkMixed = status.monitor.map { $0.enabled && $0.flagExplicitTerms } ?? false
+                self.checkMixed = status.monitor.map { $0.enabled && $0.flagExplicit } ?? false
                 self.setSession(status.session, serverTime: status.serverTime)
                 SessionCache.save(status.session)
             } else if self.session != nil, !self.sessionLive {

@@ -15,40 +15,105 @@ private func visit(_ url: String, ago: TimeInterval, now: Date, title: String = 
 
 @Suite("Monitor rules")
 struct MonitorRulesTests {
-    @Test func matcherUsesCopiedListRules() {
-        let settings = MonitorSettings(enabled: true, watchLists: ["games"], listRules: ["games": ["play.example"]])
+    @Test func matcherFlagsMonitoringListsByName() {
+        let settings = MonitorSettings(enabled: true, lists: ["games": ["play.example"], "empty": []])
         let m = ActivityMatcher(settings: settings, explicitDomains: nil)
         #expect(m.flags(url: "https://www.play.example/x", title: "") == [.domain("games", "play.example")])
         #expect(m.flags(url: "https://work.example/", title: "").isEmpty)
-        // A watched list without a copy of its rules flags nothing.
-        let bare = ActivityMatcher(settings: MonitorSettings(enabled: true, watchLists: ["games"]), explicitDomains: nil)
+        // An empty list flags nothing.
+        let bare = ActivityMatcher(settings: MonitorSettings(enabled: true, lists: ["games": []]), explicitDomains: nil)
         #expect(bare.isEmpty)
     }
 
-    @Test func explicitPresetNeedsItsList() {
-        let settings = MonitorSettings(enabled: true, watchLists: ["explicit"])
-        let m = ActivityMatcher(settings: settings, explicitDomains: DomainSet(["adult.example"]))
+    @Test func explicitPresetFollowsFlagExplicit() {
+        let on = MonitorSettings(enabled: true, flagExplicit: true)
+        let m = ActivityMatcher(settings: on, explicitDomains: DomainSet(["adult.example"]))
         #expect(m.flags(url: "https://cdn.adult.example/", title: "") == [.domain("explicit", "adult.example")])
-        #expect(ActivityMatcher(settings: settings, explicitDomains: nil).isEmpty)
+        let off = ActivityMatcher(settings: MonitorSettings(enabled: true), explicitDomains: DomainSet(["adult.example"]))
+        #expect(off.isEmpty)
+        #expect(off.flags(url: "https://cdn.adult.example/", title: "").isEmpty)
     }
 
-    @Test func withListRulesCopiesOnlyWatchedLists() {
-        let lists = ["games": ["play.example"], "news": ["news.example"]]
-        let m = MonitorSettings(enabled: true, watchLists: ["Games", "explicit", "gone"]).withListRules(from: lists)
-        #expect(m.listRules == ["games": ["play.example"]])
-    }
-
-    @Test func normalizeKeepsRulesForWatchedListsAndCaps() {
+    @Test func normalizeCleansNamesKeepsEmptyListsAndCaps() {
         let many = (0..<(MonitorSettings.maxListRules + 10)).map { "s\($0).example" }
-        let m = MonitorSettings(enabled: true, watchLists: ["big", "small"],
-                                listRules: ["big": many, "small": ["a.example", " a.example ", ""], "unwatched": ["b.example"]])
+        let m = MonitorSettings(enabled: true,
+                                lists: ["a-big": many, "b-small": ["a.example"], " New ": [], "explicit": ["x.example"],
+                                        "custom": ["y.example"], "": ["z.example"]])
             .normalized()
-        #expect(m.listRules["unwatched"] == nil)
-        #expect(m.listRules["big"]?.count == MonitorSettings.maxListRules)
-        // The cap is across all lists, so the second one gets nothing left.
-        #expect(m.listRules["small"] == nil)
-        let small = MonitorSettings(watchLists: ["small"], listRules: ["small": ["a.example", " a.example ", ""]]).normalized()
-        #expect(small.listRules == ["small": ["a.example"]])
+        #expect(Set(m.lists.keys) == ["a-big", "b-small", "new"])
+        #expect(m.lists["new"] == [])
+        #expect(m.lists["a-big"]?.count == MonitorSettings.maxListRules)
+        // The cap is across all lists, so a later one gets nothing left.
+        #expect(m.lists["b-small"] == [])
+        let small = MonitorSettings(lists: ["Small": ["a.example", " A.example ", "", "not valid"]]).normalized()
+        #expect(small.lists == ["small": ["a.example"]])
+    }
+
+    @Test func listNames() {
+        #expect(MonitorSettings.cleanListName("  Reddit ") == "reddit")
+        #expect(MonitorSettings.cleanListName("Explicit") == nil)
+        #expect(MonitorSettings.cleanListName("custom") == nil)
+        #expect(MonitorSettings.cleanListName(" ") == nil)
+        #expect(MonitorSettings.cleanListName(String(repeating: "a", count: MonitorSettings.maxListNameLength + 1)) == nil)
+    }
+
+    @Test func startersComeFromBuiltInLists() {
+        #expect(MonitorSettings.starter("Social") == ListStore.builtIn["social"])
+        #expect(MonitorSettings.starter("test") == nil)
+    }
+
+    @Test func watchedBlocklistsBecomeMonitoringLists() throws {
+        let json = #"{"enabled":true,"watchLists":["explicit","Games","gone","custom"],"listRules":{"games":["play.example"],"custom":["c.example"]},"customDomains":["a.example"]}"#
+        let m = try Wire.decoder.decode(MonitorSettings.self, from: Data(json.utf8))
+        #expect(m.lists == ["games": ["play.example"], "gone": []])
+        #expect(m.flagExplicit)
+        #expect(m.customDomains == ["a.example", "c.example"])
+        // Once lists exist, the old keys are ignored.
+        let both = #"{"lists":{"news":[]},"watchLists":["games"],"listRules":{"games":["play.example"]}}"#
+        #expect(try Wire.decoder.decode(MonitorSettings.self, from: Data(both.utf8)).lists == ["news": []])
+    }
+
+    @Test func encodesTheOldFormatTooForDowngrades() throws {
+        let m = MonitorSettings(enabled: true, lists: ["games": ["play.example"], "news": []], customDomains: ["a.example"],
+                                flagExplicit: true, customTerms: ["word"])
+        let data = try Wire.encoder.encode(m)
+        let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        // An older renewd reads watchLists/listRules: the same lists, and the explicit preset.
+        #expect(obj["watchLists"] as? [String] == ["explicit", "games", "news"])
+        #expect(obj["listRules"] as? [String: [String]] == ["games": ["play.example"], "news": []])
+        let back = try Wire.decoder.decode(MonitorSettings.self, from: data)
+        #expect(back == m)
+        #expect(!back.isLegacyFormat)
+    }
+
+    @Test func oldClientsAreSpotted() throws {
+        // What an app from before monitoring lists sends: renewd refuses it.
+        let old = #"{"enabled":true,"watchLists":[],"listRules":{},"customDomains":[],"flagExplicitTerms":true,"customTerms":[]}"#
+        #expect(try Wire.decoder.decode(MonitorSettings.self, from: Data(old.utf8)).isLegacyFormat)
+        #expect(!(try Wire.decoder.decode(MonitorSettings.self, from: Data(#"{"enabled":true}"#.utf8))).isLegacyFormat)
+    }
+
+    @Test func longOldListNamesAreShortenedNotDropped() throws {
+        let long = String(repeating: "g", count: 70)
+        let json = #"{"watchLists":["\#(long)"],"listRules":{"\#(long)":["play.example"]}}"#
+        let m = try Wire.decoder.decode(MonitorSettings.self, from: Data(json.utf8)).normalized()
+        #expect(m.lists == [String(repeating: "g", count: MonitorSettings.maxListNameLength): ["play.example"]])
+    }
+
+    @Test func limitsAreErrorsNotSilentCuts() {
+        #expect(MonitorSettings(lists: ["a": ["a.example"]]).limitError == nil)
+        let tooMany = Dictionary(uniqueKeysWithValues: (0...MonitorSettings.maxLists).map { ("l\($0)", [String]()) })
+        #expect(MonitorSettings(lists: tooMany).limitError != nil)
+        let many = (0..<MonitorSettings.maxListRules).map { "s\($0).example" }
+        #expect(MonitorSettings(lists: ["z": many]).limitError == nil)
+        #expect(MonitorSettings(lists: ["a": ["extra.example"], "z": many]).limitError != nil)
+    }
+
+    @Test func addSitesSkipsDuplicates() {
+        var m = MonitorSettings(lists: ["games": ["a.example"]])
+        m.addSites(["a.example", "b.example"], to: "games")
+        m.addSites(["c.example"], to: "new")
+        #expect(m.lists == ["games": ["a.example", "b.example"], "new": ["c.example"]])
     }
 }
 
@@ -86,7 +151,8 @@ struct MonitorMigrationTests {
         #expect(state.activity(for: 501).enabled)
         let m501 = state.monitor(for: 501)
         #expect(m501.enabled)
-        #expect(m501.watchLists == ["explicit"])
+        #expect(m501.flagExplicit)
+        #expect(m501.lists.isEmpty)
         #expect(m501.customTerms == ["gambling"])
 
         // Recording was off, so both stay off; the rules are kept.
@@ -110,7 +176,7 @@ struct MonitorMigrationTests {
     @Test func migratedStateRoundTrips() throws {
         var state = PersistedState()
         state.setActivity(ActivitySettings(enabled: true), for: 501)
-        state.setMonitor(MonitorSettings(enabled: true, watchLists: ["games"], listRules: ["games": ["play.example"]]), for: 501)
+        state.setMonitor(MonitorSettings(enabled: true, lists: ["games": ["play.example"]]), for: 501)
         let back = try Wire.decoder.decode(PersistedState.self, from: Wire.encoder.encode(state))
         #expect(back == state)
     }

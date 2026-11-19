@@ -1,7 +1,7 @@
 import Foundation
 
 /// The words the Monitor looks for in page titles when
-/// `MonitorSettings.flagExplicitTerms` is on, grouped by how strongly they
+/// `MonitorSettings.flagExplicit` is on, grouped by how strongly they
 /// suggest an explicit page. Everything is matched as whole words, so
 /// "Essex", "analysis", "Java" or "BJJ" never match.
 ///

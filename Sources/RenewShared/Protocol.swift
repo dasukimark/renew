@@ -31,9 +31,6 @@ public enum Command: String, Codable, Sendable {
     case activityStats
     /// Reads the Monitor's flags for the caller (see `MonitorQuery`).
     case monitorFlags
-    /// Replaces only the Monitor's copy of the watched blocklists' rules
-    /// (`monitor.listRules`), leaving the rest of its settings as they are.
-    case setMonitorListRules
     /// The app heard that the Mac is about to log out, restart or shut
     /// down, so renewd's exit counts as a shutdown (see `Heartbeat`).
     case poweringOff
@@ -198,6 +195,10 @@ public struct Status: Codable, Sendable {
     /// or watch less, and Activity can't be turned off. nil from daemons
     /// that predate the lock.
     public var monitoringLocked: Bool?
+    /// Whether the Monitor keeps its own monitoring lists
+    /// (`MonitorSettings.lists`). nil from daemons that predate them, which
+    /// watched blocklists instead and would drop the lists.
+    public var monitorLists: Bool?
 
     /// Whether Activity is on, falling back to an older daemon's combined
     /// setting, so recording carries on until renewd is updated too.
@@ -240,6 +241,7 @@ public struct Status: Codable, Sendable {
         self.coolingOffRemovalAt = coolingOffRemovalAt
         self.activity = activity
         self.monitor = monitor
+        self.monitorLists = monitor == nil ? nil : true
     }
 }
 

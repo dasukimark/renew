@@ -93,7 +93,7 @@ private struct PartnersView: View {
     /// Only with a partner who isn't being removed, and a service that
     /// keeps Activity on with the Monitor (it reports the lock).
     private var showTurnOnMonitoring: Bool {
-        model.hasSettledPartner && model.daemonReachable && model.monitorSupported && model.activitySupported
+        model.hasSettledPartner && model.daemonReachable && model.monitorListsSupported && model.activitySupported
             && model.status?.monitoringLocked != nil && !model.monitor.enabled
     }
 
@@ -101,8 +101,7 @@ private struct PartnersView: View {
     private func turnOnMonitoring() {
         var m = model.monitor
         m.enabled = true
-        if !m.watchLists.contains(MonitorSettings.explicitListName) { m.watchLists.append(MonitorSettings.explicitListName) }
-        m.flagExplicitTerms = true
+        m.flagExplicit = true
         model.setMonitor(m)
     }
 
