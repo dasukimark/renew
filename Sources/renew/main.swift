@@ -54,10 +54,13 @@ Usage:
   renew monitor on|off                                 turn the Monitor on (needs a partner and Activity on)
                                                        or off; with a partner it can't be turned off or
                                                        watch less, only add (remove partners first)
-  renew monitor watch <LIST>...                        flag visits to these lists' sites ("explicit" = preset)
+  renew monitor list add <NAME> <SITE>...              add sites to a monitoring list (created if new)
+  renew monitor list remove <NAME> <SITE>...           remove sites from a monitoring list
+  renew monitor list delete <NAME>                     delete a monitoring list
+  renew monitor list starter social|video|news         add a starter monitoring list
   renew monitor sites add|remove <SITE>...             flag visits to other sites
   renew monitor words add|remove <WORD>...             flag page titles containing a word or phrase
-  renew monitor explicit on|off                        flag explicit content (titles, and pages on mixed sites)
+  renew monitor explicit on|off                        flag explicit content (adult sites, titles, pages on mixed sites)
   renew flags [--date YYYY-MM-DD]                      show the visits the Monitor flagged (default: today)
   sudo renew uninstall                                 uninstall Renew (only between sessions)
   renew uninstall                                      with the cooling-off on: request uninstall (unlocks after 24 hours)
@@ -153,23 +156,6 @@ func syncSchedules() {
         }
     } catch {
         print("⚠︎ Couldn't update scheduled block sessions: \(error)")
-    }
-}
-
-/// Updates the Monitor's copy of a watched blocklist after the lists change.
-func syncMonitorLists() {
-    guard let status = (try? DaemonClient.send(Request(cmd: .status)))?.status, let m = status.monitor else { return }
-    let fresh = m.withListRules(from: ListStore.all()).normalized()
-    guard m.listRulesNeedSync(to: fresh, locked: status.monitoringLocked ?? false) else { return }
-    do {
-        let r = try DaemonClient.send(Request(cmd: .setMonitorListRules, monitor: fresh))
-        if r.ok {
-            print("Updated the Monitor's copy of the lists it watches.")
-        } else {
-            print("⚠︎ Couldn't update the Monitor: \(r.error ?? "refused")")
-        }
-    } catch {
-        print("⚠︎ Couldn't update the Monitor: \(error)")
     }
 }
 
@@ -332,16 +318,22 @@ case "monitor":
     func show(_ st: Status) {
         guard let m = st.monitor else { die("This Renew service predates the Monitor. Reinstall Renew.") }
         print("Monitor: \(m.enabled ? "on" : "off")\(m.enabled && st.activity?.enabled == false ? " (but Activity is off, so nothing is checked: `renew activity on`)" : "")")
-        print("  Flagged lists: \(m.watchLists.isEmpty ? "none" : m.watchLists.joined(separator: ", "))")
+        print("  Explicit content: \(m.flagExplicit ? "on (adult sites, titles, and pages on mixed sites)" : "off")")
+        let lists = m.sortedListNames.map { name -> String in
+            let n = m.lists[name]?.count ?? 0
+            return "\(name) (\(n == 1 ? "1 site" : "\(n) sites"))"
+        }
+        print("  Lists:         \(lists.isEmpty ? "none" : lists.joined(separator: ", "))")
         print("  Other sites:   \(m.customDomains.isEmpty ? "none" : m.customDomains.joined(separator: ", "))")
-        print("  Explicit content: \(m.flagExplicitTerms ? "on (titles, and pages on mixed sites)" : "off")")
         print("  Other words:   \(m.customTerms.isEmpty ? "none" : m.customTerms.joined(separator: ", "))")
     }
     func change(_ edit: (inout MonitorSettings) -> Void) {
-        guard var m = send(Request(cmd: .status)).monitor else { die("This Renew service predates the Monitor. Reinstall Renew.") }
+        let st = send(Request(cmd: .status))
+        guard var m = st.monitor else { die("This Renew service predates the Monitor. Reinstall Renew.") }
+        guard st.monitorLists == true else { die("This Renew service predates monitoring lists. Reinstall Renew.") }
         edit(&m)
-        // renewd can't read your lists, so it gets a copy of the watched ones.
-        show(send(Request(cmd: .setMonitor, monitor: m.withListRules(from: ListStore.all()))))
+        if let error = m.limitError { die(error) }
+        show(send(Request(cmd: .setMonitor, monitor: m)))
     }
     let sub = args.first ?? "show"
     let rest = Array(args.dropFirst())
@@ -351,12 +343,39 @@ case "monitor":
     case "on", "off":
         change { $0.enabled = sub == "on" }
     case "watch":
-        let known = Set(ListStore.all().keys).union([MonitorSettings.explicitListName])
-        let names = rest.map { $0.lowercased() }
-        for n in names where !known.contains(n) {
-            die("no list named '\(n)'. Available: \(known.sorted().joined(separator: ", "))")
+        die("Monitoring lists are separate from blocklists now: use `renew monitor list add NAME SITE...`")
+    case "list", "lists":
+        let usage = "usage: renew monitor list add|remove NAME SITE... | list delete NAME | list starter \(MonitorSettings.starterLists.joined(separator: "|"))"
+        guard rest.count >= 2 else { die(usage) }
+        guard let name = MonitorSettings.cleanListName(rest[1]) else {
+            die("'\(rest[1])' can't be used as a list name (not \"explicit\" or \"custom\", at most \(MonitorSettings.maxListNameLength) characters)")
         }
-        change { $0.watchLists = names }
+        switch rest[0] {
+        case "add", "remove", "rm":
+            guard rest.count >= 3 else { die(usage) }
+            let (valid, rejected) = canonicalRules(Array(rest.dropFirst(2)))
+            if !rejected.isEmpty { die("invalid site(s): \(rejected.joined(separator: ", "))") }
+            change { m in
+                if rest[0] == "add" {
+                    m.addSites(valid, to: name)
+                } else {
+                    guard m.lists[name] != nil else { die("no monitoring list named '\(name)'") }
+                    m.lists[name]?.removeAll { valid.contains($0) }
+                }
+            }
+        case "delete":
+            change { m in
+                guard m.lists[name] != nil else { die("no monitoring list named '\(name)'") }
+                m.lists[name] = nil
+            }
+        case "starter":
+            guard let sites = MonitorSettings.starter(name) else {
+                die("no starter named '\(name)'. Available: \(MonitorSettings.starterLists.joined(separator: ", "))")
+            }
+            change { $0.addSites(sites, to: name) }
+        default:
+            die(usage)
+        }
     case "sites", "domains":
         guard rest.count >= 2, ["add", "remove"].contains(rest[0]) else { die("usage: renew monitor sites add|remove <SITE>...") }
         let (valid, rejected) = canonicalRules(Array(rest.dropFirst()))
@@ -367,10 +386,10 @@ case "monitor":
         }
     case "explicit":
         guard rest.count == 1, ["on", "off"].contains(rest[0]) else { die("usage: renew monitor explicit on|off") }
-        change { $0.flagExplicitTerms = rest[0] == "on" }
+        change { $0.flagExplicit = rest[0] == "on" }
     case "words", "terms":
         if rest.count == 2, rest[0] == "preset", ["on", "off"].contains(rest[1]) {
-            change { $0.flagExplicitTerms = rest[1] == "on" }
+            change { $0.flagExplicit = rest[1] == "on" }
         } else if rest.count >= 2, ["add", "remove"].contains(rest[0]) {
             // Each argument is one word or phrase (quote phrases).
             let words = rest.dropFirst().map(MonitorSettings.cleanTerm).filter { !$0.isEmpty }
@@ -382,7 +401,7 @@ case "monitor":
             die("usage: renew monitor words add|remove <WORD>... | renew monitor words preset on|off")
         }
     default:
-        die("usage: renew monitor [show | on | off | watch LIST... | sites add|remove SITE... | words add|remove WORD... | explicit on|off]")
+        die("usage: renew monitor [show | on | off | list add|remove|delete|starter ... | sites add|remove SITE... | words add|remove WORD... | explicit on|off]")
     }
 
 case "activity":
@@ -558,7 +577,6 @@ case "lists":
             print("\(args[1].lowercased()): \(list.joined(separator: ", "))")
         } catch { die("couldn't save lists: \(error)") }
         syncSchedules()
-        syncMonitorLists()
     case "remove", "rm":
         guard args.count >= 2 else { die("usage: renew lists remove <NAME> [SITE]...") }
         do {
@@ -566,7 +584,6 @@ case "lists":
             print("\(args[1].lowercased()): \(remaining?.joined(separator: ", ") ?? "(deleted)")")
         } catch { die("couldn't save lists: \(error)") }
         syncSchedules()
-        syncMonitorLists()
     default:
         die("usage: renew lists [show [NAME] | add NAME SITE... | remove NAME [SITE...]]")
     }

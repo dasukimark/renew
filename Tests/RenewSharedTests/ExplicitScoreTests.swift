@@ -111,7 +111,7 @@ struct ExplicitScoreTests {
     // MARK: matcher and reports
 
     @Test func matcherAddsScoreFlag() {
-        let on = ActivityMatcher(settings: MonitorSettings(enabled: true, flagExplicitTerms: true), explicitDomains: nil)
+        let on = ActivityMatcher(settings: MonitorSettings(enabled: true, flagExplicit: true), explicitDomains: nil)
         #expect(on.flags(url: "https://video.test/", title: "fucking hot teen video")
                 == [.score("fucking, hot, teen, video")])
         #expect(on.flags(url: "https://video.test/", title: "p0rn") == [.term("porn")])
@@ -123,7 +123,7 @@ struct ExplicitScoreTests {
     }
 
     @Test func customTermDuplicatingPresetFlagsOnce() {
-        let m = ActivityMatcher(settings: MonitorSettings(enabled: true, flagExplicitTerms: true, customTerms: ["blow-job"]),
+        let m = ActivityMatcher(settings: MonitorSettings(enabled: true, flagExplicit: true, customTerms: ["blow-job"]),
                                 explicitDomains: nil)
         #expect(m.flags(url: "https://a.test/", title: "blow job") == [.term("blow job")])
     }

@@ -12,7 +12,7 @@ import Foundation
 ///   built-in explicit words don't flag them; your own lists and words still
 ///   do.
 /// - `mixed`: sites that show ordinary and adult content side by side. With
-///   `MonitorSettings.flagExplicitTerms` on they get stricter title scoring and
+///   `MonitorSettings.flagExplicit` on they get stricter title scoring and
 ///   page reading (see `PageSignals`).
 public enum SiteCategory: Sendable, Equatable {
     case work, recovery, mixed, other

@@ -147,7 +147,7 @@ final class Daemon: @unchecked Sendable {
                 log("split the activity monitoring settings into Activity and Monitor settings")
             }
             monitorEngine.prepare(watchingExplicit: (state.monitorByUser ?? [:]).values.contains {
-                $0.enabled && $0.watchLists.contains(MonitorSettings.explicitListName)
+                $0.enabled && $0.flagExplicit
             })
             importLegacyFlags()
             // Keep this boot's anchor across renewd restarts, so restarting
@@ -300,12 +300,6 @@ final class Daemon: @unchecked Sendable {
 
         case .setMonitor:
             guard let m = req.monitor else { return fail("Missing Monitor settings.") }
-            if let error = setMonitor(m, by: uid) { return fail(error) }
-
-        case .setMonitorListRules:
-            guard let rules = req.monitor?.listRules else { return fail("Missing list rules.") }
-            var m = state.monitor(for: uid)
-            m.listRules = rules
             if let error = setMonitor(m, by: uid) { return fail(error) }
 
         case .recordActivity:
@@ -536,8 +530,8 @@ final class Daemon: @unchecked Sendable {
 
     /// Each user changes only their own settings. With a partner the
     /// Monitor can't be turned off or watch less, and without one it can't
-    /// be turned on (see `MonitorSettings.refusal`). While locked, a watched
-    /// blocklist's sites can be added to but not taken away. Turning it on
+    /// be turned on (see `MonitorSettings.refusal`). While locked, monitoring
+    /// lists can be added to but not shortened or deleted. Turning it on
     /// with a partner turns Activity on too, so the lock always has visits
     /// to check. Loosenings still allowed are reported (see
     /// `MonitorSettings.loosenings`).
@@ -547,12 +541,13 @@ final class Daemon: @unchecked Sendable {
         let old = state.monitor(for: uid).normalized()
         let stored = state.monitor(for: uid)
         let hasPartner = state.hasAccountabilityPartner
-        var new = requested.normalized()
+        if requested.isLegacyFormat { return MonitorSettings.legacyClientMessage }
+        if let error = requested.limitError { return error }
+        let new = requested.normalized()
         if let refusal = old.refusal(changingTo: new, hasPartner: hasPartner) {
             log("refused a Monitor change for uid \(uid): \(refusal)")
             return refusal
         }
-        if hasPartner && old.enabled { new = new.keepingListRules(from: old).normalized() }
         let turnActivityOn = hasPartner && new.enabled && !state.activity(for: uid).enabled
         guard new != stored || turnActivityOn else { return nil }
         if turnActivityOn {
@@ -565,10 +560,10 @@ final class Daemon: @unchecked Sendable {
         if old.enabled != new.enabled {
             log("Monitor turned \(new.enabled ? "on" : "off") by uid \(uid)")
         }
-        if old.watchLists != new.watchLists || old.listRules != new.listRules || old.customDomains != new.customDomains
-            || old.flagExplicitTerms != new.flagExplicitTerms || old.customTerms != new.customTerms {
-            let rules = new.listRules.values.reduce(0) { $0 + $1.count }
-            log("Monitor rules changed by uid \(uid): lists \(new.watchLists) (\(rules) rules), \(new.customDomains.count) sites, explicit content \(new.flagExplicitTerms ? "on" : "off"), \(new.customTerms.count) words")
+        if old.lists != new.lists || old.customDomains != new.customDomains
+            || old.flagExplicit != new.flagExplicit || old.customTerms != new.customTerms {
+            let lists = new.sortedListNames.map { "\($0) (\(new.lists[$0]?.count ?? 0))" }.joined(separator: ", ")
+            log("Monitor rules changed by uid \(uid): lists [\(lists)], \(new.customDomains.count) other sites, explicit content \(new.flagExplicit ? "on" : "off"), \(new.customTerms.count) words")
         }
         reporter.add(changes: old.loosenings(to: new), uid: uid)
         return nil

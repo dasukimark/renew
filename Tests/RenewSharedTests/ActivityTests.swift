@@ -48,10 +48,9 @@ struct ActivityMatchingTests {
     }
 
     @Test func matcherCombinesListsSitesAndWords() {
-        let lists = ["social": ["reddit.com", "!old.reddit.com"], "video": ["youtube.com/shorts"]]
-        let settings = MonitorSettings(enabled: true, watchLists: ["explicit", "social", "video", "missing"],
-                                       customDomains: ["Example.org"], flagExplicitTerms: true, customTerms: ["Gambling"])
-            .withListRules(from: lists)
+        let lists = ["social": ["reddit.com", "!old.reddit.com"], "video": ["youtube.com/shorts"], "empty": []]
+        let settings = MonitorSettings(enabled: true, lists: lists,
+                                       customDomains: ["Example.org"], flagExplicit: true, customTerms: ["Gambling"])
         let m = ActivityMatcher(settings: settings, explicitDomains: DomainSet(["adult.test"]))
 
         #expect(m.flags(url: "https://cdn.adult.test/x", title: "Home") == [.domain("explicit", "adult.test")])
@@ -67,7 +66,7 @@ struct ActivityMatchingTests {
     }
 
     @Test func matcherRespectsSwitches() {
-        let off = MonitorSettings(enabled: true, watchLists: [], customDomains: [], flagExplicitTerms: false)
+        let off = MonitorSettings(enabled: true, lists: [:], customDomains: [], flagExplicit: false)
         let m = ActivityMatcher(settings: off, explicitDomains: DomainSet(["adult.test"]))
         #expect(m.flags(url: "https://adult.test/", title: "porn").isEmpty)
         #expect(m.isEmpty)
@@ -95,16 +94,15 @@ struct MonitorSettingsTests {
         let partial = try Wire.decoder.decode(MonitorSettings.self, from: Data(#"{"enabled":true}"#.utf8))
         #expect(partial.enabled)
         // Nothing is watched unless chosen.
-        #expect(partial.watchLists.isEmpty)
+        #expect(partial.lists.isEmpty)
         #expect(partial.customDomains.isEmpty)
-        #expect(!partial.flagExplicitTerms)
+        #expect(!partial.flagExplicit)
         #expect(partial.customTerms.isEmpty)
-        #expect(partial.listRules.isEmpty)
     }
 
     @Test func roundTrips() throws {
-        let m = MonitorSettings(enabled: true, watchLists: ["social"], listRules: ["social": ["a.test"]],
-                                customDomains: ["a.test"], flagExplicitTerms: false, customTerms: ["x y"])
+        let m = MonitorSettings(enabled: true, lists: ["social": ["a.test"]],
+                                customDomains: ["a.test"], flagExplicit: false, customTerms: ["x y"])
         #expect(try Wire.decoder.decode(MonitorSettings.self, from: Wire.encoder.encode(m)) == m)
         let a = ActivitySettings(enabled: true)
         #expect(try Wire.decoder.decode(ActivitySettings.self, from: Wire.encoder.encode(a)) == a)
@@ -123,11 +121,12 @@ struct MonitorSettingsTests {
     }
 
     @Test func normalizes() {
-        let m = MonitorSettings(enabled: true, watchLists: [" Social", "social", "", "EXPLICIT"],
+        let m = MonitorSettings(enabled: true, lists: [" Social": ["a.test"], "social": ["b.test", "a.test"], "": [], "EXPLICIT": []],
                                    customDomains: ["https://www.Example.com/", "not a site", "example.com"],
                                    customTerms: ["  Two   Words ", "two words", "", String(repeating: "a", count: 65)])
             .normalized()
-        #expect(m.watchLists == ["social", "explicit"])
+        #expect(m.lists.keys.sorted() == ["social"])
+        #expect(Set(m.lists["social"] ?? []) == ["a.test", "b.test"])
         #expect(m.customDomains == ["example.com"])
         #expect(m.customTerms == ["two words"])
     }
@@ -414,7 +413,7 @@ struct PerUserSettingsTests {
         #expect(state.monitoring == nil)
         #expect(state.activity(for: 501).enabled)
         #expect(state.monitor(for: 501).enabled)
-        #expect(state.monitor(for: 501).watchLists == ["test"])
+        #expect(state.monitor(for: 501).lists == ["test": []])
         #expect(!state.activity(for: 502).enabled)
         let again = state.migrateMonitoring(to: 501)
         #expect(!again)

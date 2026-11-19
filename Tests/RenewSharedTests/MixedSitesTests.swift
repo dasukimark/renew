@@ -202,21 +202,20 @@ struct PageSignalsTests {
 
 @Suite("Mixed and work sites in the Monitor")
 struct MixedSiteMatchingTests {
-    private func matcher(explicitContent: Bool = true, custom: [String] = [], sites: [String] = [],
-                         explicit: Bool = false) -> ActivityMatcher {
-        ActivityMatcher(settings: MonitorSettings(enabled: true, watchLists: explicit ? ["explicit"] : [],
-                                                  customDomains: sites, flagExplicitTerms: explicitContent, customTerms: custom),
+    private func matcher(explicitContent: Bool = true, custom: [String] = [], sites: [String] = []) -> ActivityMatcher {
+        ActivityMatcher(settings: MonitorSettings(enabled: true, customDomains: sites, flagExplicit: explicitContent,
+                                                  customTerms: custom),
                         explicitDomains: DomainSet(["github.com", "adult.example"]))
     }
 
     @Test func workSitesAreNeverFlagged() {
-        let m = matcher(custom: ["roadmap"], sites: ["slack.com"], explicit: true)
+        let m = matcher(custom: ["roadmap"], sites: ["slack.com"])
         #expect(m.flags(url: "https://github.com/a/b", title: "porn").isEmpty)
         #expect(m.flags(url: "https://app.slack.com/client", title: "Roadmap").isEmpty)
         #expect(m.flags(url: "https://docs.google.com/document/d/1", title: "nude",
                         signals: PageSignals(labels: ["NSFW tag"], strongWords: ["porn", "xxx", "hentai"])).isEmpty)
         // Even with mixed checks off.
-        #expect(matcher(explicitContent: false, explicit: true).flags(url: "https://github.com/", title: "porn").isEmpty)
+        #expect(matcher(explicitContent: false, sites: ["github.com"]).flags(url: "https://github.com/", title: "porn").isEmpty)
         // Other sites still are.
         #expect(m.flags(url: "https://adult.example/", title: "") == [.domain("explicit", "adult.example")])
     }
@@ -301,9 +300,9 @@ struct MixedSiteMatchingTests {
     }
 
     @Test func turningExplicitContentOffIsALoosening() {
-        let on = MonitorSettings(enabled: true, flagExplicitTerms: true)
+        let on = MonitorSettings(enabled: true, flagExplicit: true)
         var off = on
-        off.flagExplicitTerms = false
+        off.flagExplicit = false
         #expect(on.loosenings(to: off) == ["Explicit content is no longer flagged."])
         #expect(off.loosenings(to: on).isEmpty)
     }
@@ -311,6 +310,6 @@ struct MixedSiteMatchingTests {
     @Test func settingsFromTheTwoToggleBuildStillDecode() throws {
         let json = #"{"enabled":true,"flagExplicitTerms":true,"checkMixedSites":false}"#
         let s = try JSONDecoder().decode(MonitorSettings.self, from: Data(json.utf8))
-        #expect(s.flagExplicitTerms)
+        #expect(s.flagExplicit)
     }
 }

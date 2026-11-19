@@ -49,7 +49,7 @@ final class MonitorEngine {
     /// their flags handed to `deliver` once it's ready.
     func evaluate(_ events: [ActivityEvent], settings: MonitorSettings, uid: uid_t, now: Date = Date()) -> [MonitorFlag] {
         guard settings.enabled, !events.isEmpty else { return [] }
-        if settings.watchLists.contains(MonitorSettings.explicitListName) {
+        if settings.flagExplicit {
             startLoadingExplicit(now: now)
             if case .loading = explicit {
                 let room = Self.maxWaiting - waiting.reduce(0) { $0 + $1.events.count }
@@ -80,7 +80,7 @@ final class MonitorEngine {
         if case .loaded(let set) = explicit { domains = set }
         let m = ActivityMatcher(settings: settings, explicitDomains: domains)
         // Without the list (it failed to load), don't cache, so it's used once it loads.
-        if domains != nil || !settings.watchLists.contains(MonitorSettings.explicitListName) { matchers[uid] = m }
+        if domains != nil || !settings.flagExplicit { matchers[uid] = m }
         return m
     }
 

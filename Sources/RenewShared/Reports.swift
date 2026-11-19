@@ -260,19 +260,22 @@ public struct Report: Codable, Equatable, Sendable {
 
 extension MonitorSettings {
     /// What changed from `self` to `new` that flags less, as sentences for a
-    /// report: the Monitor turned off, watched lists removed, explicit words
-    /// (explicit content) turned off, sites or words removed. Adding rules isn't listed, and
-    /// neither are edits to a watched blocklist's rules (`listRules`), which
-    /// come from editing the blocklist.
+    /// report: the Monitor turned off, monitoring lists deleted or sites
+    /// removed from them, explicit content turned off, other sites or words
+    /// removed. Adding anything isn't listed.
     public func loosenings(to new: MonitorSettings) -> [String] {
         var out: [String] = []
         if enabled && !new.enabled { out.append("The Monitor was turned off.") }
-        for list in watchLists where !new.watchLists.contains(list) {
-            out.append(list == MonitorSettings.explicitListName
-                       ? "Explicit sites are no longer watched."
-                       : "The list '\(list)' is no longer watched.")
+        for name in sortedListNames {
+            guard let after = new.lists[name] else {
+                // An empty list watched nothing, so deleting it isn't looser.
+                if !(lists[name] ?? []).isEmpty { out.append("The monitoring list '\(name)' was deleted.") }
+                continue
+            }
+            let removed = (lists[name] ?? []).filter { !after.contains($0) }
+            if !removed.isEmpty { out.append("Sites removed from '\(name)': \(Self.listed(removed)).") }
         }
-        if flagExplicitTerms && !new.flagExplicitTerms { out.append("Explicit content is no longer flagged.") }
+        if flagExplicit && !new.flagExplicit { out.append("Explicit content is no longer flagged.") }
         let sites = customDomains.filter { !new.customDomains.contains($0) }
         if !sites.isEmpty { out.append("Watched sites removed: \(Self.listed(sites)).") }
         let words = customTerms.filter { !new.customTerms.contains($0) }
@@ -292,30 +295,6 @@ extension MonitorSettings {
             return enabled && !loosenings(to: new).isEmpty ? Self.lockedMessage : nil
         }
         return !enabled && new.enabled ? Self.needsPartnerMessage : nil
-    }
-
-    /// These settings with the rules of each watched blocklist kept from
-    /// `old` as well: while monitoring is locked, editing or deleting a
-    /// watched blocklist adds to what the Monitor watches but never takes
-    /// sites away from it.
-    public func keepingListRules(from old: MonitorSettings) -> MonitorSettings {
-        var s = self
-        for name in watchLists where name != Self.explicitListName {
-            let kept = old.listRules[name] ?? []
-            let added = (listRules[name] ?? []).filter { !kept.contains($0) }
-            if !kept.isEmpty || !added.isEmpty { s.listRules[name] = kept + added }
-        }
-        return s
-    }
-
-    /// Whether sending `fresh` list rules (from the blocklists) would change
-    /// what the Monitor watches. While locked, only added sites do.
-    public func listRulesNeedSync(to fresh: MonitorSettings, locked: Bool) -> Bool {
-        guard locked else { return fresh.listRules != listRules }
-        return fresh.listRules.contains { name, rules in
-            let current = Set(listRules[name] ?? [])
-            return rules.contains { !current.contains($0) }
-        }
     }
 
     /// The first `limit` items, then how many more, so a report sentence

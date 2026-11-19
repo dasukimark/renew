@@ -54,8 +54,8 @@ the window:
 - **Accountability**: three tabs. **Partners**: your partners' emails (reports
   and check-ins) and a history of what they've been sent (see
   [Accountability](#accountability)). **Monitoring**: what the Monitor watches;
-  it reads Activity and flags visits to explicit or watched sites, or with
-  watched words in their titles (see [Monitor](#monitor)). **Flags**: what it
+  it reads Activity and flags explicit content, visits to sites on your
+  monitoring lists, or pages with watched words in their titles (see [Monitor](#monitor)). **Flags**: what it
   flagged. The Monitor needs a partner and Activity on.
 - **Setup**: service status, permissions, protections,
   and uninstall (see below).
@@ -74,7 +74,8 @@ Rule syntax:
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
 `renew reports set <email>...`, `renew protections on all`, `renew activity on`,
-`renew stats --site youtube.com`, `renew monitor on`, `renew monitor explicit on`, `renew flags`, `renew uninstall`).
+`renew stats --site youtube.com`, `renew monitor on`, `renew monitor explicit on`,
+`renew monitor list add reddit reddit.com`, `renew flags`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
 time on a clock that ignores date changes (since the Mac last started), and a
@@ -157,13 +158,12 @@ on`). The Monitor reads the visits Activity records, so it needs Activity on.
 
 - **Needs a partner:** monitoring is for telling someone, so it can't be turned
   on until you have an accountability partner. The **Partners** tab offers to
-  turn it on (watching explicit sites and explicit content) once you add one.
+  turn it on (with **Flag explicit content**) once you add one.
 - **Locked while you have a partner:** the Monitor can't be turned off, and
-  nothing it watches can be removed: no unchecking a list, turning off
-  **Flag explicit content**, or removing a site or word. Activity can't be
-  turned off either while the Monitor is on, since that would stop it
-  (turning the Monitor on with a partner turns Activity on too). A watched
-  blocklist's sites stay watched even if the blocklist is edited or deleted.
+  nothing it watches can be removed: no deleting a monitoring list or removing
+  sites from one, turning off **Flag explicit content**, or removing a site or
+  word. Activity can't be turned off either while the Monitor is on, since that
+  would stop it (turning the Monitor on with a partner turns Activity on too).
   Partners are the Mac's, like email reports (which include every user's
   flags), so they lock every user's Monitor. Adding
   to what's watched always works. renewd enforces this, so `renew monitor off`
@@ -172,15 +172,24 @@ on`). The Monitor reads the visits Activity records, so it needs Activity on.
   Monitoring that was on before a partner was required stays editable until
   you add one.
 
-- **Flags:** a visit is flagged when its site is on a watched list or its title
-  contains a watched word. Nothing is watched until you choose it: **Explicit
-  sites** (a preset bundled with Renew, see below), any of your blocklists, sites
-  you add, **Flag explicit content**, and other words you add. Words are matched as
-  whole words, ignoring case and accents, so "sex" doesn't match "Essex".
+- **Flags:** nothing is watched until you choose it:
+  - **Flag explicit content**: one switch for visits to known adult sites (a
+    preset bundled with Renew, see below), page titles with explicit words, and
+    a closer look at mixed sites (see below).
+  - **Monitoring lists**: named lists of sites you still visit but want
+    flagged for your partner (e.g. a "reddit" list). They're separate from
+    blocklists, which are for sites you never want to visit, and use the same
+    rule syntax. Start from scratch or add a starter (Social, Video, News,
+    copied from the built-in blocklists' sites). Manage them in
+    **Accountability → Monitoring** or with `renew monitor list add|remove NAME
+    SITE...`, `renew monitor list delete NAME`, `renew monitor list starter NAME`.
+  - **Other sites** and **other words** you add. Words are matched as whole
+    words, ignoring case and accents, so "sex" doesn't match "Essex".
 - **renewd does the checking**, not the app: each visit is checked once, as it
-  reaches renewd, so what gets flagged doesn't depend on the app. renewd can't
-  read your blocklists (they're in your home folder), so the app and `renew`
-  give it a copy of the watched ones, and update it when you edit them.
+  reaches renewd, so what gets flagged doesn't depend on the app. renewd keeps
+  the monitoring lists itself. Blocklists the Monitor watched before monitoring
+  lists became monitoring lists with the same name and sites; editing the
+  blocklist no longer changes them.
 - **Flags are never rewritten.** Changing a rule only affects visits from then on.
 - **Where:** renewd keeps flags apart from the activity log, in
   `/var/db/com.renew/monitor/<uid>/`, one root-only file per day, for a year
@@ -272,7 +281,7 @@ older one refuses reports sent to more than one address. Email reports and
 check-ins are the only things Renew sends off the Mac.
 
 - **What's sent:** the site (e.g. `example.com`), the page title, why it was
-  flagged (explicit site, a watched list, a watched word), when, and for how
+  flagged (explicit site, a monitoring list, a watched word), when, and for how
   long. Never the full address. Times are in the Mac's time zone.
 - **Grouped:** flags within a minute of the first one go in one email, so a
   burst of browsing sends one email, not fifty.
@@ -282,10 +291,8 @@ check-ins are the only things Renew sends off the Mac.
   off Wi-Fi only delays a report.
 - **Monitoring is locked:** while you have a partner, the Monitor can't be
   turned off or watch less, and Activity can't be turned off (see
-  [Monitor](#monitor)). Blocklists can still be edited, but while locked,
-  removing sites from a watched blocklist (or deleting it) doesn't take them
-  away from the Monitor; added sites are watched too. Blocklist edits aren't
-  reported.
+  [Monitor](#monitor)). Blocklists aren't part of monitoring, so they can
+  always be edited and their edits aren't reported.
 - **Removing needs approval:** reports can be turned on and partners added at
   any time. Removing a partner or turning reports off (only between block
   sessions) emails your partners an approval link, and **nothing changes until
