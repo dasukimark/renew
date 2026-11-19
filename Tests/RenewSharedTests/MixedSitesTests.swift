@@ -22,6 +22,15 @@ struct SiteCategoryTests {
         #expect(SiteCategory.of(url: "https://www.figma.com/design/abc") == .work)
     }
 
+    @Test func recoverySites() {
+        for host in ["www.covenanteyes.com", "covenanteyes.com", "nofap.com", "fightthenewdrug.org", "sa.org"] {
+            #expect(SiteCategory.of(host: host) == .recovery, "\(host)")
+        }
+        for host in ["covenanteyes.com.example", "notnofap.com", "visa.org"] {
+            #expect(SiteCategory.of(host: host) != .recovery, "\(host)")
+        }
+    }
+
     @Test func mixedSites() {
         for host in ["old.reddit.com", "reddit.com", "m.youtube.com", "x.com", "bsky.app", "www.pixiv.net",
                      "xcancel.com", "redlib.example.org", "nitter-1.example.net", "yewtu.be"] {
@@ -210,6 +219,16 @@ struct MixedSiteMatchingTests {
         #expect(matcher(explicitContent: false, explicit: true).flags(url: "https://github.com/", title: "porn").isEmpty)
         // Other sites still are.
         #expect(m.flags(url: "https://adult.example/", title: "") == [.domain("explicit", "adult.example")])
+    }
+
+    @Test func recoverySitesAreNotFlaggedByBuiltInWords() {
+        let m = matcher()
+        #expect(m.flags(url: "https://www.covenanteyes.com/a/", title: "Overcome Porn. Restore What Matters.").isEmpty)
+        #expect(m.flags(url: "https://www.covenanteyes.com/b/", title: "The Most Up-to-Date Pornography Statistics").isEmpty)
+        // Elsewhere the same title flags.
+        #expect(!m.flags(url: "https://news.example/a", title: "Overcome Porn. Restore What Matters.").isEmpty)
+        // Your own words still count there.
+        #expect(matcher(custom: ["statistics"]).flags(url: "https://www.covenanteyes.com/b/", title: "Pornography Statistics") == [.term("statistics")])
     }
 
     @Test func mixedTitlePolicyIsStricter() {

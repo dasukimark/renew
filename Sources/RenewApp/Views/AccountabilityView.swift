@@ -34,9 +34,7 @@ struct AccountabilityView: View {
             if let email = removing, model.retainedReportPartners.contains(email) {
                 Text("Renew keeps checking in while your partner reviews the new request.")
             } else {
-                Text(model.reportsPartners.count == 1
-                     ? "Local email reports turn off. This address stays pending until your partner approves ending server monitoring."
-                     : "Local reports to this address stop. It stays pending until your partner approves the monitoring change.")
+                Text("Your partner is emailed a link to approve. Reports keep going to this address until a partner approves; if they decline, nothing changes.")
             }
         }
         .confirmationDialog("Turn off email reports?", isPresented: $confirmingOff) {
@@ -45,7 +43,7 @@ struct AccountabilityView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Local email reports turn off. The server keeps monitoring until a partner approves.")
+            Text("Your partners are emailed a link to approve. Reports keep going to them until one approves; if they decline, nothing changes.")
         }
     }
 
@@ -64,7 +62,7 @@ struct AccountabilityView: View {
 
     private var partnerSection: some View {
         Section {
-            ForEach(model.reportsPartners, id: \.self) { email in
+            ForEach(model.reportsPartners.filter { !model.pendingReportPartners.contains($0) }, id: \.self) { email in
                 HStack {
                     Text(email)
                         .textSelection(.enabled)
@@ -84,7 +82,7 @@ struct AccountabilityView: View {
                     Text(email)
                         .textSelection(.enabled)
                     Spacer()
-                    statusDot("Pending partner approval", .orange)
+                    statusDot("Removal waiting for approval", .orange)
                 }
             }
             ForEach(model.retainedReportPartners.filter { !model.pendingReportPartners.contains($0) }, id: \.self) { email in
@@ -142,9 +140,7 @@ struct AccountabilityView: View {
             Text("Partners")
         } footer: {
             if !model.pendingReportPartners.isEmpty {
-                Text(reportsOn
-                     ? "Pending addresses can still receive server check-in alerts until a partner approves."
-                     : "Local reports are off. Renew keeps checking in while your partner decides.")
+                Text("Addresses waiting for approval still get email reports and check-in alerts until a partner approves removing them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
