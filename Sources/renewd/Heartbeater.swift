@@ -18,6 +18,8 @@ import RenewShared
 final class Heartbeater: @unchecked Sendable {
     /// Where check-ins go now: the email reports' destination.
     var destination: () -> ReportTarget?
+    /// Partners left out of check-in details (see `Daemon.partnersBeingAsked`).
+    let leftOut: () -> Set<String>
     /// Enrollments whose partner approval is pending or was declined.
     var monitoringTargets: () -> [ReportTarget] = { [] }
     /// This install's id (made once and kept in the state file).
@@ -68,9 +70,10 @@ final class Heartbeater: @unchecked Sendable {
     private var sleptAt: TimeInterval = 0
 
     init(queue: DispatchQueue, dev: Bool, destination: @escaping () -> ReportTarget?,
-         installID: @escaping () -> UUID, userName: @escaping () -> String) {
+         leftOut: @escaping () -> Set<String> = { [] }, installID: @escaping () -> UUID, userName: @escaping () -> String) {
         self.queue = queue
         self.destination = destination
+        self.leftOut = leftOut
         self.installID = installID
         self.userName = userName
         self.logOnly = dev && ProcessInfo.processInfo.environment["RENEW_DEV_REPORTS"] == nil
@@ -164,8 +167,12 @@ final class Heartbeater: @unchecked Sendable {
 
     // MARK: sending
 
-    private func details(for target: ReportTarget) -> Heartbeat.Details {
-        Heartbeat.Details(to: target.partnerEmails, mac: Report.macName, user: userName())
+    /// Nil when every partner is being asked about their removal: the
+    /// server then keeps the details it has.
+    private func details(for target: ReportTarget) -> Heartbeat.Details? {
+        let skip = leftOut()
+        let to = target.partnerEmails.filter { !skip.contains($0) }
+        return to.isEmpty ? nil : Heartbeat.Details(to: to, mac: Report.macName, user: userName())
     }
 
     private var checkInTarget: ReportTarget? { destination() ?? monitoringTargets().first }
@@ -181,7 +188,7 @@ final class Heartbeater: @unchecked Sendable {
             return beat
         }
         let d = details(for: target)
-        var beat = Heartbeat.make(state, install: installID(), details: d == acceptedDetails ? nil : d,
+        var beat = Heartbeat.make(state, install: installID(), details: d == nil || d == acceptedDetails ? nil : d,
                                   lastAccepted: lastAccepted, gaps: gaps.load(), coveredSince: coveredSince(), runID: runID)
         beat.explicitPartnerRemovals = true
         return beat

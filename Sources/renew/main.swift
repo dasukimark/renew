@@ -42,7 +42,7 @@ Usage:
   renew reports                                        show where email reports go
   renew reports set <EMAIL>...                         email flag reports to your accountability partners
   renew reports set <EMAIL>... --server <URL> [TOKEN]  ...through a different report server (asks for the token)
-  renew reports off                                    turn email reports off (between sessions only)
+  renew reports off                                    ask partners to approve turning reports off (between sessions)
   renew reports test                                   send a test report
   renew protections                                    show which hardening protections are on
   renew protections on|off <NAME>...                   turn protections on, or off (between sessions only)
@@ -117,8 +117,14 @@ func printStatus(_ s: Status) {
     printAgents(s)
 }
 
+/// Partners whose removal waits for approval (they still get reports).
+func pendingNote(_ s: Status) -> String {
+    guard let p = s.pendingReportPartners, !p.isEmpty else { return "" }
+    return " (\(p.joined(separator: ", ")): removal waiting for a partner's approval)"
+}
+
 func printExtras(_ s: Status) {
-    print("  Email reports: \(s.reportsPartners.map { "to \($0.joined(separator: ", "))" } ?? "off")")
+    print("  Email reports: \(s.reportsPartners.map { "to \($0.joined(separator: ", "))" } ?? "off")\(pendingNote(s))")
     if let p = s.protections {
         print("  Protections: \(p.onNames.isEmpty ? "none" : p.onNames.joined(separator: ", "))")
     }
@@ -253,7 +259,7 @@ case "reports":
     case "show":
         let st = send(Request(cmd: .status))
         if let to = st.reportsPartners {
-            print("Email reports: to \(to.joined(separator: ", "))\(st.reportsURL.map { ", through \($0)" } ?? "")")
+            print("Email reports: to \(to.joined(separator: ", "))\(st.reportsURL.map { ", through \($0)" } ?? "")\(pendingNote(st))")
         } else {
             print("Email reports: off\(st.reportServerBuiltIn == false ? " (no report server set up on this Mac)" : "")")
         }
@@ -275,10 +281,11 @@ case "reports":
         }
         guard !rest.isEmpty else { die("usage: renew reports set <EMAIL>... [--server URL [TOKEN]]") }
         let st = send(Request(cmd: .setReports, reports: ReportDestination(partnerEmails: rest, url: url, token: token)))
-        print("Email reports go to \(st.reportsPartners?.joined(separator: ", ") ?? "?"). A confirmation email is on its way.")
+        print("Email reports go to \(st.reportsPartners?.joined(separator: ", ") ?? "?")\(pendingNote(st)). A confirmation email is on its way.")
     case "off":
-        _ = send(Request(cmd: .setReports, reports: nil))
-        print("Email reports are off.")
+        let st = send(Request(cmd: .setReports, reports: nil))
+        print(pendingNote(st).isEmpty ? "Email reports are off."
+              : "Asked your partners to approve turning email reports off. Reports keep going to them until one approves.")
     case "test":
         _ = send(Request(cmd: .testReport))
         print("Test report sent. Check renewd's log if no email arrives.")

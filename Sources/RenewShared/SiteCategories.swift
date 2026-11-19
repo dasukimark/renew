@@ -7,11 +7,15 @@ import Foundation
 ///   built in and can't be added to from settings. Hosts anyone can publish
 ///   files to without an account in your company are left out
 ///   (`workExceptions`).
+/// - `recovery`: recovery and accountability sites (Covenant Eyes, Fortify,
+///   NoFap…), whose titles talk about pornography to help people quit. The
+///   built-in explicit words don't flag them; your own lists and words still
+///   do.
 /// - `mixed`: sites that show ordinary and adult content side by side. With
 ///   `MonitorSettings.flagExplicitTerms` on they get stricter title scoring and
 ///   page reading (see `PageSignals`).
 public enum SiteCategory: Sendable, Equatable {
-    case work, mixed, other
+    case work, recovery, mixed, other
 
     /// Work tools. Google is listed by exact host only: `google.com` itself
     /// would exempt Search and Images, and Drive can hold any image or video.
@@ -30,6 +34,15 @@ public enum SiteCategory: Sendable, Equatable {
     static func isWorkException(_ host: String) -> Bool {
         host == "gist.github.com" || host.hasSuffix("-my.sharepoint.com")
     }
+
+    /// Recovery programs, accountability apps and support groups.
+    public static let recoveryDomains: [String] = [
+        "covenanteyes.com", "everaccountable.com", "accountable2you.com", "truple.io", "x3watch.com",
+        "joinfortify.com", "fortifyprogram.org", "nofap.com", "rebootnation.org", "yourbrainonporn.com",
+        "fightthenewdrug.org", "puredesire.org", "conquerseries.com", "settingcaptivesfree.com",
+        "purelifeministries.org", "brainbuddyapp.com", "joinrelay.app", "recoverynation.com",
+        "saa-recovery.org", "slaafws.org", "sa.org",
+    ]
 
     /// Sites that mix ordinary and adult content, and alternative front ends
     /// for them. Being here only ever adds scrutiny.
@@ -54,11 +67,13 @@ public enum SiteCategory: Sendable, Equatable {
 
     private static let workSet = DomainSet(workDomains)
     private static let mixedSet = DomainSet(mixedDomains)
+    private static let recoverySet = DomainSet(recoveryDomains)
 
-    /// The category of `host` (subdomains included). Work wins over mixed.
+    /// The category of `host` (subdomains included). Work wins, then recovery, then mixed.
     public static func of(host: String) -> SiteCategory {
         let h = Rule.normalizeHost(host)
         if workSet.match(host: h) != nil, !isWorkException(h) { return .work }
+        if recoverySet.match(host: h) != nil { return .recovery }
         if mixedSet.match(host: h) != nil { return .mixed }
         if let first = h.split(separator: ".").first, h.contains("."),
            mixedHostPrefixes.contains(where: { first == $0 || first.hasPrefix($0 + "-") }) {

@@ -180,6 +180,11 @@ Monitor reads the visits Activity records, so it needs Activity on.
   personal or public files (githubusercontent.com, gists, notion.site,
   OneDrive for Business at `<tenant>-my.sharepoint.com`, Figma community
   pages). This also overrides sites and words you watch yourself.
+- **Recovery and accountability sites** (Covenant Eyes, Ever Accountable,
+  Accountable2You, Truple, Fortify, NoFap, Fight the New Drug, Pure Desire,
+  SAA, SLAA, SA and others; `SiteCategory.recoveryDomains`) aren't flagged by
+  the built-in explicit words, since their pages talk about pornography to
+  help people quit. Lists and words you watch yourself still apply there.
 - **Mixed sites** (Reddit, X, YouTube, Patreon, Vimeo, Tumblr, Bluesky,
   Facebook, Instagram, TikTok, Pixiv and others, plus Redlib, Nitter, Invidious
   and Piped front ends) get a closer look with **Flag explicit content** on
@@ -260,11 +265,15 @@ check-ins are the only things Renew sends off the Mac.
 - **Changes are reported too:** turning Activity or the Monitor off, no longer
   watching a list or explicit words, and removing watched sites or words each
   send an email. Adding rules, and editing a blocklist's sites, don't.
-- **Locked during sessions:** reports can be turned on and partners added at
-  any time, but partners removed or reports turned off only between block
-  sessions. Saved partners can't be edited, only removed. A removed partner gets
-  a change notice, and reports still waiting to be sent go to the old list of
-  partners. `renew reports test` (or **Send test**) sends a test
+- **Removing needs approval:** reports can be turned on and partners added at
+  any time. Removing a partner or turning reports off (only between block
+  sessions) emails your partners an approval link, and **nothing changes until
+  one of them approves**: reports and check-ins keep going to everyone, and
+  the address shows "Removal waiting for approval". If they decline, nothing
+  changes. Once approved, the partner gets a change notice and reports stop
+  going to them (with none left, reports turn off). Moving reports to a
+  different server needs your partners removed first. Saved partners can't be
+  edited, only removed. `renew reports test` (or **Send test**) sends a test
   email.
 
 #### Check-ins
@@ -317,11 +326,12 @@ Closing the lid, shutting down or restarting don't send anything: renewd
 checks in one last time before the Mac sleeps, and the Renew app tells renewd
 when the Mac is about to shut down. renewd only accepts that notice from the
 Renew app itself (checked by its code signature), so a script can't make
-stopping renewd look like a shutdown. Turning reports off, removing a partner,
-moving servers, or running `renew uninstall` asks the server to end monitoring
-for that enrollment. The server emails an approval link to the original
-partners and keeps monitoring until one of them approves. Local changes
-and uninstall can take effect immediately.
+stopping renewd look like a shutdown. Turning reports off or removing a partner
+asks the server to end monitoring for that partner. The server emails an
+approval link to the original partners, and both the server and the Mac keep
+going as before until one of them approves (see **Removing needs approval**
+above). `renew uninstall` also asks the server, but has its own cooling-off
+and takes effect without waiting for the answer.
 
 Check-ins name your partners, the Mac and the user only when renewd starts or
 those change; the rest of the time they carry just this install's id, the

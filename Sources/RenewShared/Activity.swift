@@ -405,7 +405,8 @@ public struct TermMatcher: Sendable {
 
 /// Decides which flags a page gets under the Monitor's settings.
 ///
-/// Work sites (`SiteCategory.work`) are never flagged. Mixed sites get
+/// Work sites (`SiteCategory.work`) are never flagged, and recovery sites
+/// (`SiteCategory.recovery`) never by the built-in words. Mixed sites get
 /// stricter title scoring and their page findings (`PageSignals`) checked
 /// when `flagExplicitTerms` is on.
 public struct ActivityMatcher: Sendable {
@@ -473,12 +474,14 @@ public struct ActivityMatcher: Sendable {
         }
 
         // Normalized once for both the built-in words and your own.
-        let variants = explicitTerms == nil && terms.isEmpty ? [] : TitleNormalizer.variants(title)
+        // Recovery sites talk about pornography to help people quit.
+        let scorer = category == .recovery ? nil : explicitTerms
+        let variants = scorer == nil && terms.isEmpty ? [] : TitleNormalizer.variants(title)
         var found = Set<String>()
-        if let r = explicitTerms?.evaluate(variants: variants, masked: TitleNormalizer.maskedWords(title),
-                                           policy: mixed ? .mixed : .standard,
-                                           extra: feedLabels.isEmpty ? [] : [(feedLabels.map { "site label: \($0)" }
-                                               .joined(separator: ", "), Self.feedLabelWeight)]) {
+        if let r = scorer?.evaluate(variants: variants, masked: TitleNormalizer.maskedWords(title),
+                                    policy: mixed ? .mixed : .standard,
+                                    extra: feedLabels.isEmpty ? [] : [(feedLabels.map { "site label: \($0)" }
+                                        .joined(separator: ", "), Self.feedLabelWeight)]) {
             for t in r.strong { out.append(.term(t)); found.insert(TermMatcher.words(t).joined(separator: " ")) }
             if r.strong.isEmpty && r.flagged { out.append(.score(r.contributors.joined(separator: ", "))) }
         }

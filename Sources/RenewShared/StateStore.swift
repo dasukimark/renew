@@ -26,6 +26,10 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// Partners who declined removal. Their servers still receive check-ins.
     public var retainedMonitoring: [ReportTarget]?
     public var seenMonitoringRejections: [String: UUID]?
+    /// By report server, partners the server was seen asking to approve
+    /// their removal. Only these count as approved once the server stops
+    /// monitoring them: a partner it never enrolled never approved anything.
+    public var removalsSeenAsked: [String: [String]]?
     /// This install's id, sent with check-ins (see `Heartbeat`). Made by
     /// renewd the first time it starts.
     public var installID: UUID?
