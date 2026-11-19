@@ -74,7 +74,7 @@ Rule syntax:
 A command-line tool is also installed for scripting (`renew start 2h --list social`,
 `renew status`, `renew extend 30m`, `renew add x.com`, `renew schedules`,
 `renew reports set <email>...`, `renew protections on all`, `renew activity on`,
-`renew stats --site youtube.com`, `renew monitor on`, `renew flags`, `renew uninstall`).
+`renew stats --site youtube.com`, `renew monitor on`, `renew monitor explicit on`, `renew flags`, `renew uninstall`).
 
 Schedules can't be skipped by changing the Mac's clock: renewd also keeps
 time on a clock that ignores date changes (since the Mac last started), and a
@@ -157,7 +157,7 @@ Monitor reads the visits Activity records, so it needs Activity on.
 - **Flags:** a visit is flagged when its site is on a watched list or its title
   contains a watched word. Nothing is watched until you choose it: **Explicit
   sites** (a preset bundled with Renew, see below), any of your blocklists, sites
-  you add, the preset of explicit words, and words you add. Words are matched as
+  you add, **Flag explicit content**, and other words you add. Words are matched as
   whole words, ignoring case and accents, so "sex" doesn't match "Essex".
 - **renewd does the checking**, not the app: each visit is checked once, as it
   reaches renewd, so what gets flagged doesn't depend on the app. renewd can't
@@ -170,6 +170,49 @@ Monitor reads the visits Activity records, so it needs Activity on.
   `renew flags [--date YYYY-MM-DD]`.
 - **Reports:** with [email reports](#email-reports) on, your accountability
   partners are emailed about flags.
+- **Work sites are never flagged:** Atlassian (Confluence, Jira), Slack,
+  GitHub, GitLab, Bitbucket, Linear, Notion, Figma, Zoom, Teams, SharePoint,
+  Office, Google Docs (`docs.google.com`) and Gmail (`mail.google.com`), with
+  their subdomains. Nothing about them is flagged or reported, whatever the
+  lists or words say, so work information never reaches your partners. The
+  list is built in (`SiteCategory.workDomains`) and can't be added to. Google
+  Search, Images and Drive aren't on it, and neither are hosts that serve
+  personal or public files (githubusercontent.com, gists, notion.site,
+  OneDrive for Business at `<tenant>-my.sharepoint.com`, Figma community
+  pages). This also overrides sites and words you watch yourself.
+- **Mixed sites** (Reddit, X, YouTube, Patreon, Vimeo, Tumblr, Bluesky,
+  Facebook, Instagram, TikTok, Pixiv and others, plus Redlib, Nitter, Invidious
+  and Piped front ends) get a closer look with **Flag explicit content** on
+  (**Monitor → Settings**, or `renew monitor explicit on`). On those sites
+  only:
+  - **Titles** flag more readily: one clearly sexual slang word (like
+    "sexy") flags, and suggestive words can add up to a flag. Words with
+    common innocent meanings ("ass", "escort", "uncensored", "stepmom"…)
+    still need a second signal, and swearing alone still never flags.
+  - **The page is read**, the way a screen reader reads it, through the
+    Accessibility permission Renew already has (no Screen Recording, no
+    network). Renew looks for the **site's own NSFW/18+ labels** (Reddit's 18+
+    gate and NSFW tags, X's sensitive-media cover, Tumblr's mature-content
+    warning, Bluesky's adult-content label, YouTube's age check, Pixiv's R-18
+    tag) and for **strong explicit words** in the page text. Site navigation,
+    headers, sidebars and footers are skipped. A page-wide label flags the
+    visit ("Site label: …"). A post label flags a single post (`/status/123`,
+    `/comments/…`, `/watch?v=…`; not a feed like `/r/videos` or a channel's
+    videos tab) when it's on the post itself, not in a reply below it. On a
+    feed, post labels and plain "NSFW" or "mature content" wording (which
+    could come from a comment or a recommended link) only add to the title
+    score, together never enough to flag without explicit title words. Three
+    or more different strong words flag the visit ("Page words: …"); each
+    piece of text on the page is read on its own. The page text is dropped straight away;
+    only the labels and words found are kept with the visit. The front page is
+    read at most every 5 seconds. Chrome-based browsers only expose page text
+    with their accessibility tree on, so Renew turns it on while a mixed site
+    is in front and off again as soon as one isn't (unless something else had
+    already turned it on).
+  - Images and video aren't looked at directly: an unlabelled image with no
+    telling words isn't caught.
+  Turning **Flag explicit content** off is reported to your partners like
+  other loosened rules.
 
 Each user on the Mac has their own Activity and Monitor settings and only changes
 their own. For now they can be turned off or changed at any time. Settings from

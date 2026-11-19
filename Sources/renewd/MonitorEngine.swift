@@ -69,7 +69,7 @@ final class MonitorEngine {
         let matcher = self.matcher(for: uid, settings: settings)
         guard !matcher.isEmpty else { return [] }
         return events.compactMap { e in
-            let flags = matcher.flags(url: e.url, title: e.title)
+            let flags = matcher.flags(url: e.url, title: e.title, signals: e.signals)
             return flags.isEmpty ? nil : MonitorFlag(event: e, flags: flags, flaggedAt: now)
         }
     }

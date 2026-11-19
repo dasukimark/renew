@@ -243,7 +243,7 @@ struct ReportsTests {
         fewer.customTerms = ["poker"]
         #expect(old.loosenings(to: fewer) == [
             "Explicit sites are no longer watched.",
-            "Explicit words in page titles are no longer watched.",
+            "Explicit content is no longer flagged.",
             "Watched sites removed: a.example.",
             "Watched words removed: casino.",
         ])

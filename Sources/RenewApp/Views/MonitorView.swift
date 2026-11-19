@@ -112,7 +112,9 @@ private struct MonitorFlagsView: View {
                     ForEach(f.flags, id: \.self) { flag in
                         FlagBadge(text: flag.label, color: .red)
                             .help(flag.kind == .domain ? "Matched \(flag.match)"
-                                  : flag.isScore ? "Title has several suggestive words: \(flag.match)"
+                                  : flag.isScore ? "Several signals added up: \(flag.match)"
+                                  : flag.isSiteLabel ? "The site marked this page as adult content (\(flag.match))"
+                                  : flag.isPageWords ? "The page text has several explicit words: \(flag.match)"
                                   : "Title contains “\(flag.match)”")
                     }
                 }
@@ -234,15 +236,23 @@ private struct MonitorSettingsView: View {
             Section {
                 Toggle(isOn: binding(\.flagExplicitTerms)) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Explicit words")
-                        Text("Common explicit words and adult site names, including disguised spellings and suggestive combinations.")
+                        Text("Flag explicit content")
+                        Text("Page titles with explicit words or adult site names, including disguised spellings and suggestive combinations. On sites like Reddit, X and YouTube, also reads the visible text of the page for the site's own NSFW labels and explicit words. Page text never leaves the Mac.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
                 .toggleStyle(.switch)
+            } header: {
+                Text("Explicit content")
+            } footer: {
+                Text("Work sites (Slack, Jira, GitHub, Google Docs, Gmail…) are never flagged.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Other words")
                     HStack {
                         TextField("Add a word or phrase", text: $termDraft)
                             .textFieldStyle(.roundedBorder)
@@ -260,9 +270,9 @@ private struct MonitorSettingsView: View {
                     }
                 }
             } header: {
-                Text("Flag page titles containing")
+                Text("Other words")
             } footer: {
-                Text("Words match whole words, ignoring case and accents, so “sex” doesn't match “Essex”.")
+                Text("Flags page titles containing any of these. Words match whole words, ignoring case and accents, so “sex” doesn't match “Essex”.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

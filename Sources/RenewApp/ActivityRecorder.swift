@@ -19,6 +19,8 @@ final class ActivityRecorder {
         var url: String
         var title: String
         var blocked = false
+        /// What page reading found, if the page was read this time.
+        var signals: PageSignals? = nil
     }
 
     var settings: ActivitySettings = .off {
@@ -60,7 +62,8 @@ final class ActivityRecorder {
     func observe(_ channel: Channel, _ pages: [Seen]) {
         guard settings.enabled else { return }
         let observations = pages.map {
-            PageObservation(source: $0.source, browser: $0.browser, url: $0.url, title: $0.title, blocked: $0.blocked)
+            PageObservation(source: $0.source, browser: $0.browser, url: $0.url, title: $0.title, blocked: $0.blocked,
+                            signals: $0.signals)
         }
         finish(tracker.observe(observations, channel: channel.rawValue, at: Date()))
     }
