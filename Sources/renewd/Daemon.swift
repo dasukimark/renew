@@ -535,13 +535,15 @@ final class Daemon: @unchecked Sendable {
     /// with a partner turns Activity on too, so the lock always has visits
     /// to check. Loosenings still allowed are reported (see
     /// `MonitorSettings.loosenings`).
-    private func setMonitor(_ requested: MonitorSettings, by uid: uid_t) -> String? {
+    private func setMonitor(_ request: MonitorSettings, by uid: uid_t) -> String? {
         // Compared normalized, so entries today's rules would drop from the
         // stored settings don't look like something being removed.
         let old = state.monitor(for: uid).normalized()
         let stored = state.monitor(for: uid)
         let hasPartner = state.hasAccountabilityPartner
-        if requested.isLegacyFormat { return MonitorSettings.legacyClientMessage }
+        if request.isLegacyFormat { return MonitorSettings.legacyClientMessage }
+        var requested = request
+        if requested.omitsFlagLists { requested.flagLists = stored.flagLists }
         if let error = requested.limitError { return error }
         let new = requested.normalized()
         if let refusal = old.refusal(changingTo: new, hasPartner: hasPartner) {
@@ -560,10 +562,10 @@ final class Daemon: @unchecked Sendable {
         if old.enabled != new.enabled {
             log("Monitor turned \(new.enabled ? "on" : "off") by uid \(uid)")
         }
-        if old.lists != new.lists || old.customDomains != new.customDomains
+        if old.lists != new.lists || old.customDomains != new.customDomains || old.flagLists != new.flagLists
             || old.flagExplicit != new.flagExplicit || old.customTerms != new.customTerms {
             let lists = new.sortedListNames.map { "\($0) (\(new.lists[$0]?.count ?? 0))" }.joined(separator: ", ")
-            log("Monitor rules changed by uid \(uid): lists [\(lists)], \(new.customDomains.count) other sites, explicit content \(new.flagExplicit ? "on" : "off"), \(new.customTerms.count) words")
+            log("Monitor rules changed by uid \(uid): lists \(new.flagLists ? "on" : "off") [\(lists)], \(new.customDomains.count) other sites, explicit content \(new.flagExplicit ? "on" : "off"), \(new.customTerms.count) words")
         }
         reporter.add(changes: old.loosenings(to: new), uid: uid)
         return nil

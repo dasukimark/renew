@@ -323,14 +323,16 @@ case "monitor":
             let n = m.lists[name]?.count ?? 0
             return "\(name) (\(n == 1 ? "1 site" : "\(n) sites"))"
         }
-        print("  Lists:         \(lists.isEmpty ? "none" : lists.joined(separator: ", "))")
-        print("  Other sites:   \(m.customDomains.isEmpty ? "none" : m.customDomains.joined(separator: ", "))")
+        let off = m.flagLists ? "" : " (off, not flagged)"
+        print("  Lists:         \(lists.isEmpty ? (m.flagLists ? "none" : "off") : lists.joined(separator: ", ") + off)")
+        print("  Other sites:   \(m.customDomains.isEmpty ? "none" : m.customDomains.joined(separator: ", ") + off)")
         print("  Other words:   \(m.customTerms.isEmpty ? "none" : m.customTerms.joined(separator: ", "))")
     }
-    func change(_ edit: (inout MonitorSettings) -> Void) {
+    func change(needsListSwitch: Bool = false, _ edit: (inout MonitorSettings) -> Void) {
         let st = send(Request(cmd: .status))
         guard var m = st.monitor else { die("This Renew service predates the Monitor. Reinstall Renew.") }
         guard st.monitorLists == true else { die("This Renew service predates monitoring lists. Reinstall Renew.") }
+        if needsListSwitch && st.monitorListSwitch != true { die("This Renew service can't turn monitoring lists off. Reinstall Renew.") }
         edit(&m)
         if let error = m.limitError { die(error) }
         show(send(Request(cmd: .setMonitor, monitor: m)))
@@ -345,7 +347,11 @@ case "monitor":
     case "watch":
         die("Monitoring lists are separate from blocklists now: use `renew monitor list add NAME SITE...`")
     case "list", "lists":
-        let usage = "usage: renew monitor list add|remove NAME SITE... | list delete NAME | list starter \(MonitorSettings.starterLists.joined(separator: "|"))"
+        let usage = "usage: renew monitor list on|off | list add|remove NAME SITE... | list delete NAME | list starter \(MonitorSettings.starterLists.joined(separator: "|"))"
+        if rest.count == 1, ["on", "off"].contains(rest[0]) {
+            change(needsListSwitch: true) { $0.flagLists = rest[0] == "on" }
+            break
+        }
         guard rest.count >= 2 else { die(usage) }
         guard let name = MonitorSettings.cleanListName(rest[1]) else {
             die("'\(rest[1])' can't be used as a list name (not \"explicit\" or \"custom\", at most \(MonitorSettings.maxListNameLength) characters)")

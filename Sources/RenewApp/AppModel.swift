@@ -343,6 +343,10 @@ final class AppModel: ObservableObject {
     /// blocklists instead), so changing its settings would drop the lists.
     var monitorListsSupported: Bool { status?.monitorLists == true }
 
+    /// False if the running service predates the monitoring lists switch
+    /// (`MonitorSettings.flagLists`) and always watches the lists.
+    var monitorListSwitchSupported: Bool { status?.monitorListSwitch == true }
+
     /// Whether someone holds this Mac accountable, as renewd sees it (see
     /// `PersistedState.hasAccountabilityPartner`). The Monitor needs one to
     /// be turned on.

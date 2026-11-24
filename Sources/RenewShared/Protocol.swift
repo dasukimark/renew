@@ -199,6 +199,9 @@ public struct Status: Codable, Sendable {
     /// (`MonitorSettings.lists`). nil from daemons that predate them, which
     /// watched blocklists instead and would drop the lists.
     public var monitorLists: Bool?
+    /// Whether the Monitor honours `MonitorSettings.flagLists`. nil from
+    /// daemons that predate the switch, which always watch the lists.
+    public var monitorListSwitch: Bool?
 
     /// Whether Activity is on, falling back to an older daemon's combined
     /// setting, so recording carries on until renewd is updated too.
@@ -242,6 +245,7 @@ public struct Status: Codable, Sendable {
         self.activity = activity
         self.monitor = monitor
         self.monitorLists = monitor == nil ? nil : true
+        self.monitorListSwitch = monitor == nil ? nil : true
     }
 }
 

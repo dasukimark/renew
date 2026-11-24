@@ -320,6 +320,36 @@ struct InfoBanner: View {
     }
 }
 
+/// A notice as one row of a grouped Form: icon, title, explanation and
+/// one button. `InfoBanner` draws its own card, which would sit inside the
+/// Form's.
+struct NoticeRow: View {
+    let title: String
+    let message: String
+    var button: String?
+    var icon = "info.circle.fill"
+    var tint: Color = .accentColor
+    var action: () -> Void = {}
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(tint)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if let button { Button(button, action: action) }
+        }
+    }
+}
+
 /// What Activity records, for the off banner and the switch's tooltip.
 enum ActivityCopy {
     static let what = "Records the address and title of each page you look at and how long it was in front: the active tab in Safari, Chrome, Edge, Brave, Arc, Vivaldi and Firefox, and websites in apps like T3 Code, Claude and Codex. Time away from the Mac isn't counted."
@@ -478,13 +508,13 @@ struct DayPickerBar: View {
     private var isToday: Bool { Calendar.current.isDateInToday(day) }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             Button { shift(-1) } label: { Image(systemName: "chevron.left") }
                 .help("Previous day")
             DatePicker("Day", selection: $day, in: ...Date(), displayedComponents: .date)
                 .labelsHidden()
                 .datePickerStyle(.field)
-                .frame(maxWidth: 130)
+                .fixedSize()
             Button { shift(1) } label: { Image(systemName: "chevron.right") }
                 .help("Next day")
                 .disabled(isToday)

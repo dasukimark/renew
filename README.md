@@ -183,7 +183,10 @@ on`). The Monitor reads the visits Activity records, so it needs Activity on.
     copied from the built-in blocklists' sites). Manage them in
     **Accountability → Monitoring** or with `renew monitor list add|remove NAME
     SITE...`, `renew monitor list delete NAME`, `renew monitor list starter NAME`.
-  - **Other sites** and **other words** you add. Words are matched as whole
+    A switch turns the lists (and other sites) off without deleting them
+    (`renew monitor list on|off`); like the rest of monitoring, it can't be
+    turned off while you have a partner.
+  - **Other sites** and **watched words** you add. Words are matched as whole
     words, ignoring case and accents, so "sex" doesn't match "Essex".
 - **renewd does the checking**, not the app: each visit is checked once, as it
   reaches renewd, so what gets flagged doesn't depend on the app. renewd keeps

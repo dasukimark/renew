@@ -48,6 +48,10 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
     public var lists: [String: [String]]
     /// Extra sites to flag, in blocklist rule syntax ("Other sites").
     public var customDomains: [String]
+    /// Flag visits to sites on `lists` and `customDomains`. On unless turned
+    /// off, so settings from before the switch keep watching their lists;
+    /// turning it off keeps the lists for later.
+    public var flagLists: Bool
     /// Flag explicit content: visits to the bundled adult-site preset, page
     /// titles with words from `ExplicitTerms`, and on mixed sites
     /// (`SiteCategory.mixed`) stricter title scoring and reading the page for
@@ -60,6 +64,10 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
     /// stored or compared: renewd refuses such settings from a client, since
     /// an app or CLI that predates monitoring lists would wipe them.
     public private(set) var isLegacyFormat = false
+    /// Whether decoded settings had no `flagLists`: sent by a client from
+    /// before the lists switch, which can't mean to turn it on (renewd keeps
+    /// the stored value).
+    public private(set) var omitsFlagLists = false
 
     /// The flag label for the adult-site preset; not a list name.
     public static let explicitListName = "explicit"
@@ -76,10 +84,12 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
     public static let maxTermLength = 64
 
     public init(enabled: Bool = false, lists: [String: [String]] = [:],
-                customDomains: [String] = [], flagExplicit: Bool = false, customTerms: [String] = []) {
+                customDomains: [String] = [], flagLists: Bool = true,
+                flagExplicit: Bool = false, customTerms: [String] = []) {
         self.enabled = enabled
         self.lists = lists
         self.customDomains = customDomains
+        self.flagLists = flagLists
         self.flagExplicit = flagExplicit
         self.customTerms = customTerms
     }
@@ -90,7 +100,7 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
 
     public static func == (a: MonitorSettings, b: MonitorSettings) -> Bool {
         a.enabled == b.enabled && a.lists == b.lists && a.customDomains == b.customDomains
-            && a.flagExplicit == b.flagExplicit && a.customTerms == b.customTerms
+            && a.flagLists == b.flagLists && a.flagExplicit == b.flagExplicit && a.customTerms == b.customTerms
     }
 
     public static let legacyClientMessage = "This Renew app or command-line tool predates monitoring lists. Update it (reinstall Renew) to change the Monitor."
@@ -102,7 +112,7 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case enabled, lists, customDomains, flagExplicit = "flagExplicitTerms", customTerms
+        case enabled, lists, customDomains, flagLists, flagExplicit = "flagExplicitTerms", customTerms
         /// Before monitoring lists, the Monitor watched blocklists by name and
         /// kept a copy of their rules. Still written, so an older renewd
         /// (after a downgrade) reads the same lists, but only read when
@@ -121,6 +131,8 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? d.enabled
         lists = try c.decodeIfPresent([String: [String]].self, forKey: .lists) ?? d.lists
         customDomains = try c.decodeIfPresent([String].self, forKey: .customDomains) ?? d.customDomains
+        flagLists = try c.decodeIfPresent(Bool.self, forKey: .flagLists) ?? d.flagLists
+        omitsFlagLists = !c.contains(.flagLists)
         flagExplicit = try c.decodeIfPresent(Bool.self, forKey: .flagExplicit) ?? d.flagExplicit
         customTerms = try c.decodeIfPresent([String].self, forKey: .customTerms) ?? d.customTerms
         if !c.contains(.lists), let watched = try c.decodeIfPresent([String].self, forKey: .watchLists) {
@@ -143,15 +155,18 @@ public struct MonitorSettings: Codable, Equatable, Sendable {
 
     /// Writes the current keys, plus the same lists in the old format
     /// (`watchLists` with "explicit" for `flagExplicit`, and `listRules`) so
-    /// an older renewd reading this after a downgrade watches the same.
+    /// an older renewd reading this after a downgrade watches the same. With
+    /// `flagLists` off the old format names no lists, since an older renewd
+    /// has no switch for them.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(enabled, forKey: .enabled)
         try c.encode(lists, forKey: .lists)
         try c.encode(customDomains, forKey: .customDomains)
+        try c.encode(flagLists, forKey: .flagLists)
         try c.encode(flagExplicit, forKey: .flagExplicit)
         try c.encode(customTerms, forKey: .customTerms)
-        try c.encode((flagExplicit ? [Self.explicitListName] : []) + sortedListNames, forKey: .watchLists)
+        try c.encode((flagExplicit ? [Self.explicitListName] : []) + (flagLists ? sortedListNames : []), forKey: .watchLists)
         try c.encode(lists, forKey: .listRules)
     }
 
@@ -501,17 +516,19 @@ public struct ActivityMatcher: Sendable {
     /// must also have explicit words.
     public static let feedLabelWeight = 0.5
 
-    /// Watched sites come from `settings.lists` and `customDomains`;
-    /// `explicitDomains` is the bundled preset (used with `flagExplicit`),
+    /// Watched sites come from `settings.lists` and `customDomains` (with
+    /// `flagLists` on); `explicitDomains` is the bundled preset (used with `flagExplicit`),
     /// or nil if it isn't loaded.
     public init(settings: MonitorSettings, explicitDomains: DomainSet?) {
         let s = settings.normalized()
         explicit = s.flagExplicit ? explicitDomains : nil
         var watched: [(String, RuleSet)] = []
-        for name in s.sortedListNames {
-            if let rules = s.lists[name], !rules.isEmpty { watched.append((name, RuleSet(strings: rules))) }
+        if s.flagLists {
+            for name in s.sortedListNames {
+                if let rules = s.lists[name], !rules.isEmpty { watched.append((name, RuleSet(strings: rules))) }
+            }
+            if !s.customDomains.isEmpty { watched.append((MonitorSettings.customListName, RuleSet(strings: s.customDomains))) }
         }
-        if !s.customDomains.isEmpty { watched.append((MonitorSettings.customListName, RuleSet(strings: s.customDomains))) }
         self.watched = watched
         explicitTerms = s.flagExplicit ? .preset : nil
         terms = TermMatcher(s.customTerms)
