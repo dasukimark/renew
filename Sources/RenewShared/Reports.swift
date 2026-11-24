@@ -260,13 +260,19 @@ public struct Report: Codable, Equatable, Sendable {
 
 extension MonitorSettings {
     /// What changed from `self` to `new` that flags less, as sentences for a
-    /// report: the Monitor turned off, monitoring lists deleted or sites
-    /// removed from them, explicit content turned off, other sites or words
-    /// removed. Adding anything isn't listed.
+    /// report: the Monitor turned off, monitoring lists turned off, deleted
+    /// or with sites removed, explicit content turned off, other sites or
+    /// words removed. Adding anything isn't listed.
     public func loosenings(to new: MonitorSettings) -> [String] {
         var out: [String] = []
         if enabled && !new.enabled { out.append("The Monitor was turned off.") }
-        for name in sortedListNames {
+        // Lists that watch nothing aren't looser for being off.
+        if flagLists && !new.flagLists && (lists.values.contains { !$0.isEmpty } || !customDomains.isEmpty) {
+            out.append("Sites on monitoring lists are no longer flagged.")
+        }
+        // With lists already off their sites weren't flagged, so removing
+        // them (or deleting a list) watches nothing less.
+        for name in sortedListNames where flagLists {
             guard let after = new.lists[name] else {
                 // An empty list watched nothing, so deleting it isn't looser.
                 if !(lists[name] ?? []).isEmpty { out.append("The monitoring list '\(name)' was deleted.") }
@@ -276,7 +282,7 @@ extension MonitorSettings {
             if !removed.isEmpty { out.append("Sites removed from '\(name)': \(Self.listed(removed)).") }
         }
         if flagExplicit && !new.flagExplicit { out.append("Explicit content is no longer flagged.") }
-        let sites = customDomains.filter { !new.customDomains.contains($0) }
+        let sites = flagLists ? customDomains.filter { !new.customDomains.contains($0) } : []
         if !sites.isEmpty { out.append("Watched sites removed: \(Self.listed(sites)).") }
         let words = customTerms.filter { !new.customTerms.contains($0) }
         if !words.isEmpty { out.append("Watched words removed: \(Self.listed(words)).") }

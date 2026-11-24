@@ -15,6 +15,76 @@ private func visit(_ url: String, ago: TimeInterval, now: Date, title: String = 
 
 @Suite("Monitor rules")
 struct MonitorRulesTests {
+    @Test func listSwitchOffStopsListAndOtherSiteFlagsButKeepsWords() {
+        var settings = MonitorSettings(enabled: true, lists: ["games": ["play.example"]],
+                                       customDomains: ["extra.example"], customTerms: ["casino"])
+        #expect(!ActivityMatcher(settings: settings, explicitDomains: nil).flags(url: "https://play.example/", title: "T").isEmpty)
+        settings.flagLists = false
+        let m = ActivityMatcher(settings: settings, explicitDomains: nil)
+        #expect(m.flags(url: "https://play.example/", title: "T").isEmpty)
+        #expect(m.flags(url: "https://extra.example/", title: "T").isEmpty)
+        #expect(!m.flags(url: "https://other.example/", title: "Casino night").isEmpty)
+    }
+
+    @Test func listSwitchDefaultsOnAndRoundTrips() throws {
+        let old = try JSONDecoder().decode(MonitorSettings.self, from: Data(#"{"enabled":true,"lists":{"games":["play.example"]}}"#.utf8))
+        #expect(old.flagLists)
+        var off = old
+        off.flagLists = false
+        let data = try JSONEncoder().encode(off)
+        let back = try JSONDecoder().decode(MonitorSettings.self, from: data)
+        #expect(!back.flagLists)
+        #expect(back == off)
+        // An older renewd reading the old keys watches no lists either.
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect((json?["watchLists"] as? [String]) == [])
+    }
+
+    @Test func turningListsOffIsALooseningAndRefusedWhileLocked() {
+        let on = MonitorSettings(enabled: true, lists: ["games": ["play.example"]])
+        var off = on
+        off.flagLists = false
+        #expect(on.loosenings(to: off) == ["Sites on monitoring lists are no longer flagged."])
+        #expect(on.refusal(changingTo: off, hasPartner: true) == MonitorSettings.lockedMessage)
+        #expect(off.refusal(changingTo: on, hasPartner: true) == nil)
+        // Lists that watch nothing aren't looser for being off.
+        var empty = MonitorSettings(enabled: true, lists: ["games": []])
+        let before = empty
+        empty.flagLists = false
+        #expect(before.loosenings(to: empty).isEmpty)
+    }
+
+    @Test func removingSitesWhileListsAreOffIsntALoosening() {
+        var off = MonitorSettings(enabled: true, lists: ["games": ["play.example", "fun.example"]],
+                                  customDomains: ["other.example"])
+        off.flagLists = false
+        var removed = off
+        removed.lists["games"] = ["fun.example"]
+        removed.customDomains = []
+        #expect(off.loosenings(to: removed).isEmpty)
+        #expect(off.refusal(changingTo: removed, hasPartner: true) == nil)
+        var deleted = off
+        deleted.lists["games"] = nil
+        #expect(off.loosenings(to: deleted).isEmpty)
+        // Watched words still count with lists off.
+        var words = off
+        words.customTerms = ["casino"]
+        var noWords = words
+        noWords.customTerms = []
+        #expect(words.loosenings(to: noWords) == ["Watched words removed: casino."])
+    }
+
+    @Test func settingsWithoutTheListSwitchSayTheyOmitIt() throws {
+        let old = try Wire.decoder.decode(MonitorSettings.self, from: Data(#"{"enabled":true,"lists":{"games":["play.example"]}}"#.utf8))
+        #expect(old.omitsFlagLists)
+        #expect(old.flagLists)
+        var off = MonitorSettings(enabled: true)
+        off.flagLists = false
+        let back = try Wire.decoder.decode(MonitorSettings.self, from: Wire.encoder.encode(off))
+        #expect(!back.omitsFlagLists)
+        #expect(!back.flagLists)
+    }
+
     @Test func matcherFlagsMonitoringListsByName() {
         let settings = MonitorSettings(enabled: true, lists: ["games": ["play.example"], "empty": []])
         let m = ActivityMatcher(settings: settings, explicitDomains: nil)

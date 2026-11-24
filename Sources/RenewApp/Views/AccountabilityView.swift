@@ -32,6 +32,31 @@ struct AccountabilityView: View {
             }
         }
         .navigationTitle("Accountability")
+        .navigationSubtitle(summary)
+    }
+
+    /// Who you answer to and what the Monitor is doing, on every tab.
+    private var summary: String {
+        let settled = model.reportsPartners.filter { !model.pendingReportPartners.contains($0) }
+        var parts: [String] = []
+        switch settled.count {
+        case 0:
+            let retained = model.retainedReportPartners.filter { !model.pendingReportPartners.contains($0) }
+            if retained.count == 1 {
+                parts.append("Monitored by \(retained[0])")
+            } else if !retained.isEmpty {
+                parts.append("Monitored by \(retained.count) partners")
+            } else {
+                parts.append(model.pendingReportPartners.isEmpty ? "No partner" : "Partner removal pending")
+            }
+        case 1: parts.append("Reporting to \(settled[0])")
+        default: parts.append("Reporting to \(settled.count) partners")
+        }
+        if model.monitorSupported {
+            parts.append(model.monitor.enabled ? "Monitor on" : "Monitor off")
+        }
+        if model.monitoringLocked { parts.append("Locked") }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -43,19 +68,22 @@ private struct PartnersView: View {
     @State private var reportURLDraft = ""
     @State private var reportTokenDraft = ""
     @State private var removing: String?
-    @State private var confirmingOff = false
+    /// The page of history shown, from 0 (newest).
+    @State private var historyPage = 0
+    private static let historyPageSize = 10
 
     var body: some View {
         Form {
             if showTurnOnMonitoring {
                 Section {
-                    InfoBanner(title: "Turn on monitoring",
-                               message: "Flag visits to explicit sites and explicit content, and email your partners about them. Once it's on, it can't be turned off or watch less while you have a partner.",
-                               button: "Turn On") { turnOnMonitoring() }
+                    NoticeRow(title: "Turn on monitoring",
+                              message: "Flag explicit content and email your partners. It stays on while you have a partner.",
+                              button: "Turn On", icon: "eye") { turnOnMonitoring() }
                         .disabled(model.busy)
                 }
             }
             partnerSection
+            if showServerFields { serverSection }
             historySection
         }
         .formStyle(.grouped)
@@ -75,16 +103,8 @@ private struct PartnersView: View {
             if let email = removing, model.retainedReportPartners.contains(email) {
                 Text("Renew keeps checking in while your partner reviews the new request.")
             } else {
-                Text("Your partner is emailed a link to approve. Reports keep going to this address until a partner approves; if they decline, nothing changes.")
+                Text("Your partner is asked to approve. Until then, reports keep going to this address.")
             }
-        }
-        .confirmationDialog("Turn off email reports?", isPresented: $confirmingOff) {
-            Button("Turn off", role: .destructive) {
-                model.setReports(partnerEmails: nil) { _ in model.loadPartnerHistory() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Your partners are emailed a link to approve. Reports keep going to them until one approves; if they decline, nothing changes.")
         }
     }
 
@@ -121,10 +141,7 @@ private struct PartnersView: View {
     private var partnerSection: some View {
         Section {
             ForEach(model.reportsPartners.filter { !model.pendingReportPartners.contains($0) }, id: \.self) { email in
-                HStack {
-                    Text(email)
-                        .textSelection(.enabled)
-                    Spacer()
+                partnerRow(email) {
                     Button {
                         removing = email
                     } label: {
@@ -136,82 +153,85 @@ private struct PartnersView: View {
                 }
             }
             ForEach(model.pendingReportPartners, id: \.self) { email in
-                HStack {
-                    Text(email)
-                        .textSelection(.enabled)
-                    Spacer()
-                    statusDot("Removal waiting for approval", .orange)
-                }
+                partnerRow(email) { statusDot("Removal waiting for approval", .orange) }
             }
             ForEach(model.retainedReportPartners.filter { !model.pendingReportPartners.contains($0) }, id: \.self) { email in
-                HStack {
-                    Text(email)
-                        .textSelection(.enabled)
-                    Spacer()
+                partnerRow(email) {
                     statusDot("Monitoring retained", .green)
-                    Button("Request again") { removing = email }
+                    Button("Request Again…") { removing = email }
                         .disabled(inSession || model.busy || !model.daemonReachable)
                 }
             }
             if model.reportsPartners.count < ReportDestination.maxPartners {
-                HStack {
-                    TextField("Partner's email address", text: $newPartner)
+                HStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.badge.plus")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    TextField("Partner's email", text: $newPartner,
+                              prompt: Text(reportsOn ? "Add a partner's email" : "Your partner's email"))
+                        .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .onSubmit { if canAdd { add() } }
-                    Button(reportsOn ? "Add" : "Turn on reports") { add() }
+                    Button("Add") { add() }
                         .disabled(!canAdd)
                 }
                 .disabled(!model.daemonReachable)
             }
-            if showServerFields {
-                TextField("Report server URL", text: $reportURLDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .disabled(inSession && reportsOn)
-                SecureField(reportsOn ? "New report token" : "Report token", text: $reportTokenDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(inSession && reportsOn)
-                if reportsOn {
-                    Button("Save server") { saveServer() }
-                        .disabled(!canSaveServer)
-                }
-            }
-            if reportsOn {
-                HStack {
-                    Button("Turn off") { confirmingOff = true }
-                        .disabled(inSession || model.busy || !model.daemonReachable)
-                    Button("Send test") {
-                        model.testReport()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { model.loadPartnerHistory() }
-                    }
-                    .disabled(model.busy)
-                    Spacer()
-                    statusDot("On", .green)
-                }
-            }
-            if reportsOn && inSession {
-                Text("Partners can be added during a session, and removed after it ends.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
         } header: {
             Text("Partners")
         } footer: {
-            if !model.pendingReportPartners.isEmpty {
-                Text("Addresses waiting for approval still get email reports and check-in alerts until a partner approves removing them.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                if reportsOn && inSession {
+                    Text("Partners can be removed after this session.")
+                }
+                if !reportsOn && model.retainedReportPartners.isEmpty {
+                    Text("Your partner is emailed about flags, loosened monitoring, and if Renew stops running.")
+                }
+                if !model.pendingReportPartners.isEmpty {
+                    Text("Partners waiting on removal still get reports until it's approved.")
+                }
+                if !reportsOn && !model.retainedReportPartners.isEmpty {
+                    Text("A partner declined the request. Renew continues checking in.")
+                }
+                if !reportsOn && !model.reportServerBuiltIn {
+                    Text("No report server is set up. Enter one below.")
+                }
             }
-            if !reportsOn && !model.retainedReportPartners.isEmpty {
-                Text("A partner declined the request. Renew continues checking in.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func partnerRow<Trailing: View>(_ email: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "person.crop.circle")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text(email)
+                .textSelection(.enabled)
+            Spacer()
+            trailing()
+        }
+    }
+
+    private var serverSection: some View {
+        Section {
+            TextField("Server URL", text: $reportURLDraft, prompt: Text("https://…"))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .disabled(inSession && reportsOn)
+            SecureField(reportsOn ? "New token" : "Token", text: $reportTokenDraft)
+                .textFieldStyle(.roundedBorder)
+                .disabled(inSession && reportsOn)
+            if reportsOn {
+                HStack {
+                    Spacer()
+                    Button("Save Server") { saveServer() }
+                        .disabled(!canSaveServer)
+                }
             }
-            if !reportsOn && !model.reportServerBuiltIn {
-                Text("No report server is set up on this Mac. See server/reports/README.md, or enter a server's URL and token.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        } header: {
+            Text("Report server")
         }
     }
 
@@ -277,9 +297,10 @@ private struct PartnersView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(model.partnerHistory) { entry in
+                ForEach(historyEntries) { entry in
                     PartnerHistoryRow(entry: entry)
                 }
+                if historyPageCount > 1 { historyPager }
             }
         } header: {
             HStack {
@@ -294,10 +315,44 @@ private struct PartnersView: View {
                 .help("Refresh")
                 .disabled(model.loadingPartnerHistory)
             }
-        } footer: {
-            Text("The last \(PartnerLog.maxEntries), newest first.")
-                .font(.caption)
+        }
+    }
+
+    private var historyPageCount: Int {
+        max(1, (model.partnerHistory.count + Self.historyPageSize - 1) / Self.historyPageSize)
+    }
+
+    /// The page asked for, kept in range as the history changes.
+    private var currentHistoryPage: Int { min(historyPage, historyPageCount - 1) }
+
+    private var historyEntries: ArraySlice<PartnerLogEntry> {
+        let all = model.partnerHistory
+        let start = currentHistoryPage * Self.historyPageSize
+        return all[min(start, all.count)..<min(start + Self.historyPageSize, all.count)]
+    }
+
+    private var historyPager: some View {
+        let page = currentHistoryPage
+        let first = page * Self.historyPageSize + 1
+        let last = first + historyEntries.count - 1
+        return HStack(spacing: 8) {
+            Text("\(first)–\(last) of \(model.partnerHistory.count)")
                 .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Spacer()
+            if page > 0 {
+                Button("Newest") { historyPage = 0 }
+                    .buttonStyle(.link)
+            }
+            ControlGroup {
+                Button { historyPage = page - 1 } label: { Image(systemName: "chevron.left") }
+                    .help("Newer")
+                    .disabled(page == 0)
+                Button { historyPage = page + 1 } label: { Image(systemName: "chevron.right") }
+                    .help("Older")
+                    .disabled(page >= historyPageCount - 1)
+            }
+            .fixedSize()
         }
     }
 }
@@ -307,32 +362,10 @@ private struct PartnerHistoryRow: View {
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: icon)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.title)
-                        .lineLimit(expanded ? nil : 1)
-                        .fixedSize(horizontal: false, vertical: expanded)
-                    Text("\(channelName) · \(Format.clock(entry.date))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                statusView
-                if !entry.lines.isEmpty {
-                    Button {
-                        expanded.toggle()
-                    } label: {
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    }
-                    .buttonStyle(.borderless)
-                    .help(expanded ? "Show less" : "Show details")
-                }
-            }
-            if expanded && !entry.lines.isEmpty {
+        VStack(alignment: .leading, spacing: 6) {
+            header
+            // Outside the tap target, so the lines can be selected and copied.
+            if expanded {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(entry.lines.enumerated()), id: \.offset) { _, line in
                         Text(line)
@@ -347,6 +380,45 @@ private struct PartnerHistoryRow: View {
         }
         .padding(.vertical, 2)
     }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.title)
+                    .lineLimit(expanded ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(channelName) · \(Format.clock(entry.date))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            statusView
+            // Always takes the space, so statuses line up down the list.
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+                .frame(width: 14)
+                .opacity(expandable ? 1 : 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: toggle)
+        .help(expandable ? (expanded ? "Show less" : "Show details") : "")
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(expandable ? .isButton : [])
+        .accessibilityHint(expandable ? (expanded ? "Hides details" : "Shows details") : "")
+        .accessibilityAction { toggle() }
+    }
+
+    private func toggle() {
+        guard expandable else { return }
+        withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
+    }
+
+    private var expandable: Bool { !entry.lines.isEmpty }
 
     private var icon: String {
         switch entry.channel {
@@ -366,7 +438,8 @@ private struct PartnerHistoryRow: View {
 
     @ViewBuilder private var statusView: some View {
         switch entry.status {
-        case .sent: statusDot("Sent", .green)
+        // Sent is the usual case, so it stays quiet; problems stand out.
+        case .sent: Text("Sent").foregroundStyle(.secondary)
         case .waiting: statusDot("Waiting", .orange)
         case .failed: statusDot("Failed", .red)
         }
