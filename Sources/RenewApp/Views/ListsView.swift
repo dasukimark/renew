@@ -107,7 +107,7 @@ struct ListsView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("`reddit.com` blocks the site and its subdomains · `youtube.com/shorts` blocks just that part · `keyword:casino` blocks any URL containing the word · `!music.youtube.com` always allows")
-                    Text("Changes apply to your next session. To add a site to the running session, use Quick Block → Block another site.")
+                    Text("Changes apply to your next session. To add a site while a block session is running, type it under Blocking on the Block Sessions page.")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

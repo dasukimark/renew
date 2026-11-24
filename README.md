@@ -40,13 +40,14 @@ the window:
   times on chosen days** (e.g. weekdays 9:00–17:00, or 22:00–06:00 overnight).
   Scheduled block sessions start on their own, even with the window closed, and
   can't be stopped once they start; you can edit, pause or delete them any time
-  before then. They live in `~/.config/renew/sessions.json`, and the app hands the
-  schedules (with their sites resolved) to the background service, which starts
-  them. A running block session shows below the list.
-- **Quick Block**: a one-off block. Pick a length (25 min to 4 hours, or type a
-  custom one), tick blocklists, add extra sites and start. During a block session
-  it shows a countdown ring and the blocked sites, and lets you add time or block
-  another site. There's no stop button.
+  before then. They live in `~/.config/renew/sessions.json`, and the app hands
+  the schedules (with their sites resolved) to the background service, which
+  starts them. Below the list, **One-off block** opens a form for a block you
+  won't repeat: pick a length (25 min to 4 hours, or type a custom one), tick
+  blocklists, add extra sites and start, or save those choices as a block
+  session. While a block session runs, the top of the page shows its countdown,
+  when it ends and what it blocks, and lets you add time or block another site.
+  There's no stop button.
 - **Blocklists**: edit the built-in lists (social, video, news, test) or make your own.
 - **Activity**: records the pages you visit. A dashboard of time per site with
   daily totals and averages, and the log of pages you've visited (see
