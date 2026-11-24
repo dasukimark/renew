@@ -6,7 +6,6 @@ import RenewShared
 final class AppModel: ObservableObject {
     enum Section: String, CaseIterable, Identifiable {
         case sessions = "Block Sessions"
-        case quick = "Quick Block"
         case lists = "Blocklists"
         case activity = "Activity"
         case accountability = "Accountability"
@@ -14,8 +13,7 @@ final class AppModel: ObservableObject {
         var id: String { rawValue }
         var symbol: String {
             switch self {
-            case .sessions: return "calendar.badge.clock"
-            case .quick: return "bolt"
+            case .sessions: return "hourglass"
             case .lists: return "list.bullet.rectangle"
             case .activity: return "chart.bar.xaxis"
             case .accountability: return "person.2"

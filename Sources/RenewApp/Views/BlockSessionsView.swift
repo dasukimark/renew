@@ -1,31 +1,53 @@
 import SwiftUI
 import RenewShared
 
-/// Saved block sessions first, then the running block session, if any.
+/// One place for blocking: the block session running now, if any, then the
+/// saved block sessions, then a collapsed one-off block for the rare times
+/// none of them fits.
 struct BlockSessionsView: View {
     @ObservedObject var model: AppModel
     @State private var editing: BlockSession?
+    private static let oneOffID = "oneOff"
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                SessionBanners(model: model)
-                ForEach(model.schedulesWithNothingToBlock) { s in
-                    Banner(kind: .warning, title: "“\(s.name)” won't start",
-                           message: "It has nothing to block, so it isn't scheduled. Its blocklists may have been deleted or emptied.",
-                           actionTitle: "Edit") { editing = s }
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 32) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        if SessionBanners.isShowing(model) || !model.schedulesWithNothingToBlock.isEmpty {
+                            VStack(alignment: .leading, spacing: 12) {
+                                SessionBanners(model: model)
+                                ForEach(model.schedulesWithNothingToBlock) { s in
+                                    Banner(kind: .warning, title: "“\(s.name)” won't start",
+                                           message: "It has nothing to block, so it isn't scheduled. Its blocklists may have been deleted or emptied.",
+                                           actionTitle: "Edit") { editing = s }
+                                }
+                            }
+                        }
+                        Text("Block sessions")
+                            .font(.largeTitle.weight(.bold))
+                    }
+
+                    if let session = model.session {
+                        PageSection(title: "Running now") {
+                            ActiveSessionView(model: model, session: session)
+                        }
+                    }
+
+                    SavedSessionsView(model: model, editing: $editing)
+
+                    // Always in the view tree (it hides itself while a block
+                    // session runs) so a half-filled form survives a
+                    // scheduled session starting and ending.
+                    OneOffBlockView(model: model, saveAs: { editing = $0 }) {
+                        withAnimation(.easeOut(duration: 0.25)) { scroll.scrollTo(Self.oneOffID, anchor: .top) }
+                    }
+                    .id(Self.oneOffID)
                 }
-                SavedSessionsView(model: model, editing: $editing)
-                if let session = model.session {
-                    Divider().padding(.vertical, 4)
-                    Text("Running now")
-                        .font(.title2.weight(.bold))
-                    ActiveSessionView(model: model, session: session)
-                }
+                .padding(32)
+                .frame(maxWidth: 680)
+                .frame(maxWidth: .infinity)
             }
-            .padding(32)
-            .frame(maxWidth: 680)
-            .frame(maxWidth: .infinity)
         }
         .navigationTitle("Block Sessions")
         .sheet(item: $editing) { session in
@@ -34,34 +56,38 @@ struct BlockSessionsView: View {
     }
 }
 
-/// A one-off block: pick a length and what to block, and start it now.
-struct QuickBlockView: View {
-    @ObservedObject var model: AppModel
-    @State private var editing: BlockSession?
+/// A heading for one part of the page, with an optional control on the right.
+private struct PageSection<Content: View, Accessory: View>: View {
+    let title: String
+    @ViewBuilder var accessory: Accessory
+    @ViewBuilder var content: Content
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                SessionBanners(model: model)
-                if let session = model.session {
-                    ActiveSessionView(model: model, session: session)
-                } else {
-                    StartSessionView(model: model) { editing = $0 }
-                }
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.title2.weight(.bold))
+                Spacer()
+                accessory
             }
-            .padding(32)
-            .frame(maxWidth: 680)
-            .frame(maxWidth: .infinity)
+            content
         }
-        .navigationTitle("Quick Block")
-        .sheet(item: $editing) { session in
-            BlockSessionEditor(model: model, session: session)
-        }
+    }
+}
+
+extension PageSection where Accessory == EmptyView {
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.init(title: title, accessory: { EmptyView() }, content: content)
     }
 }
 
 private struct SessionBanners: View {
     @ObservedObject var model: AppModel
+
+    /// Whether any banner shows, so the page leaves no gap when none do.
+    static func isShowing(_ model: AppModel) -> Bool {
+        model.isLocalTest || !model.isInstalled || !model.daemonReachable
+            || (model.isInstalled && !model.permissionWarnings.isEmpty)
+    }
 
     var body: some View {
         if model.isLocalTest {
@@ -86,10 +112,15 @@ private struct SessionBanners: View {
 
 // MARK: - Start
 
-private struct StartSessionView: View {
+/// A one-off block: how long and what to block, then Start. Used less than
+/// the saved block sessions, so it stays collapsed to one row until opened.
+private struct OneOffBlockView: View {
     @ObservedObject var model: AppModel
     /// Opens the editor with this form's choices, to save them.
     let saveAs: (BlockSession) -> Void
+    /// Called once it opens, to bring the form into view.
+    let opened: () -> Void
+    @State private var expanded = false
     @State private var extra = ""
     @State private var confirming = false
     @State private var custom = false
@@ -100,52 +131,105 @@ private struct StartSessionView: View {
     private var endsAt: Date { model.now.addingTimeInterval(TimeInterval(model.durationMinutes * 60)) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Quick block")
-                    .font(.largeTitle.weight(.bold))
-                Text("A one-off block session: choose how long and what to block, and start it now. Once it starts, it can't be stopped early.")
-                    .foregroundStyle(.secondary)
-            }
+        if model.session == nil { content }
+    }
 
-            Card(title: "HOW LONG") {
-                HStack(spacing: 8) {
-                    ForEach(presets, id: \.self) { m in
-                        PillButton(title: Format.minutes(m), selected: !custom && model.durationMinutes == m) {
-                            custom = false
-                            model.durationMinutes = m
-                        }
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() }
+            } label: {
+                HStack(alignment: .center, spacing: 14) {
+                    Image(systemName: "bolt")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("One-off block").font(.headline)
+                        Text("Block for a set time without saving it.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
-                    PillButton(title: "Custom", selected: custom) { custom = true }
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
-                if custom {
-                    DurationPicker(minutes: $model.durationMinutes)
-                }
-                Text(model.durationMinutes < 1 ? "Choose at least 1 minute" : "Ends at \(Format.clock(endsAt))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
 
-            Card(title: "WHAT TO BLOCK") {
-                BlocklistPicker(model: model, selection: $model.selectedLists, extra: $extra)
-                HStack(spacing: 16) {
-                    Button("Edit blocklists…") { model.section = .lists }
-                    Button("Save as a block session…") {
-                        let sites = parseSites(extra)
-                        saveAs(BlockSession(name: "", lists: model.selectedLists.sorted(), extraSites: sites,
-                                            timing: .length(minutes: max(1, model.durationMinutes))))
+            if expanded { form }
+        }
+        // Collapsed, it's a plain row so it doesn't compete with the saved
+        // block sessions; opened, it becomes a card like them.
+        .padding(.horizontal, 14)
+        .padding(.vertical, expanded ? 16 : 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(expanded ? Color(nsColor: .controlBackgroundColor) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.secondary.opacity(expanded ? 0.15 : 0)))
+        .onAppear { custom = !presets.contains(model.durationMinutes) }
+        // Scroll once the expand animation has laid out the form; scrolling
+        // sooner measures the collapsed row and can stop short.
+        .onChange(of: expanded) { open in
+            if open { DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: opened) }
+        }
+    }
+
+    @ViewBuilder private var form: some View {
+        let rules = self.rules
+        Divider().padding(.vertical, 6)
+
+        VStack(alignment: .leading, spacing: 12) {
+            CardLabel("HOW LONG")
+            HStack(spacing: 8) {
+                ForEach(presets, id: \.self) { m in
+                    PillButton(title: Format.minutes(m), selected: !custom && model.durationMinutes == m) {
+                        custom = false
+                        model.durationMinutes = m
                     }
                 }
-                .buttonStyle(.link)
+                PillButton(title: "Custom", selected: custom) { custom = true }
             }
+            if custom {
+                DurationPicker(minutes: $model.durationMinutes)
+            }
+            Text(model.durationMinutes < 1 ? "Choose at least 1 minute" : "Ends at \(Format.clock(endsAt))")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
 
+        Divider().padding(.vertical, 6)
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                CardLabel("WHAT TO BLOCK")
+                Spacer()
+                Button("Edit blocklists…") { model.section = .lists }
+                    .buttonStyle(.link)
+            }
+            BlocklistPicker(model: model, selection: $model.selectedLists, extra: $extra)
+        }
+
+        Divider().padding(.vertical, 6)
+
+        HStack(spacing: 16) {
+            Button("Save as a block session…") {
+                saveAs(BlockSession(name: "", lists: model.selectedLists.sorted(), extraSites: parseSites(extra),
+                                    timing: .length(minutes: max(1, model.durationMinutes))))
+            }
+            .buttonStyle(.link)
+            Spacer()
             Button {
                 confirming = true
             } label: {
                 Label(rules.isEmpty ? "Choose something to block" : "Start block session · \(rules.count) site\(rules.count == 1 ? "" : "s")",
                       systemImage: "lock.fill")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 6)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -160,74 +244,73 @@ private struct StartSessionView: View {
                 Text("You won't be able to stop or shorten this block session. You can only add time or block more sites.")
             }
         }
-        .onAppear { custom = !presets.contains(model.durationMinutes) }
     }
 }
 
 // MARK: - Active
 
+/// The running block session: time left and when it ends, with ways to
+/// make it longer or block more. Compact, so the saved list stays in view.
 private struct ActiveSessionView: View {
     @ObservedObject var model: AppModel
     let session: SessionInfo
     @State private var newSite = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Spacer()
-                VStack(spacing: 14) {
-                    ZStack {
-                        Circle()
-                            .stroke(Color.secondary.opacity(0.15), lineWidth: 14)
-                        Circle()
-                            .trim(from: 0, to: max(0.001, 1 - model.progress))
-                            .stroke(Color.orange, style: StrokeStyle(lineWidth: 14, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                            .animation(.linear(duration: 1), value: model.progress)
-                        VStack(spacing: 4) {
-                            Text(Format.countdown(model.secondsLeft))
-                                .font(.system(size: 46, weight: .semibold, design: .rounded).monospacedDigit())
-                            Text("left")
-                                .foregroundStyle(.secondary)
-                        }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 28) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.secondary.opacity(0.15), lineWidth: 10)
+                    Circle()
+                        .trim(from: 0, to: max(0.001, 1 - model.progress))
+                        .stroke(Color.orange, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.linear(duration: 1), value: model.progress)
+                    VStack(spacing: 2) {
+                        Text(Format.countdown(model.secondsLeft))
+                            .font(.system(size: 30, weight: .semibold, design: .rounded).monospacedDigit())
+                        Text("left")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
-                    .frame(width: 240, height: 240)
-                    Text("Block session ends at \(Format.clock(session.endsAt))")
-                        .font(.headline)
                 }
-                Spacer()
-            }
-            .padding(.vertical, 8)
+                .frame(width: 150, height: 150)
+                .accessibilityElement(children: .combine)
 
-            Card(title: "BLOCKING") {
-                FlowLayout(spacing: 6) {
-                    ForEach(session.rules, id: \.self) { RuleChip(rule: $0) }
-                }
-            }
-
-            HStack(alignment: .top, spacing: 16) {
-                Card(title: "ADD TIME") {
-                    HStack {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Ends at \(Format.clock(session.endsAt))")
+                            .font(.title3.weight(.semibold))
+                        Label("Can't be shortened or stopped. You can add time or block more sites.", systemImage: "lock")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 8) {
                         ForEach([15, 30, 60], id: \.self) { m in
                             Button("+\(Format.minutes(m))") { model.extend(minutes: m) }
                         }
                     }
                     .disabled(model.busy)
-                }
-                Card(title: "BLOCK ANOTHER SITE") {
-                    HStack {
-                        TextField("e.g. news.ycombinator.com", text: $newSite)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(addSite)
-                        Button("Block", action: addSite)
-                            .disabled(newSite.trimmingCharacters(in: .whitespaces).isEmpty || model.busy)
-                    }
+                    .help("Add time to this block session")
                 }
             }
 
-            Label("Block sessions can't be shortened or stopped. That's the point.", systemImage: "lock")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Card(title: "BLOCKING · \(session.rules.count) SITE\(session.rules.count == 1 ? "" : "S")") {
+                FlowLayout(spacing: 6) {
+                    ForEach(session.rules, id: \.self) { RuleChip(rule: $0) }
+                }
+                Divider().padding(.vertical, 2)
+                HStack {
+                    TextField("Block another site… e.g. news.ycombinator.com", text: $newSite)
+                        .accessibilityLabel("Block another site")
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addSite)
+                    Button("Block", action: addSite)
+                        .disabled(newSite.trimmingCharacters(in: .whitespaces).isEmpty || model.busy)
+                }
+            }
         }
     }
 
@@ -250,41 +333,24 @@ private struct SavedSessionsView: View {
     @Binding var editing: BlockSession?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Block sessions")
-                        .font(.largeTitle.weight(.bold))
-                    Text("Saved blocks you can start in one click, or schedule for set times on chosen days.")
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    editing = BlockSession(name: "", lists: model.selectedLists.sorted(),
-                                           timing: .schedule(window: DailyWindow(startMinute: 9 * 60, endMinute: 17 * 60),
-                                                             days: .weekdays))
-                } label: {
-                    Label("New block session", systemImage: "plus")
-                }
+        PageSection(title: "Saved") {
+            Button {
+                editing = BlockSession(name: "", lists: model.selectedLists.sorted(),
+                                       timing: .schedule(window: DailyWindow(startMinute: 9 * 60, endMinute: 17 * 60),
+                                                         days: .weekdays))
+            } label: {
+                Label("New block session", systemImage: "plus")
             }
+        } content: {
             if model.savedSessions.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("No saved block sessions yet. Create one to reuse it, or schedule it to start on its own.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if model.session == nil {
-                        Button("Or start a one-off quick block…") { model.section = .quick }
-                            .buttonStyle(.link)
-                    }
-                }
+                Text("No saved block sessions yet. Create one to start it in one click, or give it set times so it starts on its own."
+                     + (model.session == nil ? " For a block you won't repeat, use a one-off block below." : ""))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(model.savedSessions) { s in
                     SavedSessionRow(model: model, session: s) { editing = s }
                 }
-                Text("Scheduled block sessions start on their own, even when this window is closed, and can't be stopped once they start. You can edit or delete them any time before then.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -369,7 +435,9 @@ private struct SavedSessionRow: View {
                                            }))
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .help(session.enabled ? "Scheduled" : "Off: won't start on its own")
+                    .help(session.enabled
+                          ? "Scheduled: starts on its own at its set times, even when this window is closed, and can't be stopped once it starts"
+                          : "Off: won't start on its own")
                     .confirmationDialog(enableTitle, isPresented: $confirmingEnable) {
                         Button("Turn on and start blocking") { model.setEnabled(true, for: session.id) }
                     } message: {

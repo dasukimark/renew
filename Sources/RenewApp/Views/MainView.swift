@@ -24,7 +24,6 @@ struct MainView: View {
         } detail: {
             switch model.section {
             case .sessions: BlockSessionsView(model: model)
-            case .quick: QuickBlockView(model: model)
             case .lists: ListsView(model: model)
             case .activity: ActivityView(model: model)
             case .accountability: AccountabilityView(model: model)
