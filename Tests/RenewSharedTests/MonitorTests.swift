@@ -258,6 +258,76 @@ struct MonitorLogTests {
         MonitorFlag(event: e, flags: [.domain("custom", "watched.example")], flaggedAt: now)
     }
 
+    @Test func rangeReadPagesNewestFirstAcrossDays() {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = MonitorLogStore(directory: dir)
+        let now = Date()
+        let day: TimeInterval = 86_400
+        // Three today-ish, two four days back, one forty days back.
+        let ages: [TimeInterval] = [60, 120, 180, 4 * day, 4 * day + 60, 40 * day]
+        for (i, age) in ages.enumerated() {
+            store.append([flag(visit("https://watched.example/\(i)", ago: age, now: now), now: now)], uid: 501, now: now)
+        }
+        let through = ActivityLogStore.dayKey(now)
+        let all = store.read(MonitorRangeQuery(sinceDay: nil, throughDay: through, limit: 50), uid: 501)
+        #expect(all.total == 6)
+        #expect(all.flags.map(\.url) == (0..<6).map { "https://watched.example/\($0)" })
+
+        // Pages stitch together with nothing lost or repeated.
+        var paged: [String] = []
+        for skip in stride(from: 0, to: 6, by: 4) {
+            let p = store.read(MonitorRangeQuery(sinceDay: nil, throughDay: through, skip: skip, limit: 4), uid: 501)
+            #expect(p.total == 6)
+            paged += p.flags.map(\.url)
+        }
+        #expect(paged == all.flags.map(\.url))
+        #expect(store.read(MonitorRangeQuery(sinceDay: nil, throughDay: through, skip: 6, limit: 4), uid: 501).flags.isEmpty)
+
+        // A week leaves out the forty-day-old one.
+        let week = store.read(MonitorRangeQuery(since: now.addingTimeInterval(-6 * day), through: now), uid: 501)
+        #expect(week.total == 5)
+        #expect(!week.flags.contains { $0.url.hasSuffix("/5") })
+
+        // Other users and bad queries see nothing.
+        #expect(store.read(MonitorRangeQuery(sinceDay: nil, throughDay: through), uid: 502).total == 0)
+        #expect(!MonitorRangeQuery(sinceDay: "nope", throughDay: through).isValid)
+        #expect(!MonitorRangeQuery(sinceDay: nil, throughDay: through, limit: MonitorRangeQuery.maxLimit + 1).isValid)
+    }
+
+    @Test func rangeTotalSkipsCorruptLinesAndFollowsAppends() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = MonitorLogStore(directory: dir)
+        let now = Date()
+        let a = visit("https://watched.example/a", ago: 60, now: now)
+        guard ActivityLogStore.dayKey(a.start) == ActivityLogStore.dayKey(now) else { return } // midnight
+        store.append([flag(a, now: now)], uid: 501, now: now)
+        // A garbled line and a half-written one, as after a crash.
+        let path = dir + "/501/\(ActivityLogStore.dayKey(now)).jsonl"
+        let h = try #require(FileHandle(forWritingAtPath: path))
+        h.seekToEndOfFile()
+        h.write(Data("not json\n{\"start\":".utf8))
+        try h.close()
+        let q = MonitorRangeQuery(sinceDay: nil, throughDay: ActivityLogStore.dayKey(now), limit: 1)
+        let first = store.read(q, uid: 501)
+        #expect(first.total == 1)
+        #expect(first.flags.map(\.url) == ["https://watched.example/a"])
+
+        // Finish the half line so the next append starts clean, then add one.
+        let h2 = try #require(FileHandle(forWritingAtPath: path))
+        h2.seekToEndOfFile()
+        h2.write(Data("\n".utf8))
+        try h2.close()
+        store.append([flag(visit("https://watched.example/b", ago: 30, now: now), now: now)], uid: 501, now: now)
+        let second = store.read(q, uid: 501)
+        #expect(second.total == 2)
+        #expect(second.flags.map(\.url) == ["https://watched.example/b"])
+        var older = q
+        older.skip = 1
+        #expect(store.read(older, uid: 501).flags.map(\.url) == ["https://watched.example/a"])
+    }
+
     @Test func appendReadIncrementalAndPrune() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }

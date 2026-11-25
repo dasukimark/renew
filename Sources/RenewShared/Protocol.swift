@@ -31,6 +31,8 @@ public enum Command: String, Codable, Sendable {
     case activityStats
     /// Reads the Monitor's flags for the caller (see `MonitorQuery`).
     case monitorFlags
+    /// Reads a page of the caller's flags across days (see `MonitorRangeQuery`).
+    case monitorFlagRange
     /// The app heard that the Mac is about to log out, restart or shut
     /// down, so renewd's exit counts as a shutdown (see `Heartbeat`).
     case poweringOff
@@ -72,11 +74,14 @@ public struct Request: Codable, Sendable {
     public var statsQuery: ActivityStatsQuery?
     /// For `monitorFlags`: which day to read.
     public var monitorQuery: MonitorQuery?
+    /// For `monitorFlagRange`: which days, and which page.
+    public var monitorRange: MonitorRangeQuery?
 
     public init(cmd: Command, durationSeconds: Int? = nil, rules: [String]? = nil, report: AgentReport? = nil,
                 schedules: [Schedule]? = nil, protections: Protections? = nil,
                 activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, events: [ActivityEvent]? = nil,
                 activityQuery: ActivityQuery? = nil, statsQuery: ActivityStatsQuery? = nil, monitorQuery: MonitorQuery? = nil,
+                monitorRange: MonitorRangeQuery? = nil,
                 reports: ReportDestination? = nil, partnerEmail: String? = nil) {
         self.cmd = cmd
         self.reports = reports
@@ -92,6 +97,7 @@ public struct Request: Codable, Sendable {
         self.activityQuery = activityQuery
         self.statsQuery = statsQuery
         self.monitorQuery = monitorQuery
+        self.monitorRange = monitorRange
     }
 }
 
@@ -267,18 +273,22 @@ public struct Response: Codable, Sendable {
     public var activityIncremental: Bool?
     /// For `activityStats`: the days in the range that have totals.
     public var stats: [DaySummary]?
-    /// For `monitorFlags`: the flags found.
+    /// For `monitorFlags`: the flags found, oldest first. For
+    /// `monitorFlagRange`: one page, newest first.
     public var flags: [MonitorFlag]?
     /// For `monitorFlags`: pass as `MonitorQuery.fromOffset` to get only newer flags.
     public var flagsOffset: Int?
     /// For `monitorFlags`: whether `flags` only holds flags added since the
     /// query's `fromOffset`.
     public var flagsIncremental: Bool?
+    /// For `monitorFlagRange`: how many flags the whole range holds.
+    public var flagsTotal: Int?
     /// For `partnerHistory`: newest first.
     public var partnerHistory: [PartnerLogEntry]?
 
     public init(ok: Bool, error: String? = nil, status: Status? = nil, activity: ActivityPage? = nil,
-                stats: [DaySummary]? = nil, flags: MonitorPage? = nil, partnerHistory: [PartnerLogEntry]? = nil) {
+                stats: [DaySummary]? = nil, flags: MonitorPage? = nil,
+                flagRange: MonitorRangePage? = nil, partnerHistory: [PartnerLogEntry]? = nil) {
         self.ok = ok
         self.partnerHistory = partnerHistory
         self.error = error
@@ -290,6 +300,10 @@ public struct Response: Codable, Sendable {
         self.flags = flags?.flags
         self.flagsOffset = flags?.offset
         self.flagsIncremental = flags?.isIncremental
+        if let flagRange {
+            self.flags = flagRange.flags
+            self.flagsTotal = flagRange.total
+        }
     }
 }
 

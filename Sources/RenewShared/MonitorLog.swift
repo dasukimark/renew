@@ -46,6 +46,45 @@ public struct MonitorQuery: Codable, Equatable, Sendable {
     }
 }
 
+/// A page of the Monitor's flags across a range of days, newest first.
+public struct MonitorRangeQuery: Codable, Equatable, Sendable {
+    public static let maxLimit = 500
+
+    /// First local day to include, `yyyy-MM-dd`; nil for every day kept.
+    public var sinceDay: String?
+    /// Last local day to include, `yyyy-MM-dd`.
+    public var throughDay: String
+    /// How many of the newest flags to pass over.
+    public var skip: Int
+    /// How many to return (at most `maxLimit`).
+    public var limit: Int
+
+    public init(sinceDay: String?, throughDay: String, skip: Int = 0, limit: Int = 50) {
+        self.sinceDay = sinceDay
+        self.throughDay = throughDay
+        self.skip = skip
+        self.limit = limit
+    }
+
+    public init(since: Date?, through: Date, skip: Int = 0, limit: Int = 50) {
+        self.init(sinceDay: since.map { ActivityLogStore.dayKey($0) }, throughDay: ActivityLogStore.dayKey(through),
+                  skip: skip, limit: limit)
+    }
+
+    public var isValid: Bool {
+        ActivityLogStore.date(ofDay: throughDay) != nil
+            && (sinceDay.map { ActivityLogStore.date(ofDay: $0) != nil } ?? true)
+            && skip >= 0 && limit > 0 && limit <= Self.maxLimit
+    }
+}
+
+/// What a range read found: one page, newest first, and how many flags the
+/// whole range holds.
+public struct MonitorRangePage: Sendable {
+    public var flags: [MonitorFlag]
+    public var total: Int
+}
+
 /// What a read of the Monitor's flags found.
 public struct MonitorPage: Sendable {
     public var flags: [MonitorFlag]
@@ -70,6 +109,9 @@ public final class MonitorLogStore {
     let maxBytesPerDay: Int
     let maxBytesPerUser: Int
     private var lastQuotaLog: [uid_t: Date] = [:]
+    /// How many flags each day file held at `end` (just past its last whole
+    /// line), so range reads only decode what was appended since.
+    private var flagCounts: [String: (end: Int, count: Int)] = [:]
 
     public init(directory: String, maxBytesPerDay: Int = MonitorLogStore.maxBytesPerDay,
                 maxBytesPerUser: Int = MonitorLogStore.maxBytesPerUser) {
@@ -85,11 +127,44 @@ public final class MonitorLogStore {
         ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.intValue ?? 0
     }
 
-    private func userBytes(_ uid: uid_t) -> Int {
-        let dir = userDir(uid)
-        return ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
+    /// The day keys of the `.jsonl` files in a user's directory, unchecked.
+    private static func dayFiles(inUserDir dir: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
             .filter { $0.hasSuffix(".jsonl") }
-            .reduce(0) { $0 + Self.size(dir + "/" + $1) }
+            .map { String($0.dropLast(".jsonl".count)) }
+    }
+
+    private func userBytes(_ uid: uid_t) -> Int {
+        Self.dayFiles(inUserDir: userDir(uid)).reduce(0) { $0 + Self.size(file(uid, day: $1)) }
+    }
+
+    /// The whole lines in `data` that decode as flags.
+    private static func decodeLines(_ data: Data) -> [MonitorFlag] {
+        let end = data.lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex
+        let decoder = Wire.decoder
+        return data[data.startIndex..<end].split(separator: 0x0A)
+            .compactMap { try? decoder.decode(MonitorFlag.self, from: $0) }
+    }
+
+    /// How many flags a day file holds, decoding only what was appended
+    /// since the last call. Files are append-only; a shorter file starts over.
+    private func flagCount(atPath path: String) -> Int {
+        guard let handle = FileHandle(forReadingAtPath: path) else {
+            flagCounts[path] = nil
+            return 0
+        }
+        defer { try? handle.close() }
+        let size = Int((try? handle.seekToEnd()) ?? 0)
+        var known = flagCounts[path] ?? (0, 0)
+        if known.end > size { known = (0, 0) }
+        guard known.end < size else { return known.count }
+        try? handle.seek(toOffset: UInt64(known.end))
+        let data = handle.readData(ofLength: size - known.end)
+        guard let last = data.lastIndex(of: 0x0A) else { return known.count }
+        known.count += Self.decodeLines(data).count
+        known.end += last - data.startIndex + 1
+        flagCounts[path] = known
+        return known.count
     }
 
     /// Appends `flags` to `uid`'s log, filed under the day each visit
@@ -169,6 +244,36 @@ public final class MonitorLogStore {
                            offset: start + (end - data.startIndex), isIncremental: incremental)
     }
 
+    /// One page of `uid`'s flags across the query's days, newest first, and
+    /// how many the range holds. Counts come from `flagCount`; only the days
+    /// the page touches are decoded in full.
+    public func read(_ query: MonitorRangeQuery, uid: uid_t) -> MonitorRangePage {
+        guard query.isValid else { return MonitorRangePage(flags: [], total: 0) }
+        let days = Self.dayFiles(inUserDir: userDir(uid))
+            .filter { day in
+                ActivityLogStore.date(ofDay: day) != nil && day <= query.throughDay
+                    && (query.sinceDay.map { day >= $0 } ?? true)
+            }
+            .sorted(by: >)
+        let pageEnd = query.skip + query.limit
+        var total = 0
+        var page: [MonitorFlag] = []
+        for day in days {
+            let path = file(uid, day: day)
+            let first = total
+            total += flagCount(atPath: path)
+            guard total > query.skip, first < pageEnd,
+                  let data = FileManager.default.contents(atPath: path) else { continue }
+            // Decoded the same way it was counted, so the page lines up with
+            // the total. Capped at the count in case the file grew since.
+            let newest = Self.decodeLines(data).prefix(total - first).sorted { $0.start > $1.start }
+            let lo = max(0, query.skip - first)
+            let hi = min(newest.count, pageEnd - first)
+            if lo < hi { page += newest[lo..<hi] }
+        }
+        return MonitorRangePage(flags: page, total: total)
+    }
+
     // MARK: flags from before the split
 
     /// Marks that `importLegacyFlags` has run.
@@ -246,10 +351,13 @@ public final class MonitorLogStore {
         var removed = 0
         for user in users where uid_t(user) != nil {
             let dir = directory + "/" + user
-            for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".jsonl") {
-                let day = String(name.dropLast(".jsonl".count))
+            for day in Self.dayFiles(inUserDir: dir) {
                 guard ActivityLogStore.isExpired(day: day, now: now, timeZone: tz, retention: Self.retentionDays) else { continue }
-                if (try? fm.removeItem(atPath: dir + "/" + name)) != nil { removed += 1 }
+                let path = dir + "/\(day).jsonl"
+                if (try? fm.removeItem(atPath: path)) != nil {
+                    flagCounts[path] = nil
+                    removed += 1
+                }
             }
         }
         return removed

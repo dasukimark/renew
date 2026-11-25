@@ -30,41 +30,131 @@ private struct MonitorStatusBanner: View {
 
 // MARK: flags
 
+/// How far back the Flags tab looks.
+enum FlagRange: String, CaseIterable, Identifiable {
+    case week = "Past 7 Days"
+    case month = "Past Month"
+    case all = "All Time"
+
+    var id: Self { self }
+
+    /// The first day included, or nil for every day kept.
+    func since(_ now: Date) -> Date? {
+        let cal = Calendar.current
+        switch self {
+        case .week: return cal.date(byAdding: .day, value: -6, to: now)
+        case .month: return cal.date(byAdding: .month, value: -1, to: now)
+        case .all: return nil
+        }
+    }
+
+    var emptyMessage: String {
+        switch self {
+        case .week: return "Nothing flagged in the past 7 days."
+        case .month: return "Nothing flagged in the past month."
+        case .all: return "Nothing has been flagged."
+        }
+    }
+}
+
+private let flagDayFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.setLocalizedDateFormatFromTemplate("EEEEMMMdyyyy")
+    return f
+}()
+
+private let flagDayFormatterThisYear: DateFormatter = {
+    let f = DateFormatter()
+    f.setLocalizedDateFormatFromTemplate("EEEEMMMd")
+    return f
+}()
+
+/// "Today", "Yesterday", "Monday, Nov 23", or with the year when it isn't this one.
+private func flagDayTitle(_ day: Date) -> String {
+    let cal = Calendar.current
+    if cal.isDateInToday(day) { return "Today" }
+    if cal.isDateInYesterday(day) { return "Yesterday" }
+    return cal.isDate(day, equalTo: Date(), toGranularity: .year)
+        ? flagDayFormatterThisYear.string(from: day)
+        : flagDayFormatter.string(from: day)
+}
+
+/// One day's flags on the Flags tab.
+private struct FlagDay {
+    let day: Date
+    var flags: [MonitorFlag]
+
+    /// Groups flags already sorted newest first.
+    static func group(_ flags: [MonitorFlag]) -> [FlagDay] {
+        let cal = Calendar.current
+        var out: [FlagDay] = []
+        for f in flags {
+            let d = cal.startOfDay(for: f.start)
+            if out.last?.day == d { out[out.count - 1].flags.append(f) } else { out.append(FlagDay(day: d, flags: [f])) }
+        }
+        return out
+    }
+}
+
+/// Stable row identity, so a new flag at the top doesn't reshuffle the rest.
+extension MonitorFlag: Identifiable {
+    public var id: String { eventID?.uuidString ?? "\(start.timeIntervalSince1970)|\(url)" }
+}
+
 struct MonitorFlagsView: View {
     @ObservedObject var model: AppModel
 
-    @State private var day = Date()
-    @State private var flags: [MonitorFlag] = []
+    static let pageSize = 50
+
+    @State private var range: FlagRange = .week
+    @State private var page = 0
+    /// This page's flags, newest first, grouped by the day they happened.
+    @State private var days: [FlagDay] = []
+    @State private var total = 0
     @State private var loadError: String?
     @State private var loaded = false
     @State private var generation = 0
-    @State private var offset: Int?
 
     private let refresh = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
-    private var isToday: Bool { Calendar.current.isDateInToday(day) }
+    private var pageCount: Int { max(1, (total + Self.pageSize - 1) / Self.pageSize) }
+
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             MonitorStatusBanner(model: model)
             HStack(spacing: 10) {
-                DayPickerBar(day: $day)
+                Picker("Range", selection: $range) {
+                    ForEach(FlagRange.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
                 Spacer()
-                if !flags.isEmpty {
-                    Text(flags.count == 1 ? "1 flagged visit" : "\(flags.count) flagged visits")
+                if total > 0 {
+                    Text(total == 1 ? "1 flagged visit" : "\(total.formatted()) flagged visits")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
-                Button { load(incremental: true) } label: { Image(systemName: "arrow.clockwise") }
+                Button { load() } label: { Image(systemName: "arrow.clockwise") }
                     .help("Refresh")
             }
             content
+            if total > Self.pageSize && loadError == nil {
+                pager
+            }
         }
         .padding(20)
         .onAppear { load() }
-        .onChange(of: day) { _ in flags = []; loaded = false; load() }
-        .onReceive(refresh) { _ in if isToday { load(incremental: true) } }
+        .onChange(of: range) { _ in
+            days = []; total = 0; loaded = false
+            // Resetting the page loads through its own onChange.
+            if page != 0 { page = 0 } else { load() }
+        }
+        .onChange(of: page) { _ in load() }
+        // Only the first page refreshes itself; later pages would shift under you.
+        .onReceive(refresh) { _ in if page == 0 { load() } }
     }
 
     @ViewBuilder private var content: some View {
@@ -75,13 +165,13 @@ struct MonitorFlagsView: View {
                 .frame(maxWidth: .infinity)
                 .multilineTextAlignment(.center)
             Spacer()
-        } else if flags.isEmpty {
+        } else if days.isEmpty {
             Spacer()
             VStack(spacing: 8) {
                 Image(systemName: "flag").font(.largeTitle).foregroundStyle(.secondary)
-                Text(loaded ? "Nothing flagged on this day." : "Loading…")
+                Text(loaded ? range.emptyMessage : "Loading…")
                     .foregroundStyle(.secondary)
-                if loaded && isToday && model.monitor.enabled && model.activity.enabled {
+                if loaded && model.monitor.enabled && model.activity.enabled {
                     Text("The Monitor is checking pages as you browse.")
                         .font(.callout)
                         .foregroundStyle(.tertiary)
@@ -90,16 +180,12 @@ struct MonitorFlagsView: View {
             .frame(maxWidth: .infinity)
             Spacer()
         } else {
-            List(Array(flags.reversed().enumerated()), id: \.offset) { _, f in
-                VisitRow(start: f.start, duration: f.duration, title: f.title.isEmpty ? f.host : f.title,
-                         url: f.url, browser: f.browser) {
-                    ForEach(f.flags, id: \.self) { flag in
-                        FlagBadge(text: flag.label, color: .red)
-                            .help(flag.kind == .domain ? "Matched \(flag.match)"
-                                  : flag.isScore ? "Several signals added up: \(flag.match)"
-                                  : flag.isSiteLabel ? "The site marked this page as adult content (\(flag.match))"
-                                  : flag.isPageWords ? "The page text has several explicit words: \(flag.match)"
-                                  : "Title contains “\(flag.match)”")
+            List {
+                ForEach(days, id: \.day) { group in
+                    Section {
+                        ForEach(group.flags) { row($0) }
+                    } header: {
+                        Text(flagDayTitle(group.day))
                     }
                 }
             }
@@ -107,28 +193,62 @@ struct MonitorFlagsView: View {
         }
     }
 
-    private func load(incremental: Bool = false) {
+    private func row(_ f: MonitorFlag) -> some View {
+        VisitRow(start: f.start, duration: f.duration, title: f.title.isEmpty ? f.host : f.title,
+                 url: f.url, browser: f.browser) {
+            ForEach(f.flags, id: \.self) { flag in
+                FlagBadge(text: flag.label, color: .red)
+                    .help(flag.kind == .domain ? "Matched \(flag.match)"
+                          : flag.isScore ? "Several signals added up: \(flag.match)"
+                          : flag.isSiteLabel ? "The site marked this page as adult content (\(flag.match))"
+                          : flag.isPageWords ? "The page text has several explicit words: \(flag.match)"
+                          : "Title contains “\(flag.match)”")
+            }
+        }
+    }
+
+    private var pager: some View {
+        HStack(spacing: 10) {
+            Spacer()
+            Text("\((page * Self.pageSize + 1).formatted())–\(min(total, (page + 1) * Self.pageSize).formatted()) of \(total.formatted())")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            ControlGroup {
+                Button { page -= 1 } label: { Image(systemName: "chevron.left") }
+                    .help("Newer")
+                    .disabled(page == 0)
+                Button { page += 1 } label: { Image(systemName: "chevron.right") }
+                    .help("Older")
+                    .disabled(page >= pageCount - 1)
+            }
+            .fixedSize()
+        }
+    }
+
+    private func load() {
         generation += 1
         let mine = generation
-        let from = incremental && loaded && loadError == nil ? offset : nil
-        model.loadMonitorFlags(day: day, fromOffset: from) { result in
+        let now = Date()
+        let query = MonitorRangeQuery(since: range.since(now), through: now,
+                                      skip: page * Self.pageSize, limit: Self.pageSize)
+        model.loadMonitorFlags(range: query) { result in
             guard mine == generation else { return }
             loaded = true
             switch result {
-            case .success(let page):
-                if page.isIncremental && from != nil {
-                    if !page.flags.isEmpty {
-                        flags = Array((flags + page.flags).sorted { $0.start < $1.start }
-                            .suffix(MonitorLogStore.maxQueryResults))
-                    }
-                } else {
-                    flags = page.flags
+            case .success(let r):
+                total = r.total
+                // Flags only go away when old days are pruned; if this page
+                // emptied, go to the last page there is (the first if none).
+                if r.flags.isEmpty && page > 0 {
+                    page = r.total > 0 ? min(page - 1, (r.total - 1) / Self.pageSize) : 0
+                    return
                 }
-                offset = page.offset
+                days = FlagDay.group(r.flags)
                 loadError = nil
             case .failure(let e):
-                flags = []
-                offset = nil
+                days = []
+                total = 0
                 loadError = model.isInstalled || model.isLocalTest ? e.message : "Install Renew to use the Monitor."
             }
         }

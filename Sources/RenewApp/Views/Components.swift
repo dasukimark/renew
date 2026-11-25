@@ -511,7 +511,7 @@ struct VisitRow<Badges: View>: View {
     }
 }
 
-/// Day navigation shared by the activity log and the Monitor's flags.
+/// Day navigation for the activity log.
 struct DayPickerBar: View {
     @Binding var day: Date
 
