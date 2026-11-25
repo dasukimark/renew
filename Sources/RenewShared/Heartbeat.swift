@@ -167,6 +167,22 @@ public struct HeartbeatReply: Codable, Equatable, Sendable {
         public var removalPending: Bool
         public var rejectedDecision: UUID?
         public var pendingPartners: [String]?
+        /// Enrolled partners who haven't confirmed by email yet.
+        public var unconfirmed: [String]?
+        /// Partners the server dropped without approval: they never
+        /// confirmed (or declined), so renewd drops them too.
+        public var released: [String]?
+    }
+    /// The server's view of partner confirmations; nil from servers that
+    /// predate them, or when every partner has confirmed and none was released.
+    public struct PartnerStatus: Codable, Equatable, Sendable {
+        public var unconfirmed: [String]?
+        public var released: [String]?
+
+        public init(unconfirmed: [String]? = nil, released: [String]? = nil) {
+            self.unconfirmed = unconfirmed
+            self.released = released
+        }
     }
     public struct Notice: Codable, Equatable, Sendable {
         public var title: String
@@ -185,6 +201,8 @@ public struct HeartbeatReply: Codable, Equatable, Sendable {
     public var needDetails: Bool?
     /// Read-only server monitoring state, independent of daemon liveness.
     public var monitoring: Monitoring?
+    /// Partner confirmations, on replies to ordinary check-ins.
+    public var partners: PartnerStatus?
 
     public init(notices: [Notice], needDetails: Bool? = nil) {
         self.notices = notices

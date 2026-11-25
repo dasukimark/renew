@@ -461,6 +461,7 @@ final class AppModel: ObservableObject {
     var reportsPartners: [String] { status?.reportsPartners ?? [] }
     var pendingReportPartners: [String] { status?.pendingReportPartners ?? [] }
     var retainedReportPartners: [String] { status?.retainedReportPartners ?? [] }
+    var unconfirmedReportPartners: [String] { status?.unconfirmedReportPartners ?? [] }
     var reportServerBuiltIn: Bool { status?.reportServerBuiltIn == true }
 
     /// nil turns email reports off. Without `url`, reports use the built-in server.

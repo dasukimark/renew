@@ -91,6 +91,17 @@ struct HeartbeatTests {
         #expect(reply?.notices[0].at == Date(timeIntervalSince1970: 1_794_931_200))
         #expect(HeartbeatReply.decode(Data("nope".utf8)) == nil)
     }
+
+    @Test func decodesPartnerConfirmations() {
+        let checkin = #"{"notices":[],"partners":{"unconfirmed":["a@test.invalid"],"released":["typo@test.invalid"]}}"#
+        let reply = HeartbeatReply.decode(Data(checkin.utf8))
+        #expect(reply?.partners == HeartbeatReply.PartnerStatus(unconfirmed: ["a@test.invalid"], released: ["typo@test.invalid"]))
+        let lookup = #"{"notices":[],"monitoring":{"partners":[],"removalPending":false,"released":["typo@test.invalid"]}}"#
+        let status = HeartbeatReply.decode(Data(lookup.utf8))?.monitoring
+        #expect(status?.released == ["typo@test.invalid"] && status?.unconfirmed == nil)
+        // Servers from before confirmations say neither.
+        #expect(HeartbeatReply.decode(Data(#"{"notices":[]}"#.utf8))?.partners == nil)
+    }
 }
 
 @Suite("Internal heartbeat")

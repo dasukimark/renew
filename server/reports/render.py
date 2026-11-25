@@ -2,10 +2,13 @@
 
 Sites and page titles are shown without links, on purpose: the partner
 shouldn't be one tap from an explicit site. Email apps turn anything that
-looks like a domain into a link, even in plain text, so every dot inside a
-word is replaced with a look-alike (U+2024 ONE DOT LEADER) that no app
-treats as a domain.
+looks like a domain into a link, even in plain text, so sites are shown by
+name only: `www.example.com` is `example`. With no dot left there's nothing
+to link. (Look-alike dots or invisible characters would do it too, but spam
+filters treat those as disguised links.)
 """
+
+import hashlib
 
 import html
 import os
@@ -39,9 +42,12 @@ def as_list(to):
     return [to] if isinstance(to, str) else list(to or [])
 
 
-DOT = "․"
-_INNER_DOT = re.compile(r"(?<=\w)\.(?=\w)")
-_SCHEME = re.compile(r"(?i)\b(https?|ftp)://")
+# Something shaped like a domain (not an email address's: those stay mailto links).
+_DOMAIN = re.compile(r"(?i)(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9](?![\w@-])")
+# A whole web address: shown as its site's name, path and all dropped.
+_URL = re.compile(r"(?i)\b(?:https?|ftp)://([^\s/?#<>\"']+)[^\s<>\"']*")
+# Second-level labels that are part of a country's suffix (bbc.co.uk).
+_SECOND_LEVEL = {"co", "com", "net", "org", "gov", "edu", "ac", "ne", "or", "go"}
 
 # Palette (inline styles only; email apps ignore most CSS).
 INK = "#18181b"
@@ -65,6 +71,7 @@ CHECKIN = {
     "restart": ("Renew restarted more than once on {mac}", "Renew restarted", ("#b45309", "#fffbeb")),
     "missed": ("Renew on {mac} missed a check-in", "Missed a check-in", ("#b45309", "#fffbeb")),
     "removal": ("Review a Renew monitoring request for {mac}", "Request to end monitoring", ("#b45309", "#fffbeb")),
+    "invite": ("Confirm you're an accountability partner for {mac}", "Confirm you're a partner", ("#0f6b57", "#f0fdf4")),
 }
 
 PILLS = {
@@ -74,10 +81,22 @@ PILLS = {
 }
 
 
+def site_name(host):
+    """The name of a site without its subdomains or extension:
+    `www.example.co.uk` is `example`."""
+    labels = [label for label in host.strip(".").split(".") if label]
+    if len(labels) < 2:
+        return host
+    two_part = len(labels) > 2 and len(labels[-1]) == 2 and labels[-2].lower() in _SECOND_LEVEL
+    suffix = 2 if two_part else 1
+    return labels[-suffix - 1]
+
+
 def unlinkable(text):
-    """`text` with dots inside words (and URL schemes) disarmed, so no email
-    app turns it into a link."""
-    return _INNER_DOT.sub(DOT, _SCHEME.sub(lambda m: m.group(1) + ":/⁠/", text))
+    """`text` with each web address and domain replaced by its site's name
+    (see `site_name`), so no email app can turn it into a link."""
+    text = _URL.sub(lambda m: site_name(m.group(1).rsplit("@", 1)[-1].split(":")[0]), text)
+    return _DOMAIN.sub(lambda m: site_name(m.group(0)), text)
 
 
 def esc(text):
@@ -189,8 +208,22 @@ def notice(lines, color, bg):
             f"<ul style='margin:0;padding-left:18px;color:{INK};font-size:14px;line-height:21px'>{items}</ul></td></tr>")
 
 
-def build_email(report, sender):
-    """The email for a cleaned report (see app.parse_report)."""
+def message_id(report, to, sender):
+    """One per report and recipient, so a report sent twice is one email
+    each, on the sender's own domain."""
+    tag = hashlib.sha256(to.encode()).hexdigest()[:12]
+    return f"<{report['id']}.{tag}@{sender.rpartition('@')[2] or 'localhost'}>"
+
+
+def build_emails(report, sender):
+    """One email per recipient: an address that bounces then can't drag
+    the others' delivery down with it, and no partner sees the others'."""
+    return [build_email(report, sender, to) for to in as_list(report["to"])]
+
+
+def build_email(report, sender, to=None):
+    """The email for a cleaned report (see app.parse_report), to one
+    recipient (`to`), or all of them in one email."""
     zone = zone_for(report["timeZone"])
     flags = report["flags"]
     who = report["mac"] + (f" ({report['user']})" if report["user"] else "")
@@ -233,7 +266,7 @@ def build_email(report, sender):
         text.append(f"- {unlinkable(c)}")
     approval_url = report.get("approvalURL")
     if approval_url:
-        text += ["", f"Review the request: {approval_url}", "Renew will not ask for a password."]
+        text += ["", f"{report.get('actionLabel', 'Review the request')}: {approval_url}", "Renew will not ask for a password."]
     text += ["", f"Sent by Renew at {when(report['sentAt'], zone)}. Sites are shown without links.",
              f"Report {report['id']}"]
 
@@ -260,7 +293,7 @@ def build_email(report, sender):
     if approval_url:
         body.append(f'<tr><td style="padding:16px 0"><a href="{html.escape(approval_url, quote=True)}" '
                     'style="display:inline-block;background:#0f6b57;color:white;padding:10px 16px;'
-                    'border-radius:8px;text-decoration:none;font-weight:600">Review in Renew</a>'
+                    f'border-radius:8px;text-decoration:none;font-weight:600">{html.escape(report.get("actionLabel", "Review in Renew"))}</a>'
                     f'<p style="color:{MUTED};font-size:13px">Renew will not ask for a password.</p></td></tr>')
 
     page = f"""<!doctype html>
@@ -291,9 +324,8 @@ addresses are never included.<br>Report {html.escape(report['id'])}
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f"Renew <{sender}>"
-    msg["To"] = ", ".join(as_list(report["to"]))
-    # One Message-ID per report, so a report sent twice is one email.
-    msg["Message-ID"] = f"<{report['id']}@renew.reports>"
+    msg["To"] = to or ", ".join(as_list(report["to"]))
+    msg["Message-ID"] = message_id(report, to or msg["To"], sender)
     msg.set_content("\n".join(text))
     msg.add_alternative(page, subtype="html")
     return msg

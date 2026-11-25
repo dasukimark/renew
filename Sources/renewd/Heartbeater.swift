@@ -28,6 +28,9 @@ final class Heartbeater: @unchecked Sendable {
     var userName: () -> String
     /// Called with what the server says it emailed the partner.
     var onNotices: ([HeartbeatReply.Notice]) -> Void = { _ in }
+    /// Called with the server's partner confirmations (nil: nothing to
+    /// report) after a check-in about the current partner list.
+    var onPartnerStatus: (HeartbeatReply.PartnerStatus?, ReportServer) -> Void = { _, _ in }
     /// Since when renewd has been running whenever the Mac was awake.
     var coveredSince: () -> Date? = { nil }
     /// Downtime waiting to be sent.
@@ -48,6 +51,9 @@ final class Heartbeater: @unchecked Sendable {
     /// The details the server last took; nil until then, so the first
     /// check-in after starting carries them.
     private var acceptedDetails: Heartbeat.Details?
+    /// Bumped by `configurationChanged`, so a reply to a check-in sent
+    /// before a change is recognised as stale.
+    private var configGeneration = 0
     /// The gaps file as last looked at (modification time and size), and
     /// the gap ids the last check-in carried: a gap not among them is new.
     private var gapsStamp: [Int] = []
@@ -114,6 +120,7 @@ final class Heartbeater: @unchecked Sendable {
     }
 
     func configurationChanged() {
+        configGeneration += 1
         lastAccepted = nil
         acceptedDetails = nil
         beatNow()
@@ -205,6 +212,7 @@ final class Heartbeater: @unchecked Sendable {
         }
         sending = true
         let beat = make(state, for: target)
+        let generation = configGeneration
         if beat.monitoringOnly != true { gapsTried = Set((beat.gaps ?? []).map(\.id)) }
         let finished = DispatchGroup()
         for extra in otherMonitoringTargets(than: target) {
@@ -233,6 +241,13 @@ final class Heartbeater: @unchecked Sendable {
                         log("heartbeat: reported \(sent.count) time(s) Renew wasn't running")
                     }
                     if let notices = reply?.notices, !notices.isEmpty { self.onNotices(notices) }
+                    // Only when the server has the partner list as it is
+                    // now: a reply to a check-in sent before a change could
+                    // undo it.
+                    if let reply, beat.monitoringOnly != true, generation == self.configGeneration,
+                       self.destination()?.server.url == target.server.url {
+                        self.onPartnerStatus(reply.partners, target.server)
+                    }
                 } else {
                     self.nextBeat = Self.uptime + Heartbeat.retryDelay
                 }

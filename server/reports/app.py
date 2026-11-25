@@ -25,7 +25,7 @@ from datetime import datetime
 from urllib.parse import parse_qs
 
 import heartbeat
-from render import as_list, build_email, recipients
+from render import as_list, build_emails, recipients
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -148,12 +148,23 @@ def parse_report(body):
     }
 
 
-def send_email(msg, sender, app_password):
+def send_email(msgs, sender, app_password):
+    """Sends each of `msgs` (one per recipient) over one connection. An
+    address Gmail refuses is skipped, so it can't hold back (or, on a retry,
+    duplicate) the others' copies; raises only if every one is refused."""
     # Short enough that connect, sign-in and send finish well inside the
     # Lambda's timeout and renewd's (75 s).
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12) as smtp:
         smtp.login(sender, app_password)
-        smtp.send_message(msg)
+        refused = []
+        for msg in msgs:
+            try:
+                smtp.send_message(msg)
+            except smtplib.SMTPRecipientsRefused as e:
+                log.warning("Gmail refused %s; sending to the other partners", msg["To"])
+                refused.append(e)
+        if refused and len(refused) == len(msgs):
+            raise refused[0]
 
 
 def _json_response(status, data):
@@ -175,7 +186,7 @@ def _is_heartbeat(body):
 def _send_built(report, app_password):
     """Emails a cleaned report; raises on failure."""
     sender = os.environ["GMAIL_ADDRESS"]
-    send_email(build_email(report, sender), sender, app_password)
+    send_email(build_emails(report, sender), sender, app_password)
 
 
 def _checkin_sender(app_password):
@@ -196,7 +207,8 @@ def handler(event, context):
     http = (event.get("requestContext") or {}).get("http") or {}
     method = http.get("method", "").upper()
     approval = event.get("rawPath") == "/monitoring/approve"
-    if method not in ({"GET", "POST"} if approval else {"POST"}):
+    confirmation = event.get("rawPath") == "/partners/confirm"
+    if method not in ({"GET", "POST"} if approval or confirmation else {"POST"}):
         return _response(405, "method not allowed")
 
     body = event.get("body") or ""
@@ -209,6 +221,8 @@ def handler(event, context):
         return _response(413, "too large")
     if approval:
         return _monitoring_approval(method, event, body)
+    if confirmation:
+        return _partner_confirmation(method, event, body)
 
     try:
         token, app_password = _load_secrets()
@@ -248,7 +262,7 @@ def handler(event, context):
 
     sender = os.environ["GMAIL_ADDRESS"]
     try:
-        send_email(build_email(report, sender), sender, app_password)
+        send_email(build_emails(report, sender), sender, app_password)
     except smtplib.SMTPAuthenticationError:
         log.exception("Gmail refused the sign-in; check the app password, or sign in to the account to confirm it's you")
         return _response(502, "couldn't send")
@@ -277,7 +291,7 @@ def _approval_page(status, content):
                  "header{font-weight:700;color:#0f6b57}h1{font-size:1.65rem}p{line-height:1.55}"
                  "form{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.5rem 0 0}"
                  "button{font:inherit;font-weight:600;cursor:pointer;border:1px solid #bccdc5;border-radius:8px;padding:.65rem 1rem;background:white;color:#172b26}"
-                 "button[value=reject]{background:#0f6b57;color:white;border-color:#0f6b57}</style>"
+                 "button[value=reject],button[value=confirm]{background:#0f6b57;color:white;border-color:#0f6b57}</style>"
                  "<main><header>Renew</header>" + content + "</main></html>"),
     }
 
@@ -326,6 +340,52 @@ def _monitoring_approval(method, event, body):
         log.exception("couldn't process monitoring approval")
         return _approval_page(500, "<h1>Couldn’t process the request</h1><p>Try the link again later.</p>")
     return _approval_page(404, "<h1>This approval link is no longer active</h1>")
+
+
+def _partner_confirmation(method, event, body):
+    # Like approvals: opening the link only shows the choice, so an email
+    # scanner following it can't decide.
+    try:
+        fields = parse_qs(event.get("rawQueryString", "") if method == "GET" else body, max_num_fields=4)
+        install = str(uuid.UUID(fields["install"][0]))
+        token = str(uuid.UUID(fields["token"][0]))
+    except (KeyError, ValueError):
+        return _approval_page(400, "<h1>Invalid confirmation link</h1>")
+    store = heartbeat.store()
+    try:
+        item = store.get(install)
+        email = heartbeat.invite_for(item, token)
+        if email is None:
+            return _approval_page(404, "<h1>This confirmation link is no longer active</h1>"
+                                       "<p>You aren't a partner for this Mac any more, so you won't get its emails.</p>")
+        mac = html.escape(item["mac"])
+        if method == "POST":
+            decision = fields.get("decision")
+            if decision == ["confirm"] and heartbeat.confirm_partner(install, token, store):
+                return _approval_page(200, f"<h1>Thanks, you're confirmed</h1><p>You're an accountability partner "
+                                           f"for Renew on {mac}. Removing you now needs a partner's approval.</p>")
+            if decision == ["decline"]:
+                if heartbeat.decline_partner(install, token, store):
+                    return _approval_page(200, "<h1>You won't get any more emails</h1>"
+                                               f"<p>You were removed as a partner for Renew on {mac}.</p>")
+                return _approval_page(409, "<h1>You already confirmed</h1><p>To stop being a partner, ask them "
+                                           "to remove you; you'll get an email to approve it.</p>")
+            return _approval_page(400, "<h1>Choose confirm or decline</h1>")
+        if email in heartbeat._confirmed(item):
+            return _approval_page(200, f"<h1>You're already confirmed</h1><p>You're an accountability partner for Renew on {mac}.</p>")
+        return _approval_page(200,
+            f"<h1>Be an accountability partner for {mac}?</h1>"
+            f"<p>{html.escape(email)} was added as a partner. Renew emails its partners when it flags a visit, "
+            "when monitoring is loosened, and if Renew stops running. Once you confirm, removing you needs "
+            "a partner's approval.</p><p>If you don't know this person, choose Decline.</p>"
+            "<form method='post' action='/partners/confirm'>"
+            f"<input type='hidden' name='install' value='{install}'>"
+            f"<input type='hidden' name='token' value='{token}'>"
+            "<button name='decision' value='decline'>Decline</button>"
+            "<button name='decision' value='confirm'>Confirm</button></form>")
+    except Exception:
+        log.exception("couldn't process partner confirmation")
+        return _approval_page(500, "<h1>Couldn’t process the request</h1><p>Try the link again later.</p>")
 
 
 def _heartbeat(body, app_password, approval_origin):

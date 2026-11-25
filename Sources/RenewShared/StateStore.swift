@@ -30,6 +30,10 @@ public struct PersistedState: Codable, Equatable, Sendable {
     /// their removal. Only these count as approved once the server stops
     /// monitoring them: a partner it never enrolled never approved anything.
     public var removalsSeenAsked: [String: [String]]?
+    /// Partners the current report server says haven't confirmed by email
+    /// yet. Kept across restarts so check-ins keep leaving out the ones whose
+    /// removal is on its way (see `Daemon.partnersLeftOut`).
+    public var unconfirmedPartners: [String]?
     /// This install's id, sent with check-ins (see `Heartbeat`). Made by
     /// renewd the first time it starts.
     public var installID: UUID?

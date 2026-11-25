@@ -23,6 +23,7 @@ class FakeSMTP:
     instances = []
     fail_login = False
     fail_send = False
+    refuse = set()
 
     def __init__(self, host, port, timeout=None):
         self.host, self.port = host, port
@@ -43,6 +44,8 @@ class FakeSMTP:
     def send_message(self, msg):
         if FakeSMTP.fail_send:
             raise smtplib.SMTPServerDisconnected("gone")
+        if FakeSMTP.refuse and msg["To"] in FakeSMTP.refuse:
+            raise smtplib.SMTPRecipientsRefused({msg["To"]: (550, b"no such user")})
         self.sent.append(msg)
 
 
@@ -51,6 +54,7 @@ def smtp(monkeypatch):
     FakeSMTP.instances = []
     FakeSMTP.fail_login = False
     FakeSMTP.fail_send = False
+    FakeSMTP.refuse = set()
     monkeypatch.setattr(app.smtplib, "SMTP_SSL", FakeSMTP)
     return FakeSMTP
 
@@ -135,10 +139,10 @@ def test_flags_report_is_emailed(smtp):
     assert "sender@test.invalid" in msg["From"]
     assert msg["Subject"] == "Renew report: 2 flagged visits on Test Mac"
     text = msg.get_body(("plain",)).get_content()
-    assert "a\u2024example" in text and "42s" in text and "2m 5s" in text
+    assert "a" in text and "42s" in text and "2m 5s" in text
     assert '"A page title"' in text
     page = msg.get_body(("html",)).get_content()
-    assert "&lt;b&gt;evil\u2024example&lt;/b&gt;" in page
+    assert "&lt;b&gt;evil&lt;/b&gt;" in page
     assert "&lt;script&gt;" in page
     assert "<script>" not in page
     assert "A page title" in page
@@ -157,14 +161,21 @@ def test_sites_are_never_linkable(smtp):
         for domain in ("explicit.example", "other.example", "mirror.example", "https://"):
             assert domain not in part
         assert "<a " not in part
-        assert "www\u2024explicit\u2024example" in part
+        assert "explicit" in part
 
 
 def test_unlinkable_keeps_sentences():
     import render
     assert render.unlinkable("The Monitor was turned off.") == "The Monitor was turned off."
+    assert render.unlinkable("Version 1.2, e.g. Mr. Smith") == "Version 1.2, e.g. Mr. Smith"
+    assert render.unlinkable("Now to: a@b.example") == "Now to: a@b.example"
+    assert render.unlinkable("Now to: john.doe@mail.example.") == "Now to: john.doe@mail.example."
+    assert render.unlinkable("Learn Node.js") == "Learn Node"
+    assert render.unlinkable("https://user@old.reddit.com:443/r/x?y=1 and bbc.co.uk") == "reddit and bbc"
+    for text in ("www.explicit.example", "https://x.example/y", "Look at site.example"):
+        assert "." not in render.unlinkable(text) and "\u2024" not in render.unlinkable(text)
     assert render.unlinkable("Watched sites removed: a.example, b.example.") == \
-        "Watched sites removed: a\u2024example, b\u2024example."
+        "Watched sites removed: a, b."
 
 
 def test_flags_grouped_by_site(smtp):
@@ -175,8 +186,8 @@ def test_flags_grouped_by_site(smtp):
     ]
     assert app.handler(event(report(flags=flags)), None)["statusCode"] == 200
     text = smtp.instances[0].sent[0].get_body(("plain",)).get_content()
-    assert "a\u2024example  (2 visits, 2m)" in text
-    assert text.index("a\u2024example") < text.index("b\u2024example")
+    assert "a  (2 visits, 2m)" in text
+    assert text.index("a") < text.index("b")
 
 
 def test_times_use_the_macs_time_zone(smtp):
@@ -207,8 +218,10 @@ def test_repeats_dont_count_toward_the_limit(smtp):
 def test_several_partners(smtp):
     body = report(to=["Partner@Test.Invalid", "other@test.invalid", "partner@test.invalid"])
     assert app.handler(event(body), None)["statusCode"] == 200
-    [msg] = smtp.instances[0].sent
-    assert msg["To"] == "partner@test.invalid, other@test.invalid"
+    # One email each, over one connection.
+    first, second = smtp.instances[0].sent
+    assert (first["To"], second["To"]) == ("partner@test.invalid", "other@test.invalid")
+    assert first["Message-ID"] != second["Message-ID"]
 
 
 def test_same_report_is_sent_once(smtp):
@@ -217,7 +230,7 @@ def test_same_report_is_sent_once(smtp):
     assert app.handler(event(body), None)["statusCode"] == 200
     sent = [m for c in smtp.instances for m in c.sent]
     assert len(sent) == 1
-    assert sent[0]["Message-ID"] == f"<{body['id']}@renew.reports>"
+    assert sent[0]["Message-ID"].startswith(f"<{body['id']}.") and sent[0]["Message-ID"].endswith("@test.invalid>")
 
 
 def test_failed_send_can_be_retried(smtp):
@@ -266,3 +279,12 @@ def test_secrets_failure_is_5xx(smtp, monkeypatch):
     monkeypatch.setattr(app, "_secrets", None)
     monkeypatch.setattr(app, "_load_secrets", lambda: (_ for _ in ()).throw(RuntimeError("no ssm")))
     assert app.handler(event(report()), None)["statusCode"] == 500
+
+
+def test_a_refused_partner_doesnt_fail_the_others(smtp):
+    smtp.refuse = {"bad@test.invalid"}
+    body = report(to=["bad@test.invalid", "partner@test.invalid"])
+    assert app.handler(event(body), None)["statusCode"] == 200
+    assert [m["To"] for m in smtp.instances[0].sent] == ["partner@test.invalid"]
+    # Only when nobody can get it is it a failure (renewd retries).
+    assert app.handler(event(report(to="bad@test.invalid")), None)["statusCode"] == 502

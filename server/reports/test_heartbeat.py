@@ -89,8 +89,20 @@ def stored(state="awake", last_seen=T0, **extra):
     return item
 
 
-def sent(smtp):
-    return [m for i in smtp.instances for m in i.sent]
+def sent(smtp, invites=False):
+    """Emails sent, without partner confirmation emails unless `invites`."""
+    return [m for i in smtp.instances for m in i.sent
+            if invites or not m["Subject"].startswith("Confirm you're")]
+
+
+def invites(smtp):
+    return [m for m in sent(smtp, invites=True) if m["Subject"].startswith("Confirm you're")]
+
+
+def confirm_all(store):
+    """Every enrolled partner confirmed, as if they'd clicked their links."""
+    item = store.items[INSTALL]
+    item["confirmedPartners"] = heartbeat.as_list(item["to"])
 
 
 # MARK: decide
@@ -127,10 +139,12 @@ def test_decide_waits_for_long_intervals():
 def test_beat_is_recorded(smtp, store, clock):
     r = app.handler(event(beat()), None)
     assert r["statusCode"] == 200
-    assert json.loads(r["body"]) == {"notices": []}
+    reply = json.loads(r["body"])
+    assert [n["title"] for n in reply["notices"]] == ["Confirm you're a partner"]
+    assert reply["partners"] == {"unconfirmed": ["partner@test.invalid"]}
     item = store.items[INSTALL]
     assert item["state"] == "awake" and item["lastSeen"] == T0 and item["boot"] == BOOT_EPOCH
-    assert not sent(smtp)
+    assert not sent(smtp) and len(invites(smtp)) == 1
 
 
 @pytest.mark.parametrize("token", [None, "wrong"])
@@ -186,6 +200,7 @@ def test_removed_requires_explicit_partner_approval(smtp, store, clock):
 
 def test_only_original_partners_receive_approval_link(smtp, store, clock):
     app.handler(event(beat()), None)
+    confirm_all(store)
     app.handler(event(beat(to=["partner@test.invalid", "new@test.invalid"])), None)
     app.handler(event(beat(to="new@test.invalid")), None)
     assert store.items[INSTALL]["to"] == ["partner@test.invalid", "new@test.invalid"]
@@ -194,6 +209,7 @@ def test_only_original_partners_receive_approval_link(smtp, store, clock):
 
 def test_monitoring_status_tracks_pending_approval_without_checking_in(smtp, store, clock):
     app.handler(event(beat()), None)
+    confirm_all(store)
     app.handler(event(slim(state="removed")), None)
     token = store.items[INSTALL]["removal"]["token"]
     before = store.get(INSTALL)
@@ -216,6 +232,7 @@ def test_monitoring_status_tracks_pending_approval_without_checking_in(smtp, sto
 
 def test_monitoring_only_beats_keep_pending_enrollment_alive_and_cannot_recreate_it(smtp, store, clock):
     app.handler(event(beat()), None)
+    confirm_all(store)
     app.handler(event(slim(state="removed")), None)
     token = store.items[INSTALL]["removal"]["token"]
     for _ in range(13):
@@ -232,6 +249,7 @@ def test_monitoring_only_beats_keep_pending_enrollment_alive_and_cannot_recreate
 
 def test_partner_can_reject_and_monitoring_survives_without_reopening_request(smtp, store, clock):
     app.handler(event(beat(to=["partner@test.invalid", "other@test.invalid"])), None)
+    confirm_all(store)
     app.handler(event(beat(to="other@test.invalid")), None)
     token = store.items[INSTALL]["removal"]["token"]
     query = urlencode({"install": INSTALL, "token": token})
@@ -249,13 +267,15 @@ def test_partner_can_reject_and_monitoring_survives_without_reopening_request(sm
     assert monitoring["partners"] == ["partner@test.invalid", "other@test.invalid", "added@test.invalid"]
     assert monitoring["removalPending"] is False and monitoring["rejectedDecision"]
     assert store.items[INSTALL]["lastSeen"] == clock["now"]
-    assert "removal" not in store.items[INSTALL] and len(sent(smtp)) == 1
+    # The one request went to both original partners, one email each.
+    assert "removal" not in store.items[INSTALL] and len(sent(smtp)) == 2
 
 
 def test_partial_approval_preserves_remaining_partners_without_another_checkin(smtp, store, clock):
     removed = "partner@test.invalid"
     remaining = "other@test.invalid"
     app.handler(event(beat(to=[removed, remaining])), None)
+    confirm_all(store)
     request = slim(state="requestRemoval", removingPartners=[removed])
     assert app.handler(event(request), None)["statusCode"] == 200
     token = store.items[INSTALL]["removal"]["token"]
@@ -274,6 +294,7 @@ def test_partial_approval_retargets_a_queued_silence_email(smtp, store, clock):
     removed = "partner@test.invalid"
     remaining = "other@test.invalid"
     app.handler(event(beat(to=[removed, remaining])), None)
+    confirm_all(store)
     app.handler(event(slim(state="requestRemoval", removingPartners=[removed])), None)
     token = store.items[INSTALL]["removal"]["token"]
     smtp.fail_send = True
@@ -289,6 +310,7 @@ def test_partial_approval_retargets_a_queued_silence_email(smtp, store, clock):
 def test_rejection_deduplicates_retries_and_allows_a_fresh_request(smtp, store, clock):
     removed = "partner@test.invalid"
     app.handler(event(beat(to=[removed, "other@test.invalid"])), None)
+    confirm_all(store)
     request = slim(state="requestRemoval", removingPartners=[removed])
     assert app.handler(event(request), None)["statusCode"] == 200
     assert app.handler(event(request), None)["statusCode"] == 200
@@ -297,15 +319,16 @@ def test_rejection_deduplicates_retries_and_allows_a_fresh_request(smtp, store, 
     assert app.handler(dict(event(form, token=None), rawPath="/monitoring/approve"), None)["statusCode"] == 200
     assert app.handler(event(request), None)["statusCode"] == 200
     assert "removal" not in store.items[INSTALL]
-    assert len(sent(smtp)) == 1
+    assert len(sent(smtp)) == 2  # one request, to both partners
     new_request = dict(request, id=str(uuid.uuid4()))
     assert app.handler(event(new_request), None)["statusCode"] == 200
-    assert len(sent(smtp)) == 2
+    assert len(sent(smtp)) == 4
     assert store.items[INSTALL]["removal"]["token"] != token
 
 
 def test_explicit_removal_can_be_delivered_after_the_new_partner_list(smtp, store, clock):
     app.handler(event(beat(to=["partner@test.invalid", "other@test.invalid"])), None)
+    confirm_all(store)
     app.handler(event(beat(to="other@test.invalid", explicitPartnerRemovals=True)), None)
     assert "removal" not in store.items[INSTALL]
     assert len(store.items[INSTALL]["to"]) == 2
@@ -317,6 +340,7 @@ def test_explicit_removal_can_be_delivered_after_the_new_partner_list(smtp, stor
 def test_removal_email_uses_branded_origin_when_configured(smtp, store, clock, monkeypatch):
     monkeypatch.setenv("APPROVAL_BASE_URL", "https://reports.renew.test/")
     app.handler(event(beat()), None)
+    confirm_all(store)
     app.handler(event(slim(state="removed")), None)
     message, = sent(smtp)
     assert "https://reports.renew.test/monitoring/approve?" in message.get_body(("html",)).get_content()
@@ -325,6 +349,7 @@ def test_removal_email_uses_branded_origin_when_configured(smtp, store, clock, m
 
 def test_pending_removal_retries_email_and_preserves_silence_alerts(smtp, store, clock):
     app.handler(event(beat()), None)
+    confirm_all(store)
     smtp.fail_send = True
     assert app.handler(event(slim(state="removed")), None)["statusCode"] == 200
     assert store.items[INSTALL]["removal"]["notified"] is False
@@ -504,7 +529,8 @@ def test_several_partners_get_checkin_emails(smtp, store, clock):
     assert store.items[INSTALL]["to"] == ["partner@test.invalid", "other@test.invalid"]
     store.items[INSTALL]["lastSeen"] = T0 - 3 * 3600
     assert app.handler(SCHEDULED, None) == {"alerted": 1}
-    assert sent(smtp)[0]["To"] == "partner@test.invalid, other@test.invalid"
+    # One email each, so a bad address can't hurt the others' delivery.
+    assert [m["To"] for m in sent(smtp)] == ["partner@test.invalid", "other@test.invalid"]
 
 
 def test_several_partners_all_need_allowing(smtp, store, clock, monkeypatch):
@@ -748,3 +774,174 @@ def test_record_authentication_email_describes_evidence(smtp, store, clock):
     message, = sent(smtp)
     assert message["Subject"] == "Renew's heartbeat record on Test Mac couldn't be verified"
     assert "couldn't be verified" in message.get_body(("plain",)).get_content()
+
+
+# MARK: partner confirmation
+
+def confirm_link(message):
+    text = message.get_body(("plain",)).get_content()
+    url = next(line for line in text.splitlines() if "/partners/confirm?" in line).split(": ", 1)[1]
+    return url.split("?", 1)[1]
+
+
+def confirmation(query, decision=None):
+    if decision is None:
+        return app.handler(dict(event("", method="GET", token=None), rawPath="/partners/confirm",
+                                rawQueryString=query), None)
+    return app.handler(dict(event(f"{query}&decision={decision}", token=None), rawPath="/partners/confirm"), None)
+
+
+def status():
+    return json.loads(app.handler(event(slim(state="monitoringStatus")), None)["body"])["monitoring"]
+
+
+def test_new_partner_confirms_by_email(smtp, store, clock):
+    app.handler(event(beat()), None)
+    invite, = invites(smtp)
+    assert invite["To"] == "partner@test.invalid"
+    query = confirm_link(invite)
+    assert "https://reports.test.invalid/partners/confirm?" in invite.get_body(("plain",)).get_content()
+    page = confirmation(query)
+    assert page["statusCode"] == 200 and "Confirm" in page["body"] and "Decline" in page["body"]
+    # Opening the link (or a mail scanner following it) decides nothing.
+    assert status()["unconfirmed"] == ["partner@test.invalid"]
+    assert confirmation(query, "confirm")["statusCode"] == 200
+    assert "unconfirmed" not in status()
+    assert "already confirmed" in confirmation(query)["body"]
+    reply = json.loads(app.handler(event(slim()), None)["body"])
+    assert "partners" not in reply
+
+
+def test_unconfirmed_partner_is_removed_without_approval(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "typo@test.invalid"])), None)
+    confirm_all(store)
+    store.items[INSTALL]["confirmedPartners"] = ["partner@test.invalid"]
+    app.handler(event(slim(state="requestRemoval", removingPartners=["typo@test.invalid"])), None)
+    item = store.items[INSTALL]
+    assert item["to"] == ["partner@test.invalid"] and "removal" not in item
+    assert not sent(smtp)
+    assert status() == {"partners": ["partner@test.invalid"], "removalPending": False,
+                        "released": ["typo@test.invalid"]}
+    reply = json.loads(app.handler(event(slim()), None)["body"])
+    assert reply["partners"] == {"released": ["typo@test.invalid"]}
+
+
+def test_mixed_removal_releases_unconfirmed_and_asks_about_the_rest(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "typo@test.invalid"])), None)
+    store.items[INSTALL]["confirmedPartners"] = ["partner@test.invalid"]
+    app.handler(event(slim(state="removed")), None)
+    item = store.items[INSTALL]
+    assert item["to"] == ["partner@test.invalid"]
+    assert item["removal"]["removingPartners"] == ["partner@test.invalid"]
+    message, = sent(smtp)
+    assert message["To"] == "partner@test.invalid"
+
+
+def test_mistyped_first_partner_cant_hold_monitoring_hostage(smtp, store, clock):
+    # The address typed first never confirms; a partner added later does.
+    app.handler(event(beat(to="typo@test.invalid")), None)
+    app.handler(event(beat(to=["typo@test.invalid", "real@test.invalid"])), None)
+    store.items[INSTALL]["confirmedPartners"] = ["real@test.invalid"]
+    # Asking to remove the real partner goes to them, not the dead address.
+    app.handler(event(slim(state="requestRemoval", removingPartners=["real@test.invalid"])), None)
+    message, = sent(smtp)
+    assert message["To"] == "real@test.invalid"
+    # The typo goes at once, while the real partner's removal still waits.
+    app.handler(event(slim(state="requestRemoval", removingPartners=["typo@test.invalid"])), None)
+    item = store.items[INSTALL]
+    assert item["to"] == ["real@test.invalid"] and item["removal"]["removingPartners"] == ["real@test.invalid"]
+
+
+def test_partner_added_later_cant_approve_removing_a_confirmed_original(smtp, store, clock):
+    app.handler(event(beat()), None)
+    confirm_all(store)
+    app.handler(event(beat(to=["partner@test.invalid", "friend@test.invalid"])), None)
+    store.items[INSTALL]["confirmedPartners"].append("friend@test.invalid")
+    app.handler(event(slim(state="requestRemoval", removingPartners=["partner@test.invalid"])), None)
+    assert [m["To"] for m in sent(smtp)] == ["partner@test.invalid"]
+
+
+def test_partner_can_decline(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "stranger@test.invalid"])), None)
+    store.items[INSTALL]["confirmedPartners"] = ["partner@test.invalid"]
+    stranger = next(m for m in invites(smtp) if m["To"] == "stranger@test.invalid")
+    query = confirm_link(stranger)
+    assert confirmation(query, "decline")["statusCode"] == 200
+    assert store.items[INSTALL]["to"] == ["partner@test.invalid"]
+    assert status()["released"] == ["stranger@test.invalid"]
+    assert confirmation(query)["statusCode"] == 404
+    # A confirmed partner can't decline their way out.
+    partner = next(m for m in invites(smtp) if m["To"] == "partner@test.invalid")
+    assert confirmation(confirm_link(partner), "decline")["statusCode"] == 409
+    assert store.items[INSTALL]["to"] == ["partner@test.invalid"]
+
+
+def test_releasing_every_partner_leaves_a_tombstone(smtp, store, clock):
+    app.handler(event(beat(to="typo@test.invalid")), None)
+    app.handler(event(slim(state="removed")), None)
+    assert not sent(smtp)
+    assert status() == {"partners": [], "removalPending": False, "released": ["typo@test.invalid"]}
+    clock["now"] += 3 * 86400
+    assert app.handler(SCHEDULED, None) == {"alerted": 0}
+    assert not sent(smtp)
+    # A check-in without details can't bring it back.
+    assert json.loads(app.handler(event(slim()), None)["body"])["needDetails"] is True
+    # Adding a partner again starts over.
+    app.handler(event(beat(to="real@test.invalid")), None)
+    item = store.items[INSTALL]
+    assert item["to"] == ["real@test.invalid"] and not item.get("ended")
+    assert [m["To"] for m in invites(smtp)] == ["typo@test.invalid", "real@test.invalid"]
+
+
+def test_readding_a_partner_doesnt_resend_their_invite_the_same_day(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "typo@test.invalid"])), None)
+    store.items[INSTALL]["confirmedPartners"] = ["partner@test.invalid"]
+    app.handler(event(slim(state="requestRemoval", removingPartners=["typo@test.invalid"])), None)
+    clock["now"] += 60
+    app.handler(event(beat(to=["partner@test.invalid", "typo@test.invalid"])), None)
+    assert store.items[INSTALL]["to"] == ["partner@test.invalid", "typo@test.invalid"]
+    assert "released" not in store.items[INSTALL]
+    assert len([m for m in invites(smtp) if m["To"] == "typo@test.invalid"]) == 1
+    clock["now"] += 86400
+    app.handler(event(slim(state="requestRemoval", removingPartners=["typo@test.invalid"])), None)
+    app.handler(event(beat(to=["partner@test.invalid", "typo@test.invalid"])), None)
+    assert len([m for m in invites(smtp) if m["To"] == "typo@test.invalid"]) == 2
+
+
+def test_removing_a_partner_the_server_never_enrolled_is_released(smtp, store, clock):
+    app.handler(event(beat()), None)
+    confirm_all(store)
+    app.handler(event(slim(state="requestRemoval", removingPartners=["never@test.invalid"])), None)
+    assert status()["released"] == ["never@test.invalid"]
+    assert "removal" not in store.items[INSTALL] and not sent(smtp)
+
+
+def test_partners_stored_before_confirmation_count_as_confirmed(smtp, store, clock):
+    store.items[INSTALL] = stored(to=["partner@test.invalid", "other@test.invalid"])
+    assert "unconfirmed" not in status()
+    app.handler(event(slim(state="requestRemoval", removingPartners=["other@test.invalid"])), None)
+    assert store.items[INSTALL]["removal"]["removingPartners"] == ["other@test.invalid"]
+    # A partner added afterwards still has to confirm.
+    app.handler(event(beat(to=["partner@test.invalid", "other@test.invalid", "new@test.invalid"])), None)
+    assert status()["unconfirmed"] == ["new@test.invalid"]
+    assert [m["To"] for m in invites(smtp)] == ["new@test.invalid"]
+
+
+def test_older_clients_leaving_out_an_unconfirmed_partner_release_them(smtp, store, clock):
+    app.handler(event(beat(to="typo@test.invalid")), None)
+    app.handler(event(beat(to="real@test.invalid")), None)
+    item = store.items[INSTALL]
+    assert item["to"] == ["real@test.invalid"] and "removal" not in item
+    assert item["released"] == ["typo@test.invalid"] and not sent(smtp)
+
+
+def test_releasing_a_partner_doesnt_resend_an_open_removal_request(smtp, store, clock):
+    app.handler(event(beat(to=["partner@test.invalid", "other@test.invalid", "typo@test.invalid"])), None)
+    store.items[INSTALL]["confirmedPartners"] = ["partner@test.invalid", "other@test.invalid"]
+    app.handler(event(slim(state="requestRemoval", removingPartners=["other@test.invalid"])), None)
+    assert len(sent(smtp)) == 2  # both confirmed originals
+    token = store.items[INSTALL]["removal"]["token"]
+    app.handler(event(slim(state="requestRemoval", removingPartners=["typo@test.invalid"])), None)
+    item = store.items[INSTALL]
+    assert item["removal"]["token"] == token and item["removal"]["removingPartners"] == ["other@test.invalid"]
+    assert len(sent(smtp)) == 2
