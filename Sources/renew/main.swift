@@ -558,6 +558,14 @@ case "stats":
         let label = String(name(s.site).prefix(width)).padding(toLength: width, withPad: " ", startingAt: 0)
         let share = "\(Int((s.share * 100).rounded()))%"
         print("  \(label)  \(pad(hm(s.totalSeconds), 10))  \(pad(hm(Int(s.dailyAverage.rounded())), 9))  \(pad(share, 5))")
+        // Its parts (Gmail, Google Docs…), when there's more than the site itself.
+        guard s.hasBreakdown else { continue }
+        for sec in s.sections.prefix(5) {
+            let text = "  " + (SiteSection.name(sec.section) ?? sec.section)
+            let label = String(text.prefix(width)).padding(toLength: width, withPad: " ", startingAt: 0)
+            print("  \(label)  \(pad(hm(sec.totalSeconds), 10))  \(pad(hm(Int(sec.dailyAverage.rounded())), 9))")
+        }
+        if s.sections.count > 5 { print("    … and \(s.sections.count - 5) more") }
     }
     if report.sites.count > 25 { print("  … and \(report.sites.count - 25) more") }
 

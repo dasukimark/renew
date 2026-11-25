@@ -26,6 +26,11 @@ final class AppModel: ObservableObject {
     /// The tab shown on the Activity and Accountability pages, here so one
     /// page can open another's tab.
     @Published var activityTab: ActivityView.Tab = .dashboard
+    /// The Activity log's search, day and site filter, here so the
+    /// dashboard can open the log on a site's visits.
+    @Published var activityLogSearch = ""
+    @Published var activityLogDay = Date()
+    @Published var activityLogFilter: ActivityDashboardView.Selection?
     @Published var accountabilityTab: AccountabilityView.Tab = .partners
     @Published private(set) var status: Status?
     @Published private(set) var daemonReachable = false
