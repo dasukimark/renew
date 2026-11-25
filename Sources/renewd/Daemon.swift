@@ -347,6 +347,12 @@ final class Daemon: @unchecked Sendable {
             }
             return Response(ok: true, status: makeStatus(now, r), flags: monitorLog.read(q, uid: uid))
 
+        case .monitorFlagRange:
+            guard let q = req.monitorRange, q.isValid else {
+                return fail("Give days as YYYY-MM-DD and a page of at most \(MonitorRangeQuery.maxLimit).")
+            }
+            return Response(ok: true, status: makeStatus(now, r), flagRange: monitorLog.read(q, uid: uid))
+
 
         case .poweringOff:
             // Only the Renew app may say this, or a script could make

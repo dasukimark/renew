@@ -365,23 +365,22 @@ final class AppModel: ObservableObject {
         send(Request(cmd: .setMonitor, monitor: m), completion: completion)
     }
 
-    /// Reads the Monitor's flags for `day`, like `loadActivity`.
-    func loadMonitorFlags(day: Date, fromOffset: Int? = nil,
-                          completion: @escaping (Result<MonitorLoad, ActivityLoadError>) -> Void) {
+    /// Reads one page of the Monitor's flags across a range of days, newest
+    /// first. `completion` runs on the main thread.
+    func loadMonitorFlags(range: MonitorRangeQuery,
+                          completion: @escaping (Result<MonitorRangeLoad, ActivityLoadError>) -> Void) {
         guard !isLocalTest else {
             completion(.failure(ActivityLoadError(message: "This is a local test run without the Renew service, so nothing is flagged.")))
             return
         }
-        let query = MonitorQuery(date: day, fromOffset: fromOffset)
         activityQueue.async {
-            let result: Result<MonitorLoad, ActivityLoadError>
+            let result: Result<MonitorRangeLoad, ActivityLoadError>
             do {
-                let r = try DaemonClient.send(Request(cmd: .monitorFlags, monitorQuery: query), timeout: 10)
+                let r = try DaemonClient.send(Request(cmd: .monitorFlagRange, monitorRange: range), timeout: 10)
                 if r.ok {
-                    result = .success(MonitorLoad(flags: r.flags ?? [], offset: r.flagsOffset,
-                                                  isIncremental: r.flagsIncremental ?? false))
+                    result = .success(MonitorRangeLoad(flags: r.flags ?? [], total: r.flagsTotal ?? r.flags?.count ?? 0))
                 } else if (r.error ?? "").hasPrefix("bad request") {
-                    result = .failure(ActivityLoadError(message: "The running background service predates the Monitor. Update Renew to see flags."))
+                    result = .failure(ActivityLoadError(message: "The running background service is out of date. Update Renew to see flags."))
                 } else {
                     result = .failure(ActivityLoadError(message: r.error ?? "The Renew service refused the request."))
                 }
@@ -625,9 +624,9 @@ struct ActivityLoad {
     let isIncremental: Bool
 }
 
-struct MonitorLoad {
+struct MonitorRangeLoad {
+    /// One page, newest first.
     let flags: [MonitorFlag]
-    /// Pass back as `fromOffset` to load only newer flags.
-    let offset: Int?
-    let isIncremental: Bool
+    /// How many flags the whole range holds.
+    let total: Int
 }
