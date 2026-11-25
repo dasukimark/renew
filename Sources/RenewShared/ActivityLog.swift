@@ -294,7 +294,8 @@ public final class ActivityLogStore {
     public func summaries(_ query: ActivityStatsQuery, uid: uid_t) -> [DaySummary]? {
         guard let keys = query.dayKeys() else { return nil }
         let days = keys.compactMap { summary(uid, day: $0) }
-        return DaySummary.cappedTogether(days, limit: ActivityStatsQuery.sitesPerDay(forDays: keys.count), keep: query.site)
+        return DaySummary.cappedTogether(days, limit: ActivityStatsQuery.sitesPerDay(forDays: keys.count),
+                                         partsPerSite: ActivityStatsQuery.partsPerSite(forDays: keys.count), keep: query.site)
     }
 
     /// One day's totals: the saved summary if it's current, else brought up
@@ -306,7 +307,9 @@ public final class ActivityLogStore {
         guard let handle = FileHandle(forReadingAtPath: logPath) else { return saved?.summary }
         defer { try? handle.close() }
         let logBytes = Int((try? handle.seekToEnd()) ?? 0)
-        if let saved, saved.logBytes == logBytes { return saved.summary }
+        // Summaries saved before sections were kept are rebuilt while the
+        // day's visits are still around.
+        if let saved, saved.logBytes == logBytes, saved.summary.sections != nil { return saved.summary }
 
         // Carry on from where the last update of this day stopped, if it's
         // the one in memory; otherwise read the day from the start.
@@ -315,13 +318,16 @@ public final class ActivityLogStore {
             r = Running(day: day, offset: 0, builder: DaySummary.Builder())
         }
         var current = r!
+        // Rebuilding an earlier day (one saved by an older renewd) mustn't
+        // throw away the running day's progress.
+        let keepsRunning = running[uid].map { $0.day == day || $0.day < day } ?? true
         try? handle.seek(toOffset: UInt64(current.offset))
         let data = handle.readData(ofLength: logBytes - current.offset)
         // Whole lines only, as in `read`; a half-written one is read next time.
         let end = data.lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex
         current.builder.add(decode(data[data.startIndex..<end]))
         current.offset += end - data.startIndex
-        running[uid] = current
+        if keepsRunning { running[uid] = current }
 
         let built = current.builder.summary(day: day)
         save(StoredSummary(logBytes: current.offset == logBytes ? logBytes : -1, summary: built), to: path, uid: uid)

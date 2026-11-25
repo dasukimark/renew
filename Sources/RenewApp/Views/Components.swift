@@ -373,9 +373,20 @@ struct ActivityToggle: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
+        // A toolbar hides a toggle's own label, so the state is spelled out beside it.
+        HStack(spacing: 8) {
+            Text(model.activity.enabled ? "Recording" : "Not recording")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            toggle
+        }
+    }
+
+    private var toggle: some View {
         Toggle("Record browsing", isOn: Binding(get: { model.activity.enabled },
                                                 set: { model.setActivity(ActivitySettings(enabled: $0)) }))
             .toggleStyle(.switch)
+            .labelsHidden()
             .disabled(!model.daemonReachable || !model.activitySupported || model.busy || locked)
             .help(locked ? "Activity can't be turned off while the Monitor is on and you have an accountability partner. To turn it off, remove your partners in Accountability (they'll be asked to approve)."
                   : ActivityCopy.what + "\n\n" + ActivityCopy.kept)

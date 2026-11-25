@@ -118,7 +118,7 @@ and what it flagged (see [Monitor](#monitor)).
 
 ### Activity
 
-Off until you turn on **Record browsing** at the top right of the Activity page (or `renew activity on`). With it
+Off until you turn on the **Recording** switch at the top right of the Activity page (or `renew activity on`). With it
 on, Renew records each page you look at, session or not. Activity is only the
 record; it doesn't judge anything (that's the [Monitor](#monitor)).
 
@@ -142,13 +142,23 @@ record; it doesn't judge anything (that's the [Monitor](#monitor)).
   time on each site for today, the last 7 or 30 days, or the last year: a daily
   total, a daily average, and a bar chart per day. Subdomains count as their
   main site (`m.youtube.com` and `music.youtube.com` are `youtube.com`), and
-  time a site was on screen twice at once (two windows) counts once. Click a
-  site to chart only that site, with its average. Averages count every day
+  time a site was on screen twice at once (two windows) counts once. Each site
+  is also split into its parts, so `google.com` opens into Gmail
+  (`mail.google.com`), Google Docs, Sheets and Slides (`docs.google.com/document`,
+  `/spreadsheets`, `/presentation`), Drive and so on, and `youtube.com` into
+  YouTube and YouTube Music; `www.` and `m.` count as the site itself. Click a
+  site or a part to chart only that, with its average; right-click one to see
+  today's visits to it in the log. Parts are kept from this version on, and
+  rebuilt for days whose visits are still kept (30 days). Averages count every day
   from the first one with any activity in the range, including today. renewd
   keeps these per-site daily totals in `.../activity/<uid>/summary/` for a
   year, after the visits themselves are deleted. `renew stats --days 30`,
   `renew stats --from 2026-11-01 --to 2026-11-15` and
-  `renew stats --site youtube.com` (that site per day) print the same numbers.
+  `renew stats --site youtube.com` (that site per day) print the same numbers,
+  with each site's biggest parts under it.
+- **Log:** **Activity → Log** lists one day's visits, newest first, grouped by
+  hour. The search field in the toolbar filters by title, address, browser or
+  part name ("Gmail").
 - **Nothing leaves the Mac**, except what [email reports](#email-reports) send
   about flagged visits.
 
