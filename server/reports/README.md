@@ -11,9 +11,14 @@ DynamoDB table, and every minute emails the partners about any Mac that went
 quiet without warning. See [Check-ins](#check-ins).
 
 Your partners' addresses (up to 10) are set in the Renew app and sent with
-each report, as one address or a list; each email goes to all of them. They
-can only be changed between block sessions, and a removed partner gets a last
-email. The token is what stops strangers using the server; to
+each report, as one address or a list; each partner gets their own copy, so
+a bouncing address can't hurt delivery to the others. They can only be
+removed between block sessions.
+
+Each new partner is emailed a link to confirm or decline (`/partners/confirm`;
+again at most once a day if they're added again). Until they confirm, removing
+them needs no approval and they can't approve anything; declining removes
+them. Partners stored before confirmations existed count as confirmed. The token is what stops strangers using the server; to
 also limit which addresses it will email, set `AllowedRecipients`.
 
 Reports name the site, the page title, why it was flagged, when and for how
@@ -77,10 +82,13 @@ check-in without them from a Mac the server doesn't know gets
 (`renew-heartbeats`) is created by `sam deploy`.
 
 `requestRemoval` asks to remove specified partners, or to end monitoring if
-no partner list is supplied. Renew saves the request and its ID before
+no partner list is supplied. Partners who haven't confirmed are removed at
+once; replies list them under `released` so renewd drops them too (with none
+left, the item becomes a small tombstone that remembers them). Renew saves the request and its ID before
 submission so it can retry after a restart. The server still accepts
-`removed` from older clients. It emails the original partners a private
-review link that lists the affected addresses.
+`removed` from older clients. It emails the original partners who confirmed (else the first partner to
+confirm, so a partner added later can't approve removing an earlier one) a
+private review link that lists the affected addresses.
 While Renew is installed, it keeps sending check-ins during the wait.
 Choosing **Keep monitoring** declines the request and check-ins continue.
 Approving removes only the addresses listed on the review page. If any
@@ -89,7 +97,7 @@ reports follow the settings on the Mac, and uninstall takes effect
 immediately. Opening the review link alone leaves monitoring active.
 
 To use a branded review link, route GET and POST for `/monitoring/approve`
-from your HTTPS hostname to the report function, including query strings
+and `/partners/confirm` from your HTTPS hostname to the report function, including query strings
 and form data. Set the `ApprovalBaseURL` stack parameter to that origin.
 Without it, review links use the AWS Function URL. Keep review links private.
 

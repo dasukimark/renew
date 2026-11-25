@@ -278,15 +278,17 @@ Gmail account you create for it. Setting it up takes about 15 minutes; see
 [server/reports/README.md](server/reports/README.md). Its URL and token are
 saved by `server/reports/configure-mac.sh` and copied in when you install
 Renew, so in **Accountability → Partners** you only enter your partners' email
-addresses (or `renew reports set <email> [<email>...]`). Each email goes to all
-partners at once, so they can see each other's addresses. Before adding a
+addresses (or `renew reports set <email> [<email>...]`). Each partner gets
+their own copy of each email, so one address that bounces doesn't hurt
+delivery to the others. Before adding a
 second partner, redeploy a report server set up before then (`sam deploy`); an
 older one refuses reports sent to more than one address. Email reports and
 check-ins are the only things Renew sends off the Mac.
 
-- **What's sent:** the site (e.g. `example.com`), the page title, why it was
-  flagged (explicit site, a monitoring list, a watched word), when, and for how
-  long. Never the full address. Times are in the Mac's time zone.
+- **What's sent:** the site's name (`www.example.com` is shown as `example`,
+  so it can't be tapped as a link; addresses in page titles are shortened the
+  same way), the page title, why it was flagged (explicit site, a monitoring
+  list, a watched word), when, and for how long. Never the full address. Times are in the Mac's time zone.
 - **Grouped:** flags within a minute of the first one go in one email, so a
   burst of browsing sends one email, not fifty.
 - **Not lost:** renewd keeps unsent reports in
@@ -297,8 +299,14 @@ check-ins are the only things Renew sends off the Mac.
   turned off or watch less, and Activity can't be turned off (see
   [Monitor](#monitor)). Blocklists aren't part of monitoring, so they can
   always be edited and their edits aren't reported.
+- **Partners confirm:** a new partner gets an email asking them to confirm
+  (or decline, which removes them). Until they confirm, the address shows
+  "Waiting for them to confirm", they can't approve removals, and you can
+  remove them right away without anyone's approval, so a mistyped address
+  can't get stuck. Partners saved before confirmations existed count as
+  confirmed.
 - **Removing needs approval:** reports can be turned on and partners added at
-  any time. Removing a partner or turning reports off (only between block
+  any time. Removing a confirmed partner or turning reports off (only between block
   sessions) emails your partners an approval link, and **nothing changes until
   one of them approves**: reports and check-ins keep going to everyone, and
   the address shows "Removal waiting for approval". If they decline, nothing
@@ -360,7 +368,8 @@ when the Mac is about to shut down. renewd only accepts that notice from the
 Renew app itself (checked by its code signature), so a script can't make
 stopping renewd look like a shutdown. Turning reports off or removing a partner
 asks the server to end monitoring for that partner. The server emails an
-approval link to the original partners, and both the server and the Mac keep
+approval link to the original partners who confirmed (or, if none did, the
+first partner who confirmed), and both the server and the Mac keep
 going as before until one of them approves (see **Removing needs approval**
 above). `renew uninstall` also asks the server, but has its own cooling-off
 and takes effect without waiting for the answer.

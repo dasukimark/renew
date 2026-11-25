@@ -94,7 +94,7 @@ private struct PartnersView: View {
         .onChange(of: model.reportsURL) { reportURLDraft = $0 ?? "" }
         .confirmationDialog("Remove \(removing ?? "")?", isPresented: Binding(
             get: { removing != nil }, set: { if !$0 { removing = nil } })) {
-            Button("Request removal", role: .destructive) {
+            Button(removingUnconfirmed ? "Remove" : "Request removal", role: .destructive) {
                 if let email = removing { remove(email) }
                 removing = nil
             }
@@ -102,6 +102,8 @@ private struct PartnersView: View {
         } message: {
             if let email = removing, model.retainedReportPartners.contains(email) {
                 Text("Renew keeps checking in while your partner reviews the new request.")
+            } else if removingUnconfirmed {
+                Text("They haven't confirmed being your partner, so they're removed without approval.")
             } else {
                 Text("Your partner is asked to approve. Until then, reports keep going to this address.")
             }
@@ -128,6 +130,7 @@ private struct PartnersView: View {
     // MARK: partners (email reports)
 
     private var reportsOn: Bool { !model.reportsPartners.isEmpty }
+    private var removingUnconfirmed: Bool { removing.map { model.unconfirmedReportPartners.contains($0) } ?? false }
     private var inSession: Bool { model.session != nil }
     /// Server fields only without a built-in server, or when reports
     /// already use a different one (to change its token, or leave it).
@@ -142,6 +145,9 @@ private struct PartnersView: View {
         Section {
             ForEach(model.reportsPartners.filter { !model.pendingReportPartners.contains($0) }, id: \.self) { email in
                 partnerRow(email) {
+                    if model.unconfirmedReportPartners.contains(email) {
+                        statusDot("Waiting for them to confirm", .yellow)
+                    }
                     Button {
                         removing = email
                     } label: {
@@ -186,6 +192,9 @@ private struct PartnersView: View {
                 }
                 if !reportsOn && model.retainedReportPartners.isEmpty {
                     Text("Your partner is emailed about flags, loosened monitoring, and if Renew stops running.")
+                }
+                if !model.unconfirmedReportPartners.isEmpty {
+                    Text("New partners get an email asking them to confirm. Until they do, you can remove them without approval.")
                 }
                 if !model.pendingReportPartners.isEmpty {
                     Text("Partners waiting on removal still get reports until it's approved.")

@@ -169,6 +169,9 @@ public struct Status: Codable, Sendable {
     /// Removed locally and awaiting confirmation from the report server.
     public var pendingReportPartners: [String]?
     public var retainedReportPartners: [String]?
+    /// Partners who haven't confirmed by email yet: removing them needs no
+    /// approval. nil from daemons that predate confirmations.
+    public var unconfirmedReportPartners: [String]?
     /// Whether a built-in report server is installed, so only the partners'
     /// addresses are needed.
     public var reportServerBuiltIn: Bool?
@@ -226,7 +229,8 @@ public struct Status: Codable, Sendable {
                 protections: Protections? = nil, coolingOffRemovalAt: Date? = nil,
                 activity: ActivitySettings? = nil, monitor: MonitorSettings? = nil, reportsURL: String? = nil,
                 reportsPartners: [String]? = nil, pendingReportPartners: [String]? = nil,
-                retainedReportPartners: [String]? = nil, reportServerBuiltIn: Bool? = nil,
+                retainedReportPartners: [String]? = nil, unconfirmedReportPartners: [String]? = nil,
+                reportServerBuiltIn: Bool? = nil,
                 hasAccountabilityPartner: Bool? = nil, monitoringLocked: Bool? = nil) {
         self.session = session
         self.hasAccountabilityPartner = hasAccountabilityPartner
@@ -236,6 +240,7 @@ public struct Status: Codable, Sendable {
         self.reportsPartners = reportsPartners
         self.pendingReportPartners = pendingReportPartners
         self.retainedReportPartners = retainedReportPartners
+        self.unconfirmedReportPartners = unconfirmedReportPartners
         self.serverTime = serverTime
         self.agents = agents
         self.uninstall = uninstall

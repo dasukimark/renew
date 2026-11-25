@@ -27,6 +27,13 @@ When a check-in arrives (`record_beat`) it may email too (one email at most):
 
 `removed` requests partner approval to end monitoring. A `witness` check-in
 reports a guard observation without changing the daemon's last-seen time.
+
+Partners confirm by email. Each new address gets a link (`invite`); until
+they click it, removing them needs nobody's approval (a mistyped address
+can't hold monitoring hostage), they can't approve removals, and they can
+decline, which removes them. Removed-without-approval addresses are
+listed in replies (`released`) so renewd drops them too. Items stored
+before confirmation existed count all their partners as confirmed.
 """
 
 import json
@@ -51,6 +58,10 @@ MAX_PENDING_EMAIL_BYTES = 210 * 1024
 MAX_NOTICE_BYTES = 85 * 1024
 # Longer than the Lambda timeout, so a timed-out worker's claim can be retried.
 EMAIL_LEASE_SECONDS = 60
+# A partner added again gets another confirmation email at most this often.
+INVITE_EVERY_SECONDS = 86400
+# Addresses removed without approval, remembered for renewd.
+MAX_RELEASED = 50
 log = logging.getLogger(__name__)
 # A different boot time by more than this means the Mac restarted.
 BOOT_TOLERANCE = 5
@@ -260,6 +271,11 @@ def lines_for(kind, item, at, beat=None):
     if kind == "missed":
         return [f"Renew on {who} missed an expected check-in while the Mac was expected to be awake.",
                 f"The server heard from Renew again at {when(_dt(at), zone)}, {age} after the previous check-in."]
+    if kind == "invite":
+        return [f"You were added as an accountability partner for Renew on {who}. Renew emails its partners "
+                "when it flags a visit, when monitoring is loosened, and if Renew stops running.",
+                "Please confirm that you agree to be a partner. If you don't know this person or don't want "
+                "these emails, choose Decline and you won't get any more."]
     if kind == "removal":
         return [f"The report server received a request to change monitoring for Renew on {who}.",
                 "While Renew remains installed, it keeps checking in while you decide. You can approve the request or choose to keep monitoring."]
@@ -353,7 +369,9 @@ def record_beat(beat, at, store, send, attempts=3, approval_origin=None):
     install = beat["install"]
     if beat["state"] == "monitoringStatus":
         item = store.get(install) or {}
-        monitoring = {"partners": as_list(item["to"]) if item else [], "removalPending": bool(item.get("removal"))}
+        live = item and not item.get("ended")
+        monitoring = {"partners": as_list(item["to"]) if live else [], "removalPending": bool(item.get("removal"))}
+        monitoring.update(partner_status(item) or {})
         if item.get("removal"):
             monitoring["pendingPartners"] = _removing_partners(item)
         if item.get("rejectedRemoval"):
@@ -363,7 +381,10 @@ def record_beat(beat, at, store, send, attempts=3, approval_origin=None):
         result = _record_beat_once(beat, at, store, approval_origin)
         if result is not None:
             if result.pop("deliver", False):
-                _deliver_email(install, at, store, send)
+                # Confirmation emails queue alongside alerts; don't let them hold one back.
+                for _ in range(3):
+                    if _deliver_email(install, at, store, send) is None:
+                        break
             if result.pop("takeNotices", False):
                 result["notices"] = _take_notices(install, store)
             return result
@@ -390,6 +411,133 @@ def _removing_partners(item):
     return [email for email in current if email not in desired]
 
 
+def _legacy(item):
+    """Stored before partners confirmed: all of them count as confirmed."""
+    return "confirmedPartners" not in item
+
+
+def _confirmed(item):
+    """Confirmed partners still enrolled, in the order they confirmed."""
+    current = as_list(item.get("to"))
+    if _legacy(item):
+        return current
+    return [email for email in item["confirmedPartners"] if email in current]
+
+
+def _approvers(item):
+    """Who approves a removal: confirmed original partners, else the first
+    partner to confirm (so a partner added later can't outvote them)."""
+    confirmed = _confirmed(item)
+    original = [email for email in as_list(item.get("approvalRecipients")) if email in confirmed]
+    return original or (confirmed if _legacy(item) else confirmed[:1])
+
+
+def partner_status(item):
+    """What renewd needs about confirmations, or None when there's nothing."""
+    if not item:
+        return None
+    current = as_list(item.get("to")) if not item.get("ended") else []
+    confirmed = set(_confirmed(item))
+    status = {}
+    unconfirmed = [email for email in current if email not in confirmed]
+    released = [email for email in item.get("released") or [] if email not in current]
+    if unconfirmed:
+        status["unconfirmed"] = unconfirmed
+    if released:
+        status["released"] = released
+    return status or None
+
+
+def _release(item, emails):
+    """`item` without `emails`, removed without asking anyone. With no one
+    left it becomes a tombstone that remembers the released addresses."""
+    emails = set(emails)
+    remaining = [email for email in as_list(item["to"]) if email not in emails]
+    released = [email for email in item.get("released") or [] if email not in emails]
+    released = (released + sorted(emails))[-MAX_RELEASED:]
+    if not remaining:
+        keep = {k: item[k] for k in ("install", "lastSeen", "revision", "invites", "confirmedPartners") if k in item}
+        return dict(keep, ended=True, to=[], released=released)
+    updated = dict(item, to=remaining, released=released)
+    updated["confirmedPartners"] = [email for email in _confirmed(item) if email not in emails]
+    updated["approvalRecipients"] = [email for email in as_list(item.get("approvalRecipients")) if email in remaining]
+    updated["pendingEmails"] = _retarget(item.get("pendingEmails"), remaining)
+    removal = item.get("removal")
+    if removal:
+        # Released partners never confirmed, so they were never approvers:
+        # whoever was asked is still the one to ask, and isn't asked again.
+        still = [email for email in _removing_partners(item) if email in remaining]
+        if still:
+            updated["removal"] = dict(removal, removingPartners=still)
+        else:
+            updated = _resolve_removal(dict(updated, removal=removal, to=as_list(item["to"])))
+            updated["to"] = remaining
+    return updated
+
+
+def _retarget(pending, remaining):
+    """Queued emails without the addresses that are gone (dropped if none are left)."""
+    queued = []
+    for entry in pending or []:
+        to = [email for email in as_list(entry["report"]["to"]) if email in remaining]
+        if to:
+            queued.append(dict(entry, report=dict(entry["report"], to=to)))
+    return queued
+
+
+def _invite(item, email, at, origin):
+    """Queue a confirmation email to `email` unless one went out recently."""
+    invites = dict(item.get("invites") or {})
+    last = invites.get(email)
+    if origin is None or (last and at - last["at"] < INVITE_EVERY_SECONDS):
+        return
+    token = str(uuid.uuid4())
+    invites[email] = {"token": token, "at": at}
+    item["invites"] = invites
+    report = email_for("invite", dict(item, lastSeen=at, to=[email]), at)
+    report["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"renew-invite/{item['install']}/{token}"))
+    report["approvalURL"] = f"{origin}/partners/confirm?install={item['install']}&token={token}"
+    report["actionLabel"] = "Confirm or decline"
+    _queue_email(item, report)
+
+
+def invite_for(item, token):
+    """The enrolled address a confirmation token belongs to, or None."""
+    if not item or item.get("ended"):
+        return None
+    for email, invite in (item.get("invites") or {}).items():
+        if invite["token"] == token and email in as_list(item["to"]):
+            return email
+    return None
+
+
+def confirm_partner(install, token, store):
+    """True once the token's partner is confirmed (already or now)."""
+    for _ in range(5):
+        current = store.get(install)
+        email = invite_for(current, token)
+        if email is None:
+            return False
+        if email in _confirmed(current):
+            return True
+        updated = dict(current, confirmedPartners=_confirmed(current) + [email])
+        if _put(store, updated, current):
+            return True
+    raise SendFailed("the partner list kept changing")
+
+
+def decline_partner(install, token, store):
+    """Removes the token's partner, unless they already confirmed."""
+    for _ in range(5):
+        current = store.get(install)
+        email = invite_for(current, token)
+        if email is None or email in _confirmed(current):
+            return False
+        if _put(store, _release(current, [email]), current):
+            return True
+    raise SendFailed("the partner list kept changing")
+
+
 def approve_removal(install, token, store):
     for _ in range(5):
         current = store.get(install) or {}
@@ -411,6 +559,7 @@ def approve_removal(install, token, store):
         updated["pendingEmails"] = queued
         original = as_list(current.get("approvalRecipients") or current["to"])
         updated["approvalRecipients"] = [email for email in original if email in remaining] or remaining
+        updated["confirmedPartners"] = [email for email in _confirmed(current) if email in remaining]
         if _put(store, updated, current):
             return "updated"
     raise SendFailed("the monitoring request kept changing")
@@ -440,7 +589,7 @@ def reject_removal(install, token, store):
 
 def _removal_email(item):
     request = item["removal"]
-    approvers = item.get("approvalRecipients") or item["to"]
+    approvers = _approvers(item)
     report = email_for("removal", dict(item, lastSeen=request["at"], to=approvers), request["at"])
     report["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"renew-removal/{item['install']}/{request['token']}"))
     report["approvalURL"] = (f"{request['origin']}/monitoring/approve"
@@ -584,11 +733,25 @@ def _submit_removal(beat, prev, at, store, origin):
     request_id = beat["id"] if beat["state"] == "requestRemoval" else None
     if request_id in request_ids:
         return {"notices": []}
+    stored = prev
     current = set(as_list(prev["to"]))
     requested = beat["removingPartners"]
     removing = current if requested is None else current.intersection(requested)
+    # Never enrolled here: nothing to approve, but renewd waits to hear so.
+    unknown = set(requested or []) - current - set(prev.get("released") or [])
+    # Partners who never confirmed go without anyone's approval.
+    unconfirmed = removing - set(_confirmed(prev))
+    if unconfirmed or unknown:
+        prev = _release(prev, unconfirmed | unknown)
+        removing -= unconfirmed
     if not removing:
-        return {"notices": []}
+        if prev is stored:
+            return {"notices": []}
+        if request_id is not None:
+            prev["removalRequestIDs"] = (request_ids + [request_id])[-100:]
+        if _put(store, prev, stored):
+            return {"notices": [], "deliver": bool(prev.get("pendingEmails"))}
+        return None
     prior = set(_removing_partners(prev)) if prev.get("removal") else set()
     updated = dict(prev)
     if removing - prior:
@@ -598,15 +761,19 @@ def _submit_removal(beat, prev, at, store, origin):
         _queue_email(updated, _removal_email(updated))
     if request_id is not None:
         updated["removalRequestIDs"] = (request_ids + [request_id])[-100:]
-    if updated == prev:
-        return {"notices": [], "deliver": bool(prev.get("pendingEmails"))}
-    if _put(store, updated, prev):
+    if updated == stored:
+        return {"notices": [], "deliver": bool(stored.get("pendingEmails"))}
+    if _put(store, updated, stored):
         return {"notices": [], "deliver": bool(updated.get("pendingEmails"))}
     return None
 
 
 def _record_beat_once(beat, at, store, approval_origin):
-    prev = store.get(beat["install"])
+    stored = store.get(beat["install"])
+    # Every partner was released: start over, remembering who was invited.
+    prev = None if stored and stored.get("ended") else stored
+    if stored and stored.get("ended") and beat["state"] in ("removed", "requestRemoval"):
+        return {"notices": []}
     if beat["monitoringOnly"] and not prev:
         return {"notices": []}
     if beat["state"] == "witness":
@@ -630,6 +797,13 @@ def _record_beat_once(beat, at, store, approval_origin):
     if rejected:
         rejected_partners = set(rejected["partners"]) if "partners" in rejected else (
             set(previous_partners) - set(rejected.get("proposedPartners") or []))
+    # Older clients remove partners by leaving them out. Partners who never
+    # confirmed go at once, as with an explicit request.
+    released_now = set()
+    if prev and not beat["explicitPartnerRemovals"]:
+        released_now = (removed - rejected_partners) - set(_confirmed(prev))
+        previous_partners = [email for email in previous_partners if email not in released_now]
+        removed -= released_now
     removal = (prev or {}).get("removal")
     if removal and "removingPartners" not in removal:
         removal = dict(removal, removingPartners=_removing_partners(prev))
@@ -672,14 +846,24 @@ def _record_beat_once(beat, at, store, approval_origin):
         "coveredSince": beat["coveredSince"],
         "alerted": False,
         "notices": (prev or {}).get("notices") or [],
-        "pendingEmails": (prev or {}).get("pendingEmails") or [],
+        "pendingEmails": _retarget((prev or {}).get("pendingEmails"), as_list(ident["to"])) if released_now
+        else (prev or {}).get("pendingEmails") or [],
         "bootID": beat["bootID"],
         "runID": beat["runID"],
         "reportedGaps": reported,
         "history": history[-MAX_HISTORY:],
         "approvalRecipients": (prev.get("approvalRecipients") or prev["to"]) if prev else ident["to"],
         "removalRequestIDs": (prev or {}).get("removalRequestIDs") or [],
+        "confirmedPartners": _confirmed(prev) if prev else (stored or {}).get("confirmedPartners") or [],
+        "released": ([email for email in (stored or {}).get("released") or [] if email not in as_list(ident["to"])]
+                     + sorted(released_now))[-MAX_RELEASED:],
     }
+    if (stored or {}).get("invites"):
+        item["invites"] = stored["invites"]
+    confirmed = set(item["confirmedPartners"])
+    for email in as_list(ident["to"]):
+        if email not in previous_partners and email not in confirmed:
+            _invite(item, email, at, approval_origin)
     if removal:
         item["removal"] = removal
         if not prev.get("removal"):
@@ -688,21 +872,29 @@ def _record_beat_once(beat, at, store, approval_origin):
         if use_details and not removal:
             rejected = dict(rejected, partners=sorted(rejected_partners - set(reported_partners)))
         item["rejectedRemoval"] = rejected
+    if not item["released"]:
+        item.pop("released")
     if kinds:
         about = prev or {"install": beat["install"], "lastSeen": at, **ident}
         report = email_for(kinds[0], about, at, context)
         for kind in kinds[1:]:
             report["changes"].extend(lines_for(kind, about, at, context))
         _queue_email(item, report)
-    if not _put(store, item, prev):
+    if not _put(store, item, stored):
         return None
-    return {"notices": [], "deliver": bool(item["pendingEmails"]), "takeNotices": True}
+    result = {"notices": [], "deliver": bool(item["pendingEmails"]), "takeNotices": True}
+    status = partner_status(item)
+    if status:
+        result["partners"] = status
+    return result
 
 
 def check_all(at, store, send, silence, cap, stopping=180):
     """Queue silence alerts and retry earlier mail that could not be sent."""
     sent = 0
     for item in store.scan():
+        if item.get("ended"):
+            continue
         install = item["install"]
         kind = decide(item, at, silence, cap, stopping)
         if kind:

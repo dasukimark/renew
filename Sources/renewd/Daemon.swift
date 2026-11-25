@@ -58,11 +58,18 @@ final class Daemon: @unchecked Sendable {
     private lazy var heartbeater: Heartbeater = {
         let h = Heartbeater(queue: queue, dev: dev,
                             destination: { [unowned self] in self.target(self.state.reports) },
-                            leftOut: { [unowned self] in self.partnersBeingAsked },
+                            leftOut: { [unowned self] in self.partnersLeftOut },
                             installID: { [unowned self] in self.ensureInstallID() },
                             userName: { consoleUser()?.name ?? "" })
         h.coveredSince = { [unowned self] in self.alive.coveredSince }
         h.monitoringTargets = { [unowned self] in self.monitoringTargets }
+        h.onPartnerStatus = { [unowned self] status, server in
+            if self.applyPartnerStatus(unconfirmed: status?.unconfirmed ?? [], released: status?.released ?? [],
+                                       on: server, onlyWaiting: false) {
+                StateStore.save(self.state)
+                self.heartbeater.configurationChanged()
+            }
+        }
         h.onNotices = { [unowned self] notices in
             self.reporter.partnerLog.append(notices.map {
                 PartnerLogEntry(date: $0.at, channel: .checkin, status: .sent, title: $0.title, lines: $0.lines)
@@ -777,6 +784,13 @@ final class Daemon: @unchecked Sendable {
         return Set(state.removalsSeenAsked?[server.url] ?? []).intersection(waitingPartners)
     }
 
+    /// Partners check-ins leave out: those being asked about their removal,
+    /// and unconfirmed ones whose removal is on its way. The server drops
+    /// those at once, and a check-in naming them would enroll them again.
+    private var partnersLeftOut: Set<String> {
+        partnersBeingAsked.union(waitingPartners.intersection(unconfirmedPartners))
+    }
+
     /// Partners approved their removal: reports stop going to them, and
     /// with none left email reports turn off.
     private func applyApprovedRemovals(_ emails: Set<String>, on server: ReportServer) {
@@ -800,6 +814,68 @@ final class Daemon: @unchecked Sendable {
                              to: currentTarget, uid: uid)
         }
         log("email reports: partner approved removing \(gone.joined(separator: ", "))\(rest.isEmpty ? "; reports off" : "")")
+    }
+
+    /// Partners the report server says haven't confirmed by email yet
+    /// (from the last reply that said).
+    private var unconfirmedPartners: Set<String> { Set(state.unconfirmedPartners ?? []) }
+
+    /// Applies what the server says about confirmations: who hasn't
+    /// confirmed yet (shown in the app), and who it dropped without
+    /// approval, because they never confirmed or they declined. Those stop
+    /// getting reports at once, without a farewell (the address may not
+    /// work). Returns whether the state changed (the caller saves it).
+    ///
+    /// `onlyWaiting`: drop only partners whose removal was asked for. A
+    /// monitoring lookup can run before the check-in that re-enrolls a
+    /// partner just added again, so its `released` may be out of date for
+    /// anyone else; declines arrive with check-in replies.
+    private func applyPartnerStatus(unconfirmed: [String], released: [String], on server: ReportServer,
+                                    onlyWaiting: Bool) -> Bool {
+        guard let current = state.reports, let currentTarget = target(current),
+              currentTarget.server.url == server.url else { return false }
+        let newUnconfirmed = unconfirmed.isEmpty ? nil : Set(unconfirmed).sorted()
+        let unconfirmedChanged = state.unconfirmedPartners != newUnconfirmed
+        state.unconfirmedPartners = newUnconfirmed
+        // A removal not yet sent to the server isn't settled by an old release.
+        let queued = Set((state.monitoringRemovalRequests ?? [])
+            .filter { $0.target.server.url == server.url }.flatMap(\.target.partnerEmails))
+        var gone = Set(current.partnerEmails).intersection(released).subtracting(queued)
+        if onlyWaiting { gone.formIntersection(waitingPartners) }
+        guard !gone.isEmpty else {
+            if unconfirmedChanged { StateStore.save(state) }
+            return false
+        }
+        let asked = waitingPartners.intersection(gone)
+        let pendingHere = (state.pendingPartnerRemovals ?? []).filter { $0.server.url == server.url }.flatMap(\.partnerEmails)
+        setPendingPartners(pendingHere.filter { !gone.contains($0) }, on: server)
+        var seen = state.removalsSeenAsked ?? [:]
+        let stillSeen = (seen[server.url] ?? []).filter { !gone.contains($0) }
+        seen[server.url] = stillSeen.isEmpty ? nil : stillSeen
+        state.removalsSeenAsked = seen.isEmpty ? nil : seen
+        let uid = consoleUID ?? consoleUser()?.uid ?? 0
+        let rest = current.partnerEmails.filter { !gone.contains($0) }
+        let removed = asked.sorted().joined(separator: ", ")
+        let declined = gone.subtracting(asked).sorted().joined(separator: ", ")
+        var reasons: [String] = []
+        if !removed.isEmpty { reasons.append("\(removed) was removed before confirming") }
+        if !declined.isEmpty { reasons.append("\(declined) declined to be a partner") }
+        let why = reasons.joined(separator: ", and ")
+        if rest.isEmpty {
+            state.reports = nil
+            state.aliveMarker = nil
+            // What was waiting was only for them.
+            reporter.handOff(from: nil, farewell: nil, uid: uid)
+            alive.reportsOff()
+        } else {
+            var updated = current
+            updated.partnerEmails = rest
+            state.reports = updated
+            let to = target(updated)
+            reporter.handOff(from: to, farewell: "\(why), so Renew's email reports no longer go to them.", to: to, uid: uid)
+        }
+        log("email reports: dropped by the report server: \(why)\(rest.isEmpty ? "; reports off" : "")")
+        return true
     }
 
     private var monitoringTargets: [ReportTarget] {
@@ -831,6 +907,9 @@ final class Daemon: @unchecked Sendable {
                 guard outcome == .delivered, let monitoring = reply?.monitoring else { return }
                 self?.queue.async { [weak self] in
                     guard let self, self.monitoringLookupGeneration == generation else { return }
+                    let releasedChanged = self.applyPartnerStatus(unconfirmed: monitoring.unconfirmed ?? [],
+                                                                  released: monitoring.released ?? [], on: server,
+                                                                  onlyWaiting: true)
                     let before = self.state.pendingPartnerRemovals
                     let retainedBefore = self.state.retainedMonitoring
                     let seenBefore = self.state.removalsSeenAsked
@@ -900,9 +979,9 @@ final class Daemon: @unchecked Sendable {
                     let changed = self.state.pendingPartnerRemovals != before || self.state.retainedMonitoring != retainedBefore
                         || self.state.reports != reportsBefore || self.state.removalsSeenAsked != seenBefore
                         || self.state.monitoringRemovalRequests != requestsBefore
-                    if changed || newRejection {
+                    if changed || newRejection || releasedChanged {
                         StateStore.save(self.state)
-                        if changed { self.heartbeater.configurationChanged() }
+                        if changed || releasedChanged { self.heartbeater.configurationChanged() }
                         if self.state.monitoringRemovalRequests != requestsBefore { self.submitMonitoringRequest() }
                     }
                 }
@@ -975,6 +1054,7 @@ final class Daemon: @unchecked Sendable {
             pendingReportPartners: waitingPartners.intersection(state.reports?.partnerEmails ?? []).sorted(),
             retainedReportPartners: Set((state.retainedMonitoring ?? []).flatMap(\.partnerEmails))
                 .subtracting(state.reports?.partnerEmails ?? []).sorted(),
+            unconfirmedReportPartners: unconfirmedPartners.intersection(state.reports?.partnerEmails ?? []).sorted(),
             reportServerBuiltIn: builtInServer() != nil,
             hasAccountabilityPartner: state.hasAccountabilityPartner,
             monitoringLocked: requestUID.map { state.monitoringLocked(for: $0) } ?? false
@@ -1096,7 +1176,7 @@ final class Daemon: @unchecked Sendable {
         if file.reports != state.reports || file.pendingPartnerRemovals != state.pendingPartnerRemovals
             || file.monitoringRemovalRequests != state.monitoringRemovalRequests
             || file.retainedMonitoring != state.retainedMonitoring || file.seenMonitoringRejections != state.seenMonitoringRejections
-            || file.removalsSeenAsked != state.removalsSeenAsked
+            || file.removalsSeenAsked != state.removalsSeenAsked || file.unconfirmedPartners != state.unconfirmedPartners
             || file.installID != state.installID || file.aliveMarker != state.aliveMarker
             || file.uninstall?.requestedAt != state.uninstall?.requestedAt
             || file.schedules != state.schedules
