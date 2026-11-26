@@ -288,3 +288,16 @@ def test_a_refused_partner_doesnt_fail_the_others(smtp):
     assert [m["To"] for m in smtp.instances[0].sent] == ["partner@test.invalid"]
     # Only when nobody can get it is it a failure (renewd retries).
     assert app.handler(event(report(to="bad@test.invalid")), None)["statusCode"] == 502
+
+
+def test_pill_colors_explicit_and_age_reasons_red_but_not_list_names():
+    red, word, other = render.PILLS["explicit"], render.PILLS["word"], render.PILLS["other"]
+    for reason, (bg, _) in [
+        ("Potentially explicit content detected", red),
+        ("Attempted to access age restricted content", red),
+        ("explicit site", red),
+        ("word: dice", word),
+        ("on list 'not explicit'", other),
+        ("watched site", other),
+    ]:
+        assert f"background:{bg}" in render.pill(reason), reason

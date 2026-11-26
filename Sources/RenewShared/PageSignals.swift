@@ -94,10 +94,14 @@ public struct SiteLabel: Sendable {
     public var domains: [String]?
     /// Whole phrases, matched ignoring case, accents and punctuation.
     public var phrases: [[String]]
+    /// An age gate (18+ community, age-restricted video) rather than a
+    /// marking of explicit content: reports say so.
+    public var isAgeGate: Bool
 
-    init(_ id: String, _ scope: Scope, _ domains: [String]?, _ phrases: [String]) {
+    init(_ id: String, _ scope: Scope, _ domains: [String]?, _ phrases: [String], ageGate: Bool = false) {
         self.id = id
         self.scope = scope
+        self.isAgeGate = ageGate
         self.domains = domains
         self.phrases = phrases.map(TermMatcher.words)
     }
@@ -119,11 +123,11 @@ public struct SiteLabel: Sendable {
         SiteLabel("18+ community gate", .page, reddit, [
             "you must be 18 to view this community",
             "you must be at least eighteen years old to view this content",
-        ]),
+        ], ageGate: true),
         SiteLabel("age-restricted video", .page, youtube, [
             "sign in to confirm your age",
             "this video may be inappropriate for some users",
-        ]),
+        ], ageGate: true),
         SiteLabel("sensitive profile warning", .page, x, ["may include potentially sensitive content"]),
         SiteLabel("sensitive blog warning", .page, ["tumblr.com"], ["may contain sensitive media"]),
         SiteLabel("sensitive media warning", .post, x, ["potentially sensitive content"]),

@@ -27,7 +27,7 @@ struct ReportsTests {
         #expect(report.kind == .flags)
         #expect(report.omitted == 0)
         #expect(report.flags == [
-            Report.Flag(host: "a.example", title: "Private page title", reasons: ["explicit site", "watched site", "on list 'games'"],
+            Report.Flag(host: "a.example", title: "Private page title", reasons: [Report.explicitReason, "watched site", "on list 'games'"],
                         start: Date(timeIntervalSince1970: 1_000), seconds: 10),
             Report.Flag(host: "b.example", title: "Private page title", reasons: ["word: casino"],
                         start: Date(timeIntervalSince1970: 2_000), seconds: 42),

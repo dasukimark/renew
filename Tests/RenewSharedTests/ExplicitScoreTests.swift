@@ -131,7 +131,11 @@ struct ExplicitScoreTests {
     @Test func scoreFlagText() {
         let f = ActivityFlag.score("fucking, hot")
         #expect(f.label == "Likely explicit: fucking, hot")
-        #expect(Report.reasons(for: [f, .term("porn")]) == ["likely explicit (fucking, hot)", "word: porn"])
+        #expect(Report.reasons(for: [f, .term("porn")]) == [Report.explicitReason])
+        // A built-in explicit word reads as explicit content, not as a word;
+        // your own words are still named.
+        #expect(Report.reasons(for: [.term("korean bj"), .term("kbj"), .term("dice")])
+                == [Report.explicitReason, "word: dice"])
     }
 
     // MARK: review regressions

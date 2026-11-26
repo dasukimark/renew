@@ -74,6 +74,10 @@ CHECKIN = {
     "invite": ("Confirm you're an accountability partner for {mac}", "Confirm you're a partner", ("#0f6b57", "#f0fdf4")),
 }
 
+# What the app sends for explicit content and age gates (Report.explicitReason
+# and Report.ageRestrictedReason); older builds sent "explicit site".
+RED_REASONS = {"Potentially explicit content detected", "Attempted to access age restricted content"}
+
 PILLS = {
     "explicit": ("#fef2f2", "#b91c1c"),
     "word": ("#eef2ff", "#4338ca"),
@@ -161,7 +165,12 @@ def span(flags, zone):
 
 
 def pill(reason):
-    kind = "explicit" if reason.startswith("explicit") else "word" if reason.startswith("word:") else "other"
+    if reason.startswith("word:"):
+        kind = "word"
+    elif reason in RED_REASONS or reason.startswith("explicit"):
+        kind = "explicit"
+    else:
+        kind = "other"
     bg, fg = PILLS[kind]
     return (f"<span style='display:inline-block;margin:0 6px 4px 0;padding:2px 9px;border-radius:999px;"
             f"background:{bg};color:{fg};font-size:12px;font-weight:600;line-height:18px'>{esc(reason)}</span>")
