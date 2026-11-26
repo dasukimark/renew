@@ -46,11 +46,11 @@ struct SetupView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.busy || model.session != nil)
-                    Text("Copies Renew to your Applications folder and installs the background service that enforces sessions. macOS asks for your password.")
+                    Text("Copies Renew to Applications and starts the background service. Asks for your password.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if model.session != nil {
-                        Text("Updating is allowed after the current session ends.")
+                        Text("Available after this session ends.")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
@@ -70,7 +70,7 @@ struct SetupView: View {
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Accessibility")
-                    Text("Needed to watch Firefox and to close blocked tabs.")
+                    Text("Lets Renew watch Firefox and close blocked tabs.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -92,25 +92,28 @@ struct SetupView: View {
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(b.name)
-                        Text(b.kind == .firefox ? "Watched through Accessibility" : "Automation: lets Renew read and replace the current tab")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if b.kind == .firefox {
+                            Text("Uses Accessibility")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Spacer()
                     browserControl(b)
                 }
             }
-
-            HStack {
-                Button("Refresh") { model.refreshPermissions() }
-                Spacer()
-            }
         } header: {
-            Text("Permissions")
+            HStack {
+                Text("Permissions")
+                Spacer()
+                Button("Refresh") { model.refreshPermissions() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
         } footer: {
             Text(model.protections.closeUnwatchedBrowsers
-                 ? "During a session, Renew closes any browser it isn't allowed to watch, and keeps it closed until the session ends or the permission is turned back on. Browsers it doesn't support (Opera, Orion, Zen, Tor, DuckDuckGo…) are closed during sessions too."
-                 : "Renew can only block sites in browsers it's allowed to watch. Browsers it can't watch, or doesn't support (Opera, Orion, Zen, Tor, DuckDuckGo…), aren't blocked unless you turn on \"Close browsers Renew can't watch\" below.")
+                 ? "During a session, Renew closes browsers it can't watch or doesn't support."
+                 : "Browsers Renew can't watch, like Opera or Tor, aren't blocked unless \u{201C}Close browsers Renew can't watch\u{201D} is on.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -149,22 +152,20 @@ struct SetupView: View {
     private var protectionsSection: some View {
         Section {
             protectionToggle(\.keepRunning, "Keep Renew running",
-                             "During a block session, Renew's background services restart each other and the app if they're stopped, and put back Renew's files if they're deleted or changed.")
+                             "Restarts Renew if it's quit, and restores its files if they're changed or deleted.")
             protectionToggle(\.lockSystemSettings, "Lock System Settings switches",
-                             "During a block session, switches on System Settings' Login Items and Privacy & Security pages (and Renew's own, on any page) can be turned on but not off. A narrow click filter runs while System Settings is open. Needs Accessibility.")
+                             "Switches on the Login Items and Privacy & Security pages, and Renew's own, can be turned on, not off. Needs Accessibility.")
             protectionToggle(\.closeUnwatchedBrowsers, "Close browsers Renew can't watch",
-                             "During a block session, closes browsers Renew has lost permission to watch, browsers it doesn't support, and unknown apps built on Chrome's or Firefox's engine.")
-            protectionToggle(\.uninstallCoolingOff, "Uninstall cooling-off",
-                             "Uninstalling needs a request and a 24-hour wait. Turning this off takes 24 hours too.")
+                             "Closes browsers without permission, unsupported browsers, and unknown Chrome- or Firefox-based apps.")
             if model.isInstalled && model.daemonReachable && !model.protectionsSupported {
-                Text("The running background service predates these settings. Update Renew to change them.")
+                Text("The background service is out of date. Update Renew to change these.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
         } header: {
             Text("Protections")
         } footer: {
-            Text("All off unless you turn them on, so Renew acts like an ordinary blocker, fine for a work Mac. Blocking works either way, and a running session still can't be shortened or stopped. During a session, protections can be turned on but not off.")
+            Text("These apply during block sessions, and can be turned on but not off while one runs. Off by default, so Renew works like an ordinary blocker.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -191,11 +192,11 @@ struct SetupView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let when = pendingRemoval {
-                    Text("Stays on until \(Format.clock(when))\(model.session != nil ? ", or the end of the session if that's later" : ""). Switch it back on to cancel.")
+                    Text("Stays on until \(Format.clock(when))\(model.session != nil ? " or this session ends, whichever is later" : ""). Switch on to cancel.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 } else if lockedOn {
-                    Text("Can be turned off after the current session ends.")
+                    Text("Locked on until this session ends.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -209,6 +210,13 @@ struct SetupView: View {
 
     private var uninstallSection: some View {
         Section {
+            protectionToggle(\.uninstallCoolingOff, "Uninstall cooling-off",
+                             "Uninstalling needs a request and a 24-hour wait. Turning this off takes 24 hours too.")
+            if model.isInstalled && model.daemonReachable && !model.protectionsSupported {
+                Text("The background service is out of date. Update Renew to change this.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Uninstall Renew")
@@ -230,18 +238,20 @@ struct SetupView: View {
                         .disabled(!model.isInstalled || !model.daemonReachable || model.busy)
                 }
             }
+        } header: {
+            Text("Uninstall")
         } footer: {
-            Text(coolingOff
-                 ? "Uninstalling has a 24-hour cooling-off period. Once it unlocks, it stays available for 2 days, between block sessions only."
-                 : "Uninstalling is allowed between block sessions.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if coolingOff {
+                Text("Once unlocked, uninstalling stays available for 2 days, between block sessions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .confirmationDialog("Request uninstall?", isPresented: $confirmingRequest) {
             Button("Request uninstall") { model.requestUninstall() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Renew keeps working as normal. You can uninstall it 24 hours from now, between block sessions.\(model.reportsPartners.isEmpty ? "" : " Your accountability partners are told.")")
+            Text("You can uninstall 24 hours from now, between block sessions. Renew keeps working as normal.\(model.reportsPartners.isEmpty ? "" : " Your accountability partners will be told.")")
         }
     }
 
@@ -253,15 +263,15 @@ struct SetupView: View {
 
     private var uninstallCaption: String {
         if !coolingOff {
-            return model.session != nil ? "Not available during a block session." : "Removes the app and its background service."
+            return model.session != nil ? "Not available during a block session." : "Removes the app and its background service, between block sessions."
         }
-        guard let u = model.uninstallRequest else { return "Removes the app and its background service, after a 24-hour wait." }
+        guard let u = model.uninstallRequest else { return "Removes the app and its background service. Request it, then wait 24 hours." }
         if model.uninstallUnlocked {
-            let until = "Available until \(Format.clock(u.expiresAt))."
+            let until = "Unlocked until \(Format.clock(u.expiresAt))."
             return model.session != nil ? "\(until) Not available during a block session." : until
         }
         let left = DurationText.format(Int(u.unlocksAt.timeIntervalSince(model.now)))
-        return "Requested. Unlocks at \(Format.clock(u.unlocksAt)) (in \(left))."
+        return "Requested. Unlocks at \(Format.clock(u.unlocksAt)), in \(left)."
     }
 }
 

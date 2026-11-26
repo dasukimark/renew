@@ -6,7 +6,7 @@ be shortened or stopped once started.
 
 Out of the box Renew is an ordinary blocker, fine to use on a work Mac. The
 features that make it hard to stop or remove are **protections** you turn on
-yourself in **Setup → Protections** (see [Protections](#protections)).
+yourself in **Setup** (see [Protections](#protections)).
 
 ## Install
 
@@ -86,7 +86,7 @@ the same date-proof clock.
 
 ### Protections
 
-All four are off until you turn them on, in **Setup → Protections** or with
+All four are off until you turn them on, in **Setup** or with
 `renew protections on <name>` (`renew protections` lists them). Blocking works
 either way, and a running session can't be shortened or stopped either way.
 
