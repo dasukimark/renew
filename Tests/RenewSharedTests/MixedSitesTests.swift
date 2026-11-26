@@ -295,8 +295,10 @@ struct MixedSiteMatchingTests {
     @Test func flagLabelsAndReasons() {
         #expect(ActivityFlag.siteLabel("NSFW tag").label == "Site label: NSFW tag")
         #expect(ActivityFlag.pageWords("a, b, c").label == "Page words: a, b, c")
-        #expect(Report.reasons(for: [.siteLabel("NSFW tag"), .pageWords("a, b, c")])
-                == ["site's own label: NSFW tag", "explicit words on the page (a, b, c)"])
+        #expect(Report.reasons(for: [.siteLabel("NSFW tag"), .pageWords("a, b, c")]) == [Report.explicitReason])
+        #expect(Report.reasons(for: [.siteLabel("age-restricted video")]) == [Report.ageRestrictedReason])
+        #expect(Report.reasons(for: [.siteLabel("18+ community gate"), .domain(MonitorSettings.explicitListName, "a.test")])
+                == [Report.ageRestrictedReason, Report.explicitReason])
     }
 
     @Test func turningExplicitContentOffIsALoosening() {

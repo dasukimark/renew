@@ -220,7 +220,18 @@ public struct Report: Codable, Equatable, Sendable {
         return t.count > Flag.maxTitleLength ? String(t.prefix(Flag.maxTitleLength - 1)) + "…" : t
     }
 
-    /// Readable reasons, without repeats.
+    /// What a report says for anything explicit: an explicit site, explicit
+    /// words, a likely-explicit score or a site's own NSFW label. Partners
+    /// don't need to see which word or rule matched.
+    public static let explicitReason = "Potentially explicit content detected"
+    /// What a report says for a site's own 18+ or age gate.
+    public static let ageRestrictedReason = "Attempted to access age restricted content"
+    /// The built-in explicit words, normalized like `TermMatcher` matches them.
+    static let explicitWords = Set(ExplicitTerms.preset.map(TermMatcher.key))
+
+    /// Readable reasons, without repeats. Explicit flags of every kind read
+    /// the same (`explicitReason`), without the word or domain that matched;
+    /// your own words and lists are still named.
     public static func reasons(for flags: [ActivityFlag]) -> [String] {
         var out: [String] = []
         for f in flags {
@@ -228,14 +239,14 @@ public struct Report: Codable, Equatable, Sendable {
             switch f.kind {
             case .domain:
                 switch f.list {
-                case MonitorSettings.explicitListName: text = "explicit site"
+                case MonitorSettings.explicitListName: text = explicitReason
                 case MonitorSettings.customListName, nil: text = "watched site"
                 case let list?: text = "on list '\(list)'"
                 }
             case .term:
-                if f.isScore { text = "likely explicit (\(f.match))" }
-                else if f.isSiteLabel { text = "site's own label: \(f.match)" }
-                else if f.isPageWords { text = "explicit words on the page (\(f.match))" }
+                if f.isSiteLabel { text = SiteLabel.named(f.match)?.isAgeGate == true ? ageRestrictedReason : explicitReason }
+                else if f.isScore || f.isPageWords { text = explicitReason }
+                else if explicitWords.contains(TermMatcher.key(f.match)) { text = explicitReason }
                 else { text = "word: \(f.match)" }
             }
             if !out.contains(text) { out.append(text) }

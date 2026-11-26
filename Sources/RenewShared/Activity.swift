@@ -487,6 +487,9 @@ public struct TermMatcher: Sendable {
             .map(String.init)
     }
 
+    /// `words` joined back into one string, to compare terms by.
+    static func key(_ text: String) -> String { words(text).joined(separator: " ") }
+
     static func contains(_ words: [String], _ phrase: [String]) -> Bool {
         guard phrase.count <= words.count else { return false }
         if phrase.count == 1 { return words.contains(phrase[0]) }
@@ -579,10 +582,10 @@ public struct ActivityMatcher: Sendable {
                                     policy: mixed ? .mixed : .standard,
                                     extra: feedLabels.isEmpty ? [] : [(feedLabels.map { "site label: \($0)" }
                                         .joined(separator: ", "), Self.feedLabelWeight)]) {
-            for t in r.strong { out.append(.term(t)); found.insert(TermMatcher.words(t).joined(separator: " ")) }
+            for t in r.strong { out.append(.term(t)); found.insert(TermMatcher.key(t)) }
             if r.strong.isEmpty && r.flagged { out.append(.score(r.contributors.joined(separator: ", "))) }
         }
-        for t in terms.matches(variants: variants) where !found.contains(TermMatcher.words(t).joined(separator: " ")) {
+        for t in terms.matches(variants: variants) where !found.contains(TermMatcher.key(t)) {
             out.append(.term(t))
         }
         return Array(out.prefix(ActivityFlag.maxPerVisit))
