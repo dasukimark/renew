@@ -43,7 +43,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from render import CHECKIN, MAX_RECIPIENTS, as_list, recipients, when, zone_for
+from render import CHECKIN, MAX_RECIPIENTS, as_list, between, recipients, when, zone_for
 
 STATES = {"awake", "sleeping", "shutdown", "stopping", "removed", "witness", "monitoringStatus", "requestRemoval"}
 GAP_KINDS = {"recordsMissing", "recordUnverified", "heartbeatStalled"}
@@ -221,84 +221,78 @@ def _who(item):
     return item["mac"] + (f" ({item['user']})" if item.get("user") else "")
 
 
-AGAIN = "You'll get another email when it checks in again."
+AGAIN = "You'll get another email when it checks in."
 
 
 def lines_for(kind, item, at, beat=None):
-    """The sentences of a check-in email about `item` (the stored check-in)."""
+    """The sentences of a check-in email about `item` (the stored check-in).
+    The email's heading already names the Mac, so these don't."""
     zone = zone_for(item.get("timeZone"))
     who = _who(item)
     last = when(_dt(item["lastSeen"]), zone)
     age = gap(at - item["lastSeen"])
     if kind == "silent" and item["state"] == "stopping":
-        return [f"Renew's background service on {who} stopped at {last} without the Mac shutting down normally, "
-                f"and it hasn't checked in since.",
-                "It may have been stopped or removed, or the Mac shut down in a way Renew couldn't see.",
+        return [f"Renew stopped at {last} without a normal shutdown and hasn't checked in since.",
+                "It may have been stopped or removed, or the Mac lost power.",
                 AGAIN]
     if kind == "silent":
-        return [f"Renew on {who} last checked in at {last}, {age} ago. While the Mac is awake it checks in "
-                f"about every {gap(item.get('interval', 240))}.",
-                "That can mean Renew was removed, or the Mac has been awake but offline (or lost power). "
-                "If Renew was only stopped, it says so, with how long, once it runs again.",
+        return [f"No check-in since {last} ({age} ago). It checks in about every "
+                f"{gap(item.get('interval', 240))} while the Mac is awake.",
+                "Renew may have been removed, or the Mac is offline or lost power.",
                 AGAIN]
     if kind == "quiet":
-        doing = "going to sleep" if item["state"] == "sleeping" else "shutting down"
-        return [f"Renew on {who} said the Mac was {doing} at {last}, and it hasn't checked in for {age} since.",
-                "That's fine if the Mac has been put away. It can also mean Renew was removed while the Mac was off.",
+        doing = "went to sleep" if item["state"] == "sleeping" else "shut down"
+        return [f"The Mac {doing} at {last} and Renew hasn't checked in for {age}.",
+                "That's normal if the Mac is put away, but Renew may also have been removed while it was off.",
                 AGAIN]
     gaps = (beat or {}).get("newGaps") or []
     if kind == "back":
-        out = [f"Renew on {who} is checking in again, {age} after it last did."]
+        out = [f"Renew is checking in again after {age}."]
         if gaps:
-            out += [gap_line(g, who, zone) for g in gaps]
+            out += [gap_line(g, zone) for g in gaps]
         elif _covered(item, beat):
-            out.append("False alarm: Renew was running whenever the Mac was awake. The Mac was asleep, or "
-                       "couldn't reach the report server (it was offline, or the network blocked it).")
+            out.append("False alarm: Renew ran whenever the Mac was awake. The Mac was asleep, offline, or its network blocked Renew.")
         elif _restarted(item, beat):
             out.append(f"The Mac restarted in that time (at {when(_dt(beat['boot']), zone)}).")
         else:
-            out.append("The Mac didn't restart in that time, so Renew's background service was stopped, "
-                       "or the Mac was awake but offline.")
+            out.append("The Mac didn't restart, so Renew was stopped or the Mac was offline.")
         return out
     if kind == "stopped":
-        return [f"Renew on {who} said the Mac was shutting down at {last}, but the Mac didn't restart: "
-                f"Renew's background service was stopped for {age}."] + [gap_line(g, who, zone) for g in gaps]
+        return [f"Renew said the Mac was shutting down at {last}, but the Mac didn't restart: "
+                f"Renew was stopped for {age}."] + [gap_line(g, zone) for g in gaps]
     if kind in ("gap", "unverified", "stall"):
-        return [gap_line(g, who, zone) for g in gaps]
+        return [gap_line(g, zone) for g in gaps]
     if kind == "restart":
-        return [f"Renew on {who} restarted more than once without the Mac rebooting.",
-                f"Renew was back online as of {when(_dt(at), zone)}."]
+        return ["Renew restarted more than once without the Mac rebooting.",
+                f"It was back online at {when(_dt(at), zone)}."]
     if kind == "missed":
-        return [f"Renew on {who} missed an expected check-in while the Mac was expected to be awake.",
-                f"The server heard from Renew again at {when(_dt(at), zone)}, {age} after the previous check-in."]
+        return ["Renew missed a check-in while the Mac should have been awake.",
+                f"It checked in again at {when(_dt(at), zone)}, {age} after the last one."]
     if kind == "invite":
-        return [f"You were added as an accountability partner for Renew on {who}. Renew emails its partners "
-                "when it flags a visit, when monitoring is loosened, and if Renew stops running.",
-                "Please confirm that you agree to be a partner. If you don't know this person or don't want "
-                "these emails, choose Decline and you won't get any more."]
+        return [f"You were added as an accountability partner for Renew on {who}. You'll be emailed about "
+                "flagged visits, loosened monitoring, and if Renew stops running.",
+                "Don't know this person or don't want these emails? Choose Decline."]
     if kind == "removal":
-        return [f"The report server received a request to change monitoring for Renew on {who}.",
-                "While Renew remains installed, it keeps checking in while you decide. You can approve the request or choose to keep monitoring."]
+        return ["Someone asked to change monitoring on this Mac.",
+                "Nothing changes until you approve."]
     raise ValueError(kind)
 
 
-def gap_line(g, who, zone):
-    span = f"{when(_dt(g['from']), zone)} to {when(_dt(g['to']), zone)}"
+def gap_line(g, zone):
+    span = between(_dt(g["from"]), _dt(g["to"]), zone)
     if g.get("kind") == "recordUnverified":
-        return f"Renew's heartbeat record on {who} couldn't be verified ({span})."
+        return f"Renew's heartbeat record couldn't be verified ({span})."
     if g.get("kind") == "heartbeatStalled" and g.get("awakeSeconds") is not None:
-        return (f"Renew's guard on {who} saw the daemon heartbeat stand still for at least "
-                f"{gap(g['awakeSeconds'])} while the Mac was awake ({span}).")
+        return f"Renew's heartbeat stood still for at least {gap(g['awakeSeconds'])} while the Mac was awake ({span})."
     if g.get("kind") == "recordsMissing":
-        return (f"Renew's records on {who} were deleted or replaced with an old copy while it wasn't running "
-                f"({span}), so it can't tell whether Renew was stopped while the Mac was awake.")
+        return (f"Renew's records were deleted or replaced ({span}), "
+                "so it can't rule out being stopped while the Mac was awake.")
     if g.get("awakeSeconds") is not None and g.get("restarted"):
-        return (f"Renew wasn't running on {who} for {gap(g['awakeSeconds'])} while the Mac was awake, "
+        return (f"Renew wasn't running for {gap(g['awakeSeconds'])} while the Mac was awake, "
                 f"and the Mac restarted before it ran again ({span}).")
     if g.get("awakeSeconds") is not None:
-        return f"Renew wasn't running on {who} for {gap(g['awakeSeconds'])} while the Mac was awake ({span})."
-    return (f"Renew's background service on {who} was stopped, and the Mac restarted before it ran again "
-            f"({span}).")
+        return f"Renew wasn't running for {gap(g['awakeSeconds'])} while the Mac was awake ({span})."
+    return f"Renew was stopped and the Mac restarted before it ran again ({span})."
 
 
 def _covered(item, beat):
@@ -611,7 +605,7 @@ def _queue_email(item, report):
         if oldest is None:
             if len(queued[-1]["report"]["changes"]) > 1:
                 queued[-1]["report"]["changes"] = [queued[-1]["report"]["changes"][0],
-                                                  "This email omits some observations because the delivery queue is full."]
+                                                  "Some details were left out because the email queue was full."]
             if _json_size(queued) > MAX_PENDING_EMAIL_BYTES:
                 log.warning("check-in email queue full for %s", item["install"])
                 queued.pop()
