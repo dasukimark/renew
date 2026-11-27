@@ -6,6 +6,7 @@ import pytest
 
 import app
 import heartbeat
+import render
 from test_app import TOKEN, FakeSMTP, env, event, smtp  # noqa: F401 (fixtures)
 
 INSTALL = "11111111-2222-3333-4444-555555555555"
@@ -586,7 +587,7 @@ def test_records_missing_gap_wording(smtp, store, clock):
     g = dict(gap_body(restarted=True), kind="recordsMissing")
     app.handler(event(slim(gaps=[g])), None)
     text = sent(smtp)[0].get_body(("plain",)).get_content()
-    assert "records on Test Mac (tester) were deleted or replaced with an old copy" in text
+    assert "records were deleted or replaced" in text
 
 
 def test_unknown_gap_kind_is_an_ordinary_gap(smtp, store, clock):
@@ -746,7 +747,7 @@ def test_witness_reports_without_updating_daemon_last_seen(smtp, store, clock):
     assert item["lastSeen"] == T0 and item["state"] == "awake"
     app.handler(event(slim(gaps=[dict(gap, kind=None)])), None)
     message, = sent(smtp)
-    assert "heartbeat stand still for at least" in message.get_body(("plain",)).get_content()
+    assert "heartbeat stood still for at least" in message.get_body(("plain",)).get_content()
     assert store.items[INSTALL]["lastSeen"] == T0 + 300
 
 
@@ -765,7 +766,7 @@ def test_racing_witness_and_daemon_only_email_the_gap_once(store):
     store.before_put = lambda s: heartbeat.record_beat(witness, T0, s, send)
     heartbeat.record_beat(awake, T0, store, send)
     assert [m["kind"] for m in messages] == ["gap", "back"]
-    assert sum("Renew wasn't running on" in line for m in messages for line in m["changes"]) == 1
+    assert sum("Renew wasn't running for" in line for m in messages for line in m["changes"]) == 1
     assert store.items[INSTALL]["pendingEmails"] == []
 
 
@@ -945,3 +946,38 @@ def test_releasing_a_partner_doesnt_resend_an_open_removal_request(smtp, store, 
     item = store.items[INSTALL]
     assert item["removal"]["token"] == token and item["removal"]["removingPartners"] == ["other@test.invalid"]
     assert len(sent(smtp)) == 2
+
+
+def _every_checkin_body():
+    """kind -> body lines, for every check-in email kind and its variants."""
+    item = stored(last_seen=T0 - 3 * 3600)
+    g = {"from": T0 - 1200, "to": T0 - 900}
+    variants = {
+        "silent": [dict(item, state="stopping"), item],
+        "quiet": [dict(item, state="sleeping"), dict(item, state="shutdown")],
+    }
+    gaps = [dict(g, awakeSeconds=240), dict(g, awakeSeconds=900, restarted=True), dict(g, restarted=True),
+            dict(g, kind="recordsMissing"), dict(g, kind="heartbeatStalled", awakeSeconds=120),
+            dict(g, kind="recordUnverified")]
+    out = []
+    for kind in render.CHECKIN:
+        for it in variants.get(kind, [item]):
+            if kind == "back":
+                beats = [{"boot": BOOT_EPOCH, "coveredSince": T0 - 4 * 3600}, {"boot": BOOT_EPOCH + 600},
+                         {"boot": BOOT_EPOCH}, {"boot": BOOT_EPOCH, "newGaps": gaps[:1]}]
+            else:
+                beats = [{"boot": BOOT_EPOCH, "newGaps": [x]} for x in gaps]
+            for b in beats:
+                out.append((kind, heartbeat.lines_for(kind, it, T0, b)))
+    return out
+
+
+def test_checkin_emails_stay_short():
+    """Partner emails should stay brief (see AGENTS.md, "Writing partner emails")."""
+    for kind, lines in _every_checkin_body():
+        assert 1 <= len(lines) <= 3, (kind, lines)
+        for line in lines:
+            assert len(line) <= 170, (kind, line)
+            if kind != "invite":
+                assert "Test Mac" not in line and "tester" not in line, ("the heading already names the Mac", kind, line)
+        assert sum(len(line.split()) for line in lines) <= 50, (kind, lines)

@@ -147,7 +147,7 @@ final class Daemon: @unchecked Sendable {
             }
             if state.applyDueCoolingOffRemoval(at: r) {
                 log("uninstall cooling-off turned off (its wait ended while renewd was not running)")
-                notify("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
+                notify("The uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
             }
             state.checkpoint(at: r)
             if state.migrateMonitoring(to: consoleUser()?.uid) {
@@ -291,7 +291,7 @@ final class Daemon: @unchecked Sendable {
                 StateStore.save(state)
                 let unlocks = now.addingTimeInterval(UninstallPolicy.delay)
                 log("uninstall requested by uid \(uid); unlocks \(unlocks)")
-                reporter.add(changes: ["Someone asked to uninstall Renew. It can be removed after \(Self.dateText(unlocks)), if no block session is running then."], uid: uid)
+                reporter.add(changes: ["Someone asked to uninstall Renew. It can be removed after \(Self.dateText(unlocks)), outside block sessions."], uid: uid)
             }
 
         case .setSchedules:
@@ -375,7 +375,7 @@ final class Daemon: @unchecked Sendable {
                 state.uninstall = nil
                 StateStore.save(state)
                 log("uninstall request cancelled by uid \(uid)")
-                reporter.add(changes: ["The request to uninstall Renew was cancelled."], uid: uid)
+                reporter.add(changes: ["The uninstall request was cancelled."], uid: uid)
             }
         }
         return Response(ok: true, status: makeStatus(now, r))
@@ -450,7 +450,7 @@ final class Daemon: @unchecked Sendable {
         if abs(jump) >= Self.clockAlertThreshold, state.activeSession(at: r) == nil {
             // During a session `checkpoint` already reports this.
             log("clock moved \(Int(jump))s with schedules set; schedules follow the real time")
-            notify("The Mac's clock was set \(jump > 0 ? "forward" : "back") by \(DurationText.format(Int(abs(jump)))). Scheduled block sessions still start at the real time.",
+            notify("The Mac's clock was set \(jump > 0 ? "forward" : "back") by \(DurationText.format(Int(abs(jump)))). Block sessions still start on time.",
                    kind: "clock", every: 600)
         }
 
@@ -493,15 +493,15 @@ final class Daemon: @unchecked Sendable {
         if !change.turnedOn.isEmpty { log("protections turned on by uid \(uid): \(change.turnedOn.joined(separator: ", "))") }
         if !change.turnedOff.isEmpty {
             log("protections turned off by uid \(uid): \(change.turnedOff.joined(separator: ", "))")
-            reporter.add(changes: ["Renew protections were turned off: \(change.turnedOff.joined(separator: ", "))."], uid: uid)
+            reporter.add(changes: ["Protections turned off: \(change.turnedOff.joined(separator: ", "))."], uid: uid)
         }
         if change.coolingOffRemovalRequested, let when = state.coolingOffRemovalDate(at: r) {
             log("uid \(uid) asked to turn off the uninstall cooling-off; it turns off \(when)")
-            reporter.add(changes: ["Someone asked to turn off Renew's uninstall cooling-off. It turns off after \(Self.dateText(when)); after that Renew can be uninstalled without waiting."], uid: uid)
+            reporter.add(changes: ["Someone asked to turn off the uninstall cooling-off. It turns off after \(Self.dateText(when))."], uid: uid)
         }
         if change.coolingOffRemovalCancelled {
             log("uid \(uid) cancelled turning off the uninstall cooling-off")
-            reporter.add(changes: ["The request to turn off Renew's uninstall cooling-off was cancelled."], uid: uid)
+            reporter.add(changes: ["The request to turn off the uninstall cooling-off was cancelled."], uid: uid)
         }
         return nil
     }
@@ -521,7 +521,7 @@ final class Daemon: @unchecked Sendable {
         state.setActivity(new, for: uid)
         StateStore.save(state)
         log("Activity recording turned \(new.enabled ? "on" : "off") by uid \(uid)")
-        if !new.enabled { reporter.add(changes: ["Activity recording was turned off, so nothing is checked by the Monitor."], uid: uid) }
+        if !new.enabled { reporter.add(changes: ["Activity recording was turned off, so the Monitor checks nothing."], uid: uid) }
         return nil
     }
 
@@ -670,9 +670,9 @@ final class Daemon: @unchecked Sendable {
         let partnersChanged = old != nil && new != nil && Set(old!.partnerEmails) != Set(new!.partnerEmails)
         if let old {
             if new == nil {
-                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were turned off on this Mac. The report server may still send check-in alerts.", uid: uid)
+                reporter.handOff(from: oldTarget, farewell: "Email reports were turned off. Check-in alerts may still come.", uid: uid)
             } else if new!.url != old.url || new!.token != old.token {
-                reporter.handOff(from: oldTarget, farewell: "Email reports from Renew were moved to a different report server. This server may still send check-in alerts.", uid: uid)
+                reporter.handOff(from: oldTarget, farewell: "Email reports moved to a different server. Check-in alerts may still come from this one.", uid: uid)
             } else if partnersChanged {
                 // What's waiting stays with the partners it was meant for:
                 // new partners don't get visits from before they were added.
@@ -689,9 +689,9 @@ final class Daemon: @unchecked Sendable {
         if old == nil, new != nil { alive.resume() }
         log("email reports \(new == nil ? "turned off" : "set to \(new!.partnerEmails.joined(separator: ", ")) via \(new!.url ?? "the built-in server")") by uid \(uid)")
         if let new, partnersChanged {
-            reporter.add(changes: ["Email reports from Renew now go to: \(new.partnerEmails.joined(separator: ", "))."], uid: uid)
+            reporter.add(changes: ["Email reports now go to: \(new.partnerEmails.joined(separator: ", "))."], uid: uid)
         } else if new != nil {
-            reporter.add(changes: ["Email reports from Renew are on. You'll get an email when the Monitor flags a visit, and when Activity or the Monitor is turned off or watches less. Renew also checks in with the report server regularly. If it isn't running for more than a minute while the Mac is awake, you'll be emailed when it runs again; if it stops checking in for 2 hours while the Mac is awake, you'll be emailed then."], uid: uid)
+            reporter.add(changes: ["Email reports are on. You'll be emailed about flagged visits, loosened monitoring, and if Renew stops running."], uid: uid)
         }
         submitMonitoringRequest()
         heartbeater.configurationChanged()
@@ -764,7 +764,7 @@ final class Daemon: @unchecked Sendable {
                                               token: builtIn ? nil : server.token)
         }
         let to = state.reports?.partnerEmails.joined(separator: ", ") ?? ""
-        reporter.add(changes: ["A partner declined the removal, so email reports from Renew go to: \(to)."],
+        reporter.add(changes: ["A partner declined the removal. Email reports go to: \(to)."],
                      uid: consoleUID ?? consoleUser()?.uid ?? 0)
         if wasOff {
             // Downtime from while reports were off isn't the partner's business.
@@ -1082,7 +1082,7 @@ final class Daemon: @unchecked Sendable {
         if state.applyDueCoolingOffRemoval(at: r) {
             StateStore.save(state)
             log("uninstall cooling-off turned off (its wait is over)")
-            notify("Renew's uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
+            notify("The uninstall cooling-off is now off. Renew can be uninstalled without waiting, between block sessions.")
         }
         runSchedules(r)
         reporter.tick()
@@ -1100,7 +1100,7 @@ final class Daemon: @unchecked Sendable {
             && !FileManager.default.fileExists(atPath: Paths.stateFile) {
             log("state file was removed; rewriting")
             StateStore.save(state)
-            if active != nil { notify("Renew's session file was deleted during a block session. Renew restored it.", kind: "state-deleted", every: 600) }
+            if active != nil { notify("Renew's session file was deleted during a block session and restored.", kind: "state-deleted", every: 600) }
         }
         server.ensureBound()
         updateConsole(now)
@@ -1124,7 +1124,7 @@ final class Daemon: @unchecked Sendable {
             let restored = SelfRepair.repair(deep: deep)
             if !restored.isEmpty {
                 log("restored during a session: \(restored.joined(separator: ", "))")
-                notify("Renew's files were deleted or changed during a block session. Renew put them back: \(restored.joined(separator: ", ")).",
+                notify("Renew's files were changed during a block session and restored: \(restored.joined(separator: ", ")).",
                        kind: "repair", every: 600)
             }
             ensureAgent(now)
@@ -1160,7 +1160,7 @@ final class Daemon: @unchecked Sendable {
             lastCheckpointSave = r.mono
             log("clock moved \(Int(shift))s during a session; session end unaffected (now \(describe(state.activeSession(at: r))))")
             if abs(shift) >= Self.clockAlertThreshold {
-                notify("The Mac's clock was set \(shift > 0 ? "forward" : "back") by \(DurationText.format(Int(abs(shift)))) during a block session. The session still ends on time.",
+                notify("The Mac's clock was set \(shift > 0 ? "forward" : "back") by \(DurationText.format(Int(abs(shift)))) during a block session. It still ends on time.",
                        kind: "clock", every: 600)
             }
         } else if r.mono &- lastCheckpointSave >= Self.checkpointInterval {

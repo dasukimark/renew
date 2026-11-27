@@ -154,14 +154,19 @@ def group_by_site(flags):
     return list(groups.items())
 
 
-def span(flags, zone):
-    """'Tue 17 Nov, 14:02–14:09 EST' for the visits' time range."""
-    first = local(min(f["start"] for f in flags), zone)
-    last = local(max(f["start"] + timedelta(seconds=f["seconds"]) for f in flags), zone)
+def between(start, end, zone):
+    """'Tue 17 Nov, 14:02–14:09 EST', with the end's day only when it differs."""
+    first, last = local(start, zone), local(end, zone)
     day = first.strftime("%a %d %b")
     if first.date() == last.date():
         return f"{day}, {first:%H:%M}–{last:%H:%M %Z}"
     return f"{day} {first:%H:%M} – {last:%a %d %b %H:%M %Z}"
+
+
+def span(flags, zone):
+    """The visits' time range (see `between`)."""
+    return between(min(f["start"] for f in flags),
+                   max(f["start"] + timedelta(seconds=f["seconds"]) for f in flags), zone)
 
 
 def pill(reason):
@@ -242,7 +247,7 @@ def build_email(report, sender, to=None):
     if report["kind"] == "flags":
         subject = f"Renew report: {plural(n, 'flagged visit')} on {report['mac']}"
         heading = plural(n, "flagged visit")
-        sub = f"on {who}" + (f" · {span(flags, zone)}" if flags else "")
+        sub = f"on {who} · {span(flags, zone) if flags else when(report['sentAt'], zone)}"
         preheader = f"{plural(n, 'flagged visit')} on {plural(len(sites), 'site')}"
     elif report["kind"] in CHECKIN:
         subject_t, heading, _ = CHECKIN[report["kind"]]
@@ -276,8 +281,7 @@ def build_email(report, sender, to=None):
     approval_url = report.get("approvalURL")
     if approval_url:
         text += ["", f"{report.get('actionLabel', 'Review the request')}: {approval_url}", "Renew will not ask for a password."]
-    text += ["", f"Sent by Renew at {when(report['sentAt'], zone)}. Sites are shown without links.",
-             f"Report {report['id']}"]
+    text += ["", f"Sent by Renew. Sites are shown without links. Report {report['id']}"]
 
     # HTML.
     body = []
@@ -323,8 +327,7 @@ def build_email(report, sender, to=None):
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{''.join(body)}</table>
 </td></tr>
 <tr><td style="padding:16px 28px 22px;border-top:1px solid {LINE};font-size:12px;line-height:18px;color:{FAINT}">
-Sent automatically by Renew at {html.escape(when(report['sentAt'], zone))}. Sites are shown without links, and full
-addresses are never included.<br>Report {html.escape(report['id'])}
+Sent by Renew. Sites are shown without links. Report {html.escape(report['id'])}
 </td></tr>
 </table>
 </td></tr></table>

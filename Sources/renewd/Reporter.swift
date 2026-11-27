@@ -62,7 +62,7 @@ final class Reporter: @unchecked Sendable {
     func sendTest(uid: uid_t) -> Bool {
         guard let target = destination() else { return false }
         let report = Report(mac: Report.macName, user: Self.userName(uid), kind: .test, sentAt: Date(),
-                            changes: ["Test report from Renew. If you're reading this, email reports work."])
+                            changes: ["Email reports work."])
         if logOnly { logDev(report); return true }
         let partnerLog = partnerLog
         ReportClient.post(report, to: target) { outcome in

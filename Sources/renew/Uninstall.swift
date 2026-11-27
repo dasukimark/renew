@@ -131,7 +131,7 @@ enum Uninstall {
         }
         for target in monitored {
             let last = Report(mac: Report.macName, user: user, kind: .change, sentAt: Date(),
-                              changes: ["Renew was uninstalled from this Mac. Check-ins have stopped. Server monitoring needs a partner's approval to end."])
+                              changes: ["Renew was uninstalled. Check-ins stopped; ending monitoring needs a partner's approval."])
             append(last, to: target)
         }
         if !groups.isEmpty { print("Emailing your accountability partners…") }
